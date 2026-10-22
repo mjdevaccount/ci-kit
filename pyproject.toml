@@ -1,6 +1,6 @@
 [project]
 name = "ci-kit"
-version = "1.0.0"
+version = "1.1.0"
 description = "Reusable CI gates: the doc-reference gate, the secret-argv lint, the armed-PR updater, the pin-drift check, and the lint-gate kit (ratchet, discover, site_lint). Every gate exits 0 clean / 1 findings / 2 could-not-look."
 readme = "README.md"
 license = "MIT"
