@@ -1,0 +1,68 @@
+# ci-kit's own gate. Everything a caller gets is proven here first, against THIS checkout: the
+# package through the local action (`uses: ./`), so a broken action.yml fails here and not in
+# every caller at once; the must-fire suite (bad -> 1, good -> 0, blind -> 2); every selftest; and
+# actionlint over the reusable workflows. Plus the kit's own gitleaks workflow, called the way a
+# consumer calls it.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v10.3.0
+      - run: uv sync --frozen
+      - name: ruff
+        run: uv run ruff check --output-format=github .
+      - name: must-fire suite
+        run: uv run pytest -q
+      # the action exactly as callers get it, from this checkout
+      - name: doc gate on ci-kit itself (through the action)
+        uses: ./
+        with:
+          tool: ci-doc-lint
+      - name: doc gate selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-doc-lint
+          args: --selftest
+      - name: secret-argv selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-secret-argv-lint
+          args: --selftest
+      - name: secret-argv gate on ci-kit itself (through the action)
+        uses: ./
+        with:
+          tool: ci-secret-argv-lint
+      - name: pin-drift blind direction (this repo pins nothing -> exit 2, never a clean 0)
+        run: |
+          set +e
+          uvx --quiet --from . ci-pin-drift --file pyproject.toml --remote "https://github.com/$GITHUB_REPOSITORY.git"
+          rc=$?
+          set -e
+          [ "$rc" -eq 2 ] || { echo "::error::expected exit 2 (no pin found), got $rc"; exit 1; }
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:latest -color
+
+  gitleaks:
+    name: gitleaks (secret scan)
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/gitleaks.yml
+    with:
+      mode: history

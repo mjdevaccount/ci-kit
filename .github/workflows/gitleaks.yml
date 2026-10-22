@@ -1,0 +1,87 @@
+# gitleaks -- a secret scan, in the three shapes repos actually run.
+#
+#   jobs:
+#     gitleaks:
+#       name: gitleaks (secret scan)
+#       permissions: { contents: read, pull-requests: read }   # `action` mode lists a PR's commits
+#       uses: mjdevaccount/ci-kit/.github/workflows/gitleaks.yml@v1
+#       with: { mode: tree }
+#
+# Reports as "<caller job name> / scan". The modes are NOT merged into one because repos differ
+# on purpose:
+#   tree     docker, WORKING TREE only (--no-git). For a history that carries known-leaked items
+#            pending rotation/purge, where a full-history scan would drown real signal.
+#   history  docker, FULL history, optionally with a custom config and a .gitleaksignore that
+#            baselines a known item by fingerprint, loud on anything new.
+#   action   gitleaks/gitleaks-action over full history, PR-scoped on pull_request. Needs
+#            pull-requests: read or it 403s WITHOUT SCANNING -- red for "could not look",
+#            indistinguishable from red for "found a secret".
+# Every mode fails the job on a finding. None of them may be baselined away: rotate the secret.
+name: gitleaks
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: tree | history | action
+        type: string
+        default: tree
+      config:
+        description: gitleaks config path relative to the repo root ('' = the built-in ruleset)
+        type: string
+        default: ""
+      ignore-path:
+        description: .gitleaksignore path relative to the repo root, passed explicitly because gitleaks resolves it against the container cwd ('' = none)
+        type: string
+        default: ""
+      image:
+        description: gitleaks docker image for tree/history modes
+        type: string
+        default: zricethezav/gitleaks:latest
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: scan
+    # HOSTED ON PURPOSE, no runner input: it holds a token (action mode) and drives the docker
+    # socket (tree/history), and a secret-holder never joins a shared self-hosted pool.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Refuse an unknown mode
+        if: inputs.mode != 'tree' && inputs.mode != 'history' && inputs.mode != 'action'
+        run: |
+          echo "::error::gitleaks mode '${{ inputs.mode }}' is not tree|history|action: NOTHING WAS SCANNED"
+          exit 2
+      - uses: actions/checkout@v7
+        with:
+          # full history for history/action: a leak buried two commits deep must still fail
+          fetch-depth: ${{ inputs.mode == 'tree' && 1 || 0 }}
+      - name: gitleaks detect (docker, ${{ inputs.mode }})
+        if: inputs.mode == 'tree' || inputs.mode == 'history'
+        env:
+          MODE: ${{ inputs.mode }}
+          CONFIG: ${{ inputs.config }}
+          IGNORE: ${{ inputs.ignore-path }}
+          IMAGE: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          args=(detect --source=/repo --no-banner --redact)
+          [ "$MODE" = tree ] && args+=(--no-git)
+          [ -n "$CONFIG" ] && args+=(--config "/repo/$CONFIG")
+          [ -n "$IGNORE" ] && args+=(--gitleaks-ignore-path "/repo/$IGNORE")
+          # GIT_CONFIG_* env: the container's root git refuses the runner-owned checkout
+          # ("dubious ownership") without safe.directory; env-var config needs no wrapper.
+          docker run --rm -v "$PWD:/repo" \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
+            "$IMAGE" "${args[@]}"
+      - name: gitleaks (action, full history)
+        if: inputs.mode == 'action'
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

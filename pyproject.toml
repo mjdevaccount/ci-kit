@@ -1,0 +1,34 @@
+[project]
+name = "ci-kit"
+version = "1.0.0"
+description = "Reusable CI gates: the doc-reference gate, the secret-argv lint, the armed-PR updater, the pin-drift check, and the lint-gate kit (ratchet, discover, site_lint). Every gate exits 0 clean / 1 findings / 2 could-not-look."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+ci-doc-lint = "ci_kit.doc_lint:main"
+ci-secret-argv-lint = "ci_kit.secret_argv:main"
+ci-pr-autoupdate = "ci_kit.pr_autoupdate:main"
+ci-pin-drift = "ci_kit.pin_drift:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ci_kit"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "PLR0915"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

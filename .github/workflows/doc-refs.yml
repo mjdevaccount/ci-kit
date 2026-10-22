@@ -1,0 +1,54 @@
+# doc-refs -- the doc gate (ci-doc-lint), callable by any repo.
+#
+#   jobs:
+#     doc-refs:
+#       uses: mjdevaccount/ci-kit/.github/workflows/doc-refs.yml@v1
+#       with:
+#         args: --exempt-prefix u/ --code-doc-dir docs --code-doc-dir runbooks   # optional
+#
+# The check it reports is "<caller job> / lint", e.g. `doc-refs / lint`; that is the name to put
+# in branch protection. It asks whether any path a doc names FELL FROM TRACKED TO GONE, and it
+# needs the full history to know a path ever existed: fetch-depth 0 below is load-bearing, and the
+# tool exits 2 ("did not finish looking") on a shallow clone rather than pass blind.
+name: doc-refs
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: >-
+          runs-on as a JSON label list, e.g. '["self-hosted","home"]' ('' = the caller repo's
+          CI_RUNNER variable, else ubuntu-latest). Holds no secret, so it may join a shared pool.
+        type: string
+        default: ""
+      args:
+        description: extra ci-doc-lint flags (--exempt-prefix, --code-doc-dir); none by default
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    # vars resolves against the CALLER's repo, so a repo with its own runners opts in by its own
+    # CI_RUNNER and a repo without them stays hosted -- setting CI_RUNNER where no runner is
+    # registered queues forever, so the variable is the switch, never a default here.
+    runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # the gate first: a selftest-only run would be green while never looking at the corpus
+      - name: doc references that once existed and are now gone
+        uses: mjdevaccount/ci-kit@v1
+        with:
+          tool: ci-doc-lint
+          args: ${{ inputs.args }}
+      - name: doc gate selftest (each rule still fires on text that should trip it)
+        uses: mjdevaccount/ci-kit@v1
+        with:
+          tool: ci-doc-lint
+          args: --selftest
