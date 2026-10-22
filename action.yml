@@ -1,0 +1,44 @@
+name: ci-kit
+description: >-
+  Run one ci_kit console script (ci-doc-lint, ci-secret-argv-lint, ci-pr-autoupdate, ci-pin-drift)
+  against the caller's checkout, installed with uvx from THIS action's own download of ci-kit.
+
+# WHY AN ACTION AND NOT `uvx --from git+https://github.com/<owner>/ci-kit@v1` IN EVERY WORKFLOW.
+# The runner downloads this action at the pinned ref, so installing from `$GITHUB_ACTION_PATH`
+# runs EXACTLY the source the workflow was pinned to: no second ref to drift, no network fetch to
+# fail half-way, no credential. The reusable workflows in .github/workflows call this action; a
+# consumer may also call it directly as a step.
+
+inputs:
+  tool:
+    description: console script to run (ci-doc-lint | ci-secret-argv-lint | ci-pr-autoupdate | ci-pin-drift)
+    required: true
+  args:
+    description: arguments, word-split by the shell
+    required: false
+    default: ""
+
+outputs:
+  relock:
+    description: ci-pr-autoupdate only -- JSON list of PRs newly labelled as conflicting
+    value: ${{ steps.run.outputs.relock }}
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@v10.3.0
+    - name: ${{ inputs.tool }} ${{ inputs.args }}
+      id: run
+      shell: bash
+      env:
+        TOOL: ${{ inputs.tool }}
+        ARGS: ${{ inputs.args }}
+      run: |
+        set -euo pipefail
+        case "$TOOL" in
+          ci-doc-lint|ci-secret-argv-lint|ci-pr-autoupdate|ci-pin-drift) ;;
+          *) echo "::error::unknown ci_kit tool: $TOOL"; exit 2 ;;
+        esac
+        # word-split ARGS on purpose; every caller passes plain flags
+        # shellcheck disable=SC2086
+        uvx --quiet --from "$GITHUB_ACTION_PATH" "$TOOL" $ARGS

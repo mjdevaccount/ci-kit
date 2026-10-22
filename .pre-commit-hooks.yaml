@@ -1,0 +1,23 @@
+# pre-commit hooks. In a repo's .pre-commit-config.yaml:
+#
+#   - repo: https://github.com/mjdevaccount/ci-kit
+#     rev: v1.0.0
+#     hooks:
+#       - id: doc-refs
+#         args: [--exempt-prefix, "u/"]   # optional
+#       - id: secret-argv                 # repos whose shell reaches into containers
+#
+# Both scan the WHOLE tracked tree, not the staged files: a doc goes stale when the file it names
+# is deleted, and that commit touches no markdown at all.
+- id: doc-refs
+  name: doc references that once existed and are now gone
+  entry: ci-doc-lint
+  language: python
+  pass_filenames: false
+  always_run: true
+- id: secret-argv
+  name: no secret expanded into a host-side docker exec / curl / ssh argv
+  entry: ci-secret-argv-lint
+  language: python
+  pass_filenames: false
+  always_run: true

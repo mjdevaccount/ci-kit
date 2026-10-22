@@ -1,0 +1,93 @@
+# pr-autoupdate -- merge main into every open PR with auto-merge ARMED (ci-pr-autoupdate).
+#
+# A repo calls this on each push to main, which is what makes "require branches to be up to
+# date" affordable: strict protection with no updater stalls every armed PR BEHIND.
+#
+#   on:
+#     push: { branches: [main] }
+#     workflow_dispatch:
+#   concurrency: { group: pr-autoupdate, cancel-in-progress: false }
+#   jobs:
+#     update:
+#       uses: mjdevaccount/ci-kit/.github/workflows/pr-autoupdate.yml@v1
+#       secrets:
+#         token: ${{ secrets.PR_UPDATE_TOKEN }}     # whatever YOUR repo names it
+#         ntfy-url: ${{ secrets.NTFY_URL }}         # optional
+#
+# The secret NAMES are the caller's: this workflow declares `token` and `ntfy-url` and the caller
+# maps its own repository secrets onto them (`secrets: inherit` works only if the caller's secrets
+# carry these exact names).
+#
+# A conflicting PR gets the conflict label and ONE ntfy page (if `ntfy-url` is given); the label
+# is the dedup. Newly labelled PR numbers come back as output `relock` (JSON list) for a caller
+# that can relock a lockfile.
+#
+# UNCONFIGURED IS RED: with no `token` the job fails naming it. GITHUB_TOKEN is NOT a fallback --
+# a push made with it fires no workflow, so every updated PR would wait on checks that never
+# start, which looks exactly like "CI pending".
+name: pr-autoupdate
+
+on:
+  workflow_call:
+    inputs:
+      review-workflow:
+        description: workflow file whose queued/running run on a PR's branch defers its update ('' = none)
+        type: string
+        default: ""
+      tracker:
+        description: issue number whose row for a PR a conflict page quotes (0 = none)
+        type: number
+        default: 0
+      relock:
+        description: the caller relocks lockfile-only conflicts from the `relock` output
+        type: boolean
+        default: false
+      label:
+        description: the conflict label (the page dedup)
+        type: string
+        default: conflict
+    secrets:
+      token:
+        description: fine-grained PAT with contents, pull requests and workflows RW, actions read, on the caller repo
+        required: true
+      ntfy-url:
+        description: an ntfy topic URL to page on a NEW conflict ('' = no page)
+        required: false
+    outputs:
+      relock:
+        description: JSON list of PR numbers newly labelled as conflicting by this run
+        value: ${{ jobs.update.outputs.relock }}
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    name: update armed PRs
+    # HOSTED ON PURPOSE, no runner input: it holds the token (push to every armed PR), and a
+    # secret-holder never joins a shared self-hosted pool.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      relock: ${{ steps.update.outputs.relock }}
+    env:
+      GH_TOKEN: ${{ secrets.token }}
+      NTFY_URL: ${{ secrets.ntfy-url }}
+    steps:
+      - name: Refuse to run unconfigured
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::secret 'token' is empty for $GITHUB_REPOSITORY: armed PRs are NOT being updated. Map a fine-grained token (contents, pull requests, workflows: read+write; actions: read) onto 'token' in the workflow_call secrets."
+            exit 1
+          fi
+      - name: Update
+        id: update
+        uses: mjdevaccount/ci-kit@v1
+        with:
+          tool: ci-pr-autoupdate
+          args: >-
+            --repo ${{ github.repository }}
+            --tracker ${{ inputs.tracker }}
+            --label ${{ inputs.label }}
+            ${{ inputs.review-workflow != '' && format('--review-workflow {0}', inputs.review-workflow) || '' }}
+            ${{ inputs.relock && '--relock' || '' }}
