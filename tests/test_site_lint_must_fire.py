@@ -11,7 +11,7 @@ import pytest
 from conftest import git, write
 
 from ci_kit import site_lint
-from ci_kit.ratchet import RatchetCount
+from ci_kit.ratchet import RatchetCount, RatchetSet
 
 
 def _now_calls(source: str, origin: str) -> list[int]:
@@ -134,3 +134,134 @@ def test_selftest_flag_reports(capsys) -> None:
                     gained="x", advice=[])
     assert site_lint.run(["--selftest"], **args([])) == 0
     assert site_lint.run(["--selftest"], **args(["nope"])) == 1
+    # a gate that shipped exiting 2 on a failed selftest keeps 2
+    assert site_lint.run(["--selftest"], selftest_fail=2, **args(["nope"])) == 2
+
+
+# -- the set-of-keys shape: same CLI, a key the baseline does not list is the regression ----------
+
+def _set_cli(base: Path, keys: set[str], argv: list[str], **hooks) -> int:
+    return site_lint.run(argv, gate="toy", scan=lambda: set(keys), scanned=lambda: 5,
+                         scan_dirs=["svc"], ratchet=RatchetSet(base, header="# toy set\n"),
+                         selftest=lambda: [], gained="handler(s)", advice=["fix it"], floor=1,
+                         **hooks)
+
+
+def test_set_new_key_is_1_and_names_it(tmp_path: Path, capsys) -> None:
+    base = tmp_path / "b.txt"
+    assert _set_cli(base, {"a.py::f"}, ["--write"]) == 0
+    assert base.read_text(encoding="utf-8") == "# toy set\na.py::f\n"
+    assert _set_cli(base, {"a.py::f"}, []) == 0                     # unchanged
+    capsys.readouterr()
+    assert _set_cli(base, {"a.py::f", "b.py::g"}, []) == 1          # new key -> fails
+    out = capsys.readouterr().out
+    assert "1 new handler(s) the baseline does not list" in out
+    assert "  b.py::g" in out and "a.py::f" not in out.split("list:")[1]
+    assert "  fix it" in out
+
+
+def test_set_shrunk_is_0_with_a_tighten_note(tmp_path: Path, capsys) -> None:
+    base = tmp_path / "b.txt"
+    _set_cli(base, {"a", "b"}, ["--write"])
+    capsys.readouterr()
+    assert _set_cli(base, {"a"}, []) == 0
+    assert "1 baseline key(s) gone - tighten with --write" in capsys.readouterr().out
+
+
+def test_set_scan_returning_a_mapping_counts_by_keys(tmp_path: Path) -> None:
+    base = tmp_path / "b.txt"
+    rs = RatchetSet(base)
+    rs.write({"a"})
+    assert site_lint.run([], gate="toy", scan=lambda: {"a": 300, "b": 12}, scanned=lambda: 5,
+                         scan_dirs=["svc"], ratchet=rs, selftest=lambda: [], gained="x",
+                         advice=[], floor=1) == 1
+
+
+def test_set_write_flags_spelling(tmp_path: Path) -> None:
+    base = tmp_path / "b.txt"
+    assert _set_cli(base, {"a"}, ["--write-baseline"], write_flags=("--write", "--write-baseline")) == 0
+    assert base.exists()
+    # a spelling the gate does not accept is NOT a write: the check runs (and here passes)
+    assert _set_cli(base, {"a"}, ["--write-baseline"]) == 0
+    assert base.read_text(encoding="utf-8").splitlines()[-1] == "a"
+
+
+def test_set_under_floor_is_2(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as e:
+        site_lint.run([], gate="toy", scan=set, scanned=lambda: 0, scan_dirs=["svc"],
+                      ratchet=RatchetSet(tmp_path / "b.txt"), selftest=lambda: [], gained="x",
+                      advice=[], floor=1)
+    assert e.value.code == 2
+
+
+def test_a_scan_raising_systemexit_2_passes_through(tmp_path: Path) -> None:
+    """A gate's own refusal (a missing input, a second floor) raised inside scan stays 2."""
+    def refuse() -> set[str]:
+        raise SystemExit(2)
+    with pytest.raises(SystemExit) as e:
+        site_lint.run([], gate="toy", scan=refuse, scanned=lambda: 9, scan_dirs=["svc"],
+                      ratchet=RatchetSet(tmp_path / "b.txt"), selftest=lambda: [], gained="x",
+                      advice=[], floor=1)
+    assert e.value.code == 2
+
+
+# -- the voice hooks: the mechanics are the kit's, the words stay the gate's ---------------------
+
+def test_count_hooks_replace_every_line(new_repo, capsys) -> None:
+    r = _repo(new_repo, {"svc/a.py": "now()\n"})
+    rc = RatchetCount(r / "baseline.txt", header="# toy\n")
+    state: dict[str, int] = {}
+
+    def scan() -> dict[str, int]:
+        counts, state["n"] = site_lint.count_sites(r, ["svc"], [], _now_calls, gate="toy")
+        return counts
+
+    hooks = dict(header=lambda n: f"HEADER {n}",
+                 describe=lambda rel, now, base: f"{'NEW' if base == 0 else 'GREW'}: {rel} {base}->{now}",
+                 ok=lambda cur, slack: f"OKLINE {sum(cur.values())} slack={len(slack)}",
+                 written=lambda cur: f"WROTE {len(cur)}")
+
+    def cli(argv):
+        return site_lint.run(argv, gate="toy", scan=scan, scanned=lambda: state["n"], scan_dirs=["svc"],
+                             ratchet=rc, selftest=lambda: [], gained="g", advice=[], floor=1, **hooks)
+
+    assert cli(["--write"]) == 0
+    assert capsys.readouterr().out.strip() == "WROTE 1"
+    assert cli([]) == 0
+    assert capsys.readouterr().out.strip() == "OKLINE 1 slack=0"
+    write(r / "svc/a.py", "now()\nnow()\n")
+    write(r / "svc/b.py", "now()\n")
+    git(r, "add", "svc/b.py")
+    assert cli([]) == 1
+    out = capsys.readouterr().out
+    assert "HEADER 2" in out and "GREW: svc/a.py 1->2" in out and "NEW: svc/b.py 0->1" in out
+    write(r / "svc/a.py", "x\n")
+    git(r, "rm", "-q", "--cached", "svc/b.py")
+    assert cli([]) == 0
+    assert capsys.readouterr().out.strip() == "OKLINE 0 slack=1"
+
+
+def test_hard_findings_fail_with_a_clean_ratchet_and_print(tmp_path: Path, capsys) -> None:
+    """A finding no baseline grants (a bare waiver) fails even when the ratchet is satisfied --
+    and the empty-hard path stays clean, the other direction."""
+    base = tmp_path / "b.txt"
+    _set_cli(base, {"a"}, ["--write"])
+    capsys.readouterr()
+    assert _set_cli(base, {"a"}, [], hard=lambda cur: []) == 0
+    assert _set_cli(base, {"a"}, [], hard=lambda cur: [f"bare waiver near {sorted(cur)[0]}"]) == 1
+    out = capsys.readouterr().out
+    assert "  bare waiver near a" in out
+    assert "the baseline does not list" not in out, "no regression -> no regression header"
+
+
+def test_hard_findings_do_not_block_a_write(tmp_path: Path) -> None:
+    base = tmp_path / "b.txt"
+    assert _set_cli(base, {"a"}, ["--write"], hard=lambda cur: ["x"]) == 0
+
+
+def test_set_describe_hook(tmp_path: Path, capsys) -> None:
+    base = tmp_path / "b.txt"
+    _set_cli(base, set(), ["--write"])
+    capsys.readouterr()
+    assert _set_cli(base, {"k"}, [], describe=lambda k: f"NEW: {k} -- explain") == 1
+    assert "  NEW: k -- explain" in capsys.readouterr().out
