@@ -99,7 +99,11 @@ pre-commit:
   dirs, a stamp and a total index are all flags. Commit them in an args file and run
   `ci-manual-lint @scripts/manual_lint.args` so CI and a workstation sweep read the same rules.
 - `ci-guard-selfproof` reads `scripts/` for `lint_*` by default; `--scripts`, `--prefix`,
-  `--baseline` and `--js` (prove `.mjs`/`.js` guards through `node <guard> --selftest`) are yours.
+  `--baseline` and `--js` (prove `.mjs`/`.js` guards through `node <guard> --selftest`, which
+  must exit 0 AND print a last line `<name> selftest: OK`) are yours. **Run it where your guards'
+  dependencies are installed** (`uv run`, or `pip install` ci-kit into the CI python): importing
+  a guard imports what it imports. The action's isolated uvx environment holds ci-kit alone, so
+  it fits only a repo whose guards are stdlib-only.
 - `pr-autoupdate.yml` declares generic secret names; `--label` renames the conflict label.
 - The tree a gate reads is `--root`, else `CI_KIT_ROOT`, else the git toplevel holding the
   working directory. Never the tool's own location.

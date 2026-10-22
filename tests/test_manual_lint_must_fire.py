@@ -45,6 +45,11 @@ def test_good_every_pointer_resolves_is_0(new_repo) -> None:
     ("service/gone/", "`service/gone/` referenced in CLAUDE.md but not found"),
     ("service/app.py:96-204", None),          # the line pin is stripped, so this one resolves
     ("service/gone.py:96-204", "`service/gone.py` referenced"),
+    ("service/gone.py:main", "`service/gone.py` referenced"),       # a symbol pin
+    ("service/gone.py::test_x", "`service/gone.py` referenced"),    # a pytest node id
+    ("docs/RUNBOOK.md#setup", None),                                # an anchor
+    ("service/app.py@v1", None),                                    # a ref
+    ("docs/GONE.md#setup", "`docs/GONE.md` referenced"),
 ])
 def test_bad_pointer_is_1(new_repo, ptr: str, needle: str | None) -> None:
     r = _repo(new_repo, f"The router lives in `{ptr}`.\n")
@@ -61,10 +66,12 @@ def test_bad_pointer_is_1(new_repo, ptr: str, needle: str | None) -> None:
     "--scan/--write-baseline",    # a flag list
     "tier1/tier2/tier3",          # prose: first segment is not a tracked name
     "America/New_York",           # a timezone, by the same rule
-    "timescale/timescaledb-ha:pg17",  # an image tag
+    # The next two lead with a TRACKED top-level name, so the first-segment rule would call them
+    # pointers: what silences each is the rule its comment names, and nothing else.
+    "service/timescaledb-ha:pg17",  # an image tag (the `:` rule)
     "make lint-docs",             # a command
     "tests/X.py",                 # the placeholder convention
-    "0.5/365",                    # a ratio
+    "service/0.5/365",            # a ratio (the numeric-segment rule)
     ".py",                        # a bare extension
     "(exit-entry)/risk.py",       # a formula
     "https://example.com/a.md",   # a URL
@@ -79,11 +86,20 @@ def test_shapes_that_are_not_pointers_are_silent(new_repo, span: str) -> None:
 
 def test_fences_and_double_backtick_spans_do_not_shift_the_pairing(new_repo) -> None:
     """Both pairing bugs left real pointers unseen while the gate reported clean."""
-    manual = ("```\nservice/fenced_example_only.py\n```\n"
+    # The fence holds a blank line, so with fences NOT stripped first the block split leaves its
+    # opener unpaired and the span inside it is read as a claim: this half fails without the strip.
+    manual = ("```\nexample\n\n`service/fenced_example_only.py`\n```\n"
               "Quote it as ``a `tick` inside``, then `service/gone_after.py` is a claim.\n")
     p = _lint(_repo(new_repo, manual))
     assert p.returncode == 1
     assert "service/gone_after.py" in p.stdout and "fenced_example_only" not in p.stdout
+
+
+def test_a_stray_backtick_does_not_pair_across_a_paragraph(new_repo) -> None:
+    """GitHub renders the stray tick literally; pairing it with the next paragraph's opener would
+    swallow the real pointer that follows."""
+    p = _lint(_repo(new_repo, "Press the ` key.\n\nThe router is `service/gone.py`.\n"))
+    assert p.returncode == 1 and "`service/gone.py` referenced" in p.stdout
 
 
 def test_a_gitignored_path_is_never_broken(new_repo) -> None:
@@ -135,6 +151,10 @@ def test_migration_range_both_ways(new_repo) -> None:
     assert _lint(ok, "--migrations", "migrations").returncode == 0
     p = _lint(ok, "--migrations", "nowhere")
     assert p.returncode == 2
+    # past 999: a three-digit-only reader would see 1000_m.sql as 100 and call 001-999 current
+    big = {**extra, "migrations/1000_m.sql": "select 1;\n"}
+    p = _lint(_repo(new_repo, "Migrations 001-999.\n", big, name="r3"), "--migrations", "migrations")
+    assert p.returncode == 1 and "newest on disk is 1000" in p.stdout
 
 
 def test_line_budget_is_a_warning_never_a_failure(new_repo) -> None:

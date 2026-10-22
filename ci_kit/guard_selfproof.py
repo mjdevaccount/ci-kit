@@ -13,8 +13,16 @@ THE CONTRACT. A guard script may define a module-level `selftest() -> list[str]`
 human-readable failures (empty list = proved). It must prove BOTH directions on inputs it builds
 itself: a known-bad input it rejects, and a known-good one it accepts. One direction is not
 enough -- "always fails" and "always passes" are both broken, and only the pair tells a working
-guard from either. A JavaScript guard (`--js`) proves itself by handling `--selftest`: exit 0 when
-proved, non-zero with the reasons on stdout.
+guard from either. A JavaScript guard (`--js`) proves itself by handling `--selftest`: exit 0 AND a
+last stdout line saying so (`<name> selftest: OK`) when proved, non-zero with the reasons on stdout
+otherwise. The pass line is required because exit 0 alone is what a guard that ignored the flag and
+ran its normal scan also produces.
+
+RUN IT IN YOUR GUARDS' ENVIRONMENT. Importing a guard imports its dependencies, so the checker
+must run where they are installed (`uv run`, a venv with ci-kit added, `pip install` into the
+CI python). The composite action installs ci-kit ALONE into an isolated uvx environment: it fits
+a repo whose guards are stdlib-only, and a guard importing anything else would be reported as
+unimportable -- by name, with that cause, but red all the same.
 
 Scripts without one are grandfathered in a baseline file that may only SHRINK. A NEW guard with no
 selftest fails. Bulk-retrofitting a dozen selftests in one PR would produce a dozen unread
@@ -52,6 +60,7 @@ import argparse
 import importlib.util
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import types
@@ -67,6 +76,7 @@ HEADER = (
 )
 JS_SUFFIXES = (".mjs", ".js")
 NODE = "node"
+JS_PASS = re.compile(r"selftest\b.*\bok\b", re.I)
 
 
 class CouldNotLook(Exception):
@@ -128,19 +138,47 @@ def contract_violation(name: str, result: object) -> str | None:
     return None
 
 
+def _import_failure(name: str, e: BaseException) -> str:
+    if isinstance(e, SystemExit):
+        return (f"{name}: exited ({e.code!r}) while being imported -- an unguarded "
+                f"`sys.exit(main())` at module level; put it under `if __name__ == '__main__':`")
+    if isinstance(e, ModuleNotFoundError):
+        return (f"{name}: could not be imported ({e}). If that is a third-party package, the "
+                f"CHECKER is running outside your environment, not the guard broken: install "
+                f"ci-kit into the environment your guards run in")
+    return f"{name}: could not be imported ({e!r})"
+
+
 def prove_py(path: pathlib.Path) -> tuple[bool, list[str]]:
-    """(has_selftest, failures) for one Python guard."""
+    """(has_selftest, failures) for one Python guard.
+
+    SystemExit is caught by name, not let through: a guard calling `sys.exit` inside its import
+    or its selftest would otherwise end THIS process with the guard's code -- `exit 0` with every
+    later guard unchecked and nothing printed. argv is the guard's own name while it runs, so a
+    selftest that drives its `main()` does not parse the checker's flags."""
+    saved_argv = sys.argv
+    sys.argv = [str(path)]
     try:
-        mod = load(path)
-    except Exception as e:  # noqa: BLE001 - an unimportable guard is a broken guard
-        return True, [f"{path.name}: could not be imported ({e})"]
-    fn = getattr(mod, "selftest", None)
-    if not callable(fn):
-        return False, []
-    try:
-        result = fn()
-    except Exception as e:  # noqa: BLE001 - a selftest that throws proves nothing
-        return True, [f"{path.name}: selftest() raised {e!r}"]
+        try:
+            mod = load(path)
+        except KeyboardInterrupt:
+            raise
+        except BaseException as e:  # noqa: BLE001 - an unimportable guard is a broken guard
+            return True, [_import_failure(path.name, e)]
+        fn = getattr(mod, "selftest", None)
+        if not callable(fn):
+            return False, []
+        try:
+            result = fn()
+        except KeyboardInterrupt:
+            raise
+        except SystemExit as e:
+            return True, [f"{path.name}: selftest() called sys.exit({e.code!r}) instead of "
+                          f"returning its failures as list[str]"]
+        except Exception as e:  # noqa: BLE001 - a selftest that throws proves nothing
+            return True, [f"{path.name}: selftest() raised {e!r}"]
+    finally:
+        sys.argv = saved_argv
     bad = contract_violation(path.name, result)
     if bad:
         return True, [bad]
@@ -166,6 +204,13 @@ def prove_js(path: pathlib.Path, cwd: pathlib.Path) -> tuple[bool, list[str]]:
     if r.returncode != 0:
         detail = (r.stdout + r.stderr).strip() or f"exit {r.returncode}"
         return True, [f"{path.name}: selftest reported:\n    " + detail.replace("\n", "\n    ")]
+    # Exit 0 alone proves nothing: a file that only MENTIONS --selftest (a usage comment) runs
+    # its normal scan and exits 0. The pass must say so, positively.
+    lines = [x for x in r.stdout.splitlines() if x.strip()]
+    if not lines or not JS_PASS.search(lines[-1]):
+        return True, [f"{path.name}: `--selftest` exited 0 without the pass line (last stdout "
+                      f"line matching `{JS_PASS.pattern}`) -- it ran something other than a "
+                      f"selftest, or does not handle the flag at all"]
     return True, []
 
 
@@ -225,7 +270,8 @@ def run(argv: list[str] | None = None) -> int:
             "    Prove BOTH directions -- a known-bad input it rejects, and a known-good one it\n"
             "    accepts -- on inputs the guard builds itself:\n"
             "      .py   `def selftest() -> list[str]`  (empty list = proved)\n"
-            "      .mjs  handle `--selftest`, exit 0 when proved, non-zero + reasons on stdout")
+            "      .mjs  handle `--selftest`: exit 0 + a last line `<name> selftest: OK` when\n"
+            "            proved, non-zero + reasons on stdout otherwise")
     shrunk = sorted(ratchet.load() - unproven)
     if shrunk:
         print(f"guard self-proof: baseline can shrink, no longer unproven: {', '.join(shrunk)} "

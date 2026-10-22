@@ -87,6 +87,46 @@ def test_bad_selftest_shapes_are_1(new_repo, body: str, needle: str) -> None:
     assert needle in p.stderr
 
 
+EXITS_IN_SELFTEST = "import sys\n\ndef selftest() -> list[str]:\n    sys.exit(0)\n"
+EXITS_AT_IMPORT = "import sys\n\ndef main() -> int:\n    return 0\n\nsys.exit(main())\n"
+DRIVES_ITS_MAIN = (
+    "import argparse\n\n"
+    "def main(argv=None) -> int:\n"
+    "    argparse.ArgumentParser().parse_args(argv)\n"
+    "    return 0\n\n"
+    "def selftest() -> list[str]:\n"
+    "    return [] if main() == 0 else ['main failed']\n"
+)
+
+
+@pytest.mark.parametrize("body,needle", [
+    (EXITS_IN_SELFTEST, "lint_a.py: selftest() called sys.exit(0) instead of returning"),
+    (EXITS_AT_IMPORT, "lint_a.py: exited (0) while being imported"),
+])
+def test_a_guard_calling_sys_exit_cannot_end_the_checker(new_repo, body: str, needle: str) -> None:
+    """The blind-pass this guards against: SystemExit(0) let through ends the CHECKER with 0, and
+    the guards after it -- one that reports, one with no selftest -- are never looked at."""
+    r = _repo(new_repo, {"scripts/lint_a.py": body, "scripts/lint_b.py": REPORTS,
+                         "scripts/lint_c.py": UNPROVEN})
+    p = run_tool("guard_selfproof", r)
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert needle in p.stderr
+    assert "lint_b.py: selftest reported" in p.stderr
+    assert "NEW guard(s) with no selftest: lint_c.py" in p.stderr
+
+
+def test_a_selftest_driving_its_own_main_does_not_parse_the_checkers_flags(new_repo) -> None:
+    r = _repo(new_repo, {"scripts/lint_a.py": DRIVES_ITS_MAIN})
+    p = run_tool("guard_selfproof", r, "--prefix", "lint_")
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+def test_a_missing_third_party_module_names_the_environment(new_repo) -> None:
+    r = _repo(new_repo, {"scripts/lint_x.py": UNIMPORTABLE})
+    p = run_tool("guard_selfproof", r)
+    assert p.returncode == 1 and "the CHECKER is running outside your environment" in p.stderr
+
+
 def test_a_baselined_guard_that_later_gains_a_selftest_says_the_baseline_can_shrink(new_repo) -> None:
     r = _repo(new_repo, {"scripts/lint_a.py": PROVEN,
                          "scripts/guard_selfproof_baseline.txt": "# h\nlint_a.py\nlint_gone.py\n"})
@@ -131,9 +171,20 @@ def test_blind_outside_git_is_2(tmp_path: Path) -> None:
     assert run_tool("guard_selfproof", tmp_path).returncode == 2
 
 
-JS_PROVED = "if (process.argv.includes('--selftest')) { process.exit(0) }\n"
+JS_PROVED = ("if (process.argv.includes('--selftest')) { console.log('lint-ok selftest: OK'); "
+             "process.exit(0) }\n")
 JS_FAILS = "if (process.argv.includes('--selftest')) { console.log('missed a bad input'); process.exit(1) }\n"
 JS_NONE = "console.log('scan')\n"
+# mentions the flag in a usage comment, ignores it, runs its scan and exits 0
+JS_MENTIONS_ONLY = "// usage: node lint-x.mjs [--selftest] (TODO)\nconsole.log('scan: 0 findings')\n"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_js_guard_that_only_mentions_the_flag_is_1_not_proven(new_repo) -> None:
+    r = _repo(new_repo, {"scripts/lint-x.mjs": JS_MENTIONS_ONLY})
+    p = run_tool("guard_selfproof", r, "--prefix", "lint", "--js")
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "lint-x.mjs: `--selftest` exited 0 without the pass line" in p.stderr
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")

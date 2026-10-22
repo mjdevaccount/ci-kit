@@ -16,8 +16,10 @@ untracked file, red in CI), and every one of them had independently paid for the
 backtick-pairing bugs. One reader, the per-repo rules as flags.
 
 WHAT A POINTER IS (decided by shape, the same rule in every repo):
-  * a code span (`x`, ``x``: a run of N backticks closed by N) outside fenced blocks;
-  * decorations stripped: trailing punctuation, a `:line` / `:line-range` pin, a leading `./`;
+  * a code span (`x`, ``x``: a run of N backticks closed by N) outside fenced blocks, never
+    paired across a blank line (CommonMark ends a span at the block);
+  * decorations stripped: trailing punctuation, a leading `./`, and whatever follows a file
+    extension after `:` `#` or `@` (`:12`, `:main`, `::test_x`, `#anchor`, `@v1`);
   * NOT a pointer: anything with whitespace, a glob/template/quote/formula character, a URL, a
     `:` left after the line pin (a docker tag, a `key:value`), a leading `/` `#` `-` `~` `@`
     `../` (route, anchor, flag, home path, scope, relative sibling), a bare extension (`.py`),
@@ -26,6 +28,9 @@ WHAT A POINTER IS (decided by shape, the same rule in every repo):
   * a pointer if it ends in a file extension, OR contains `/` and its first segment is a
     tracked top-level name or a declared sibling repo. `tier1/tier2` and `America/New_York`
     are prose by this rule without being listed anywhere.
+  * DECLARED BLIND SPOT, the price of that rule: an extension-less pointer whose FIRST segment
+    is itself gone or mistyped (`servcie/admin/`, a deleted `flows/nightly/`) reads as prose.
+    Name the file, not just its directory, where it matters.
 
 HOW IT RESOLVES:
   * against `git ls-files`, never the filesystem: identical locally and in CI by construction;
@@ -76,13 +81,21 @@ _SPAN = re.compile(r"(`+)([^`].*?)\1", re.S)
 # Each ``` fence contributes three backticks, so an unstripped fence shifts the pairing too (one
 # gate was checking 5 pointers of 70, clean every run).
 _FENCE = re.compile(r"```.*?```", re.S)
-_LINE_PIN = re.compile(r"^(.*?\.\w+):\d[\d,\-]*$")
+# CommonMark never lets a code span cross a block boundary, so neither may the pairing: one stray
+# backtick (`Press the ` key.`) would otherwise pair with the next paragraph's opener and shift
+# every span after it -- the ``double`` bug again, by another route.
+_BLANK_LINE = re.compile(r"\n[ \t]*\n")
 _FILE_EXT = (".md", ".py", ".yaml", ".yml", ".sql", ".json", ".toml", ".sh", ".ps1", ".ts",
              ".tsx", ".mjs", ".js", ".css", ".html")
 _NOT_IN_A_PATH = set("*<>{}[]$|?!='\"`()\\+%,·−×≤≥")
 _NEVER_A_PATH_PREFIX = ("/", "#", "-", "~", "@", "../")
-_MIGRATION = re.compile(r"(\d{3})_")
-_RANGE = re.compile(r"\b(\d{3})\s*[–—-]\s*(\d{3})\b")
+# At least three digits, not exactly three: `(\d{3})_` would read 1000_x.sql as 100 and go dead
+# at migration 999, the same way a `0\d\d` range regex went dead at 099.
+_MIGRATION = re.compile(r"(\d{3,})_")
+_RANGE = re.compile(r"\b(\d{3,})\s*[–—-]\s*(\d{3,})\b")
+# What may follow a file extension and is not part of the path: a `:line` / `:symbol` /
+# `::test_id` pin, a `#anchor`, an `@ref`.
+_PIN_CHARS = ":#@"
 
 
 class CouldNotLook(Exception):
@@ -158,15 +171,25 @@ class Repo:
 
 
 def spans(text: str) -> list[str]:
-    """The contents of every inline code span outside fenced blocks."""
-    return [m.group(2) for m in _SPAN.finditer(_FENCE.sub("", text))]
+    """The contents of every inline code span outside fenced blocks, paired within one block."""
+    return [m.group(2) for block in _BLANK_LINE.split(_FENCE.sub("", text))
+            for m in _SPAN.finditer(block)]
+
+
+def _strip_pin(tok: str) -> str:
+    """`a.py:12`, `a.py:main`, `a.py::test_x`, `a.md#setup`, `ci.yml@v1` -> the path alone."""
+    for ext in _FILE_EXT:
+        i = tok.find(ext)
+        while i != -1:
+            j = i + len(ext)
+            if j < len(tok) and tok[j] in _PIN_CHARS:
+                return tok[:j]
+            i = tok.find(ext, i + 1)
+    return tok
 
 
 def normalise(raw: str) -> str:
-    tok = raw.strip().rstrip(".,;:)")
-    m = _LINE_PIN.match(tok)
-    if m:
-        tok = m.group(1)
+    tok = _strip_pin(raw.strip().rstrip(".,;:)"))
     return tok[2:] if tok.startswith("./") else tok
 
 
