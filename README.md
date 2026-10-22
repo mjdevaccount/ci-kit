@@ -22,6 +22,12 @@ nothing has verified nothing.
 | `ci_kit/discover.py` | library: `tracked()` = `git ls-files`, never a filesystem walk (a walk sees your untracked files, CI does not; a checkout under `.claude/worktrees/` once blinded three gates); `require_scanned()` = zero files is exit 2 |
 | `ci_kit/site_lint.py` | library: the ratchet gate's scan / fixture selftest / CLI -- a per-file count (`RatchetCount`) or a set of keys (`RatchetSet`), with the gate's own words through optional hooks (`header`, `describe`, `ok`, `written`, and `hard` for findings no baseline grants) -- so a second ratchet lint is a predicate, not a copy |
 | `ci_kit/astread.py` | library: read + `ast.parse` a source file, or **exit 2** naming the file and the gate (`blind()`); BOM-tolerant (`utf-8-sig`), never `errors="replace"`. A parse failure answered with `continue` is byte-identical to "read and clean" |
+| `ci_kit/sql/` | **the `sql` extra** (`ci-kit[sql]`, adds sqlglot -- the kit's only dependency, and only here): gates that read SQL embedded in python source **parsed** (sqlglot, postgres dialect), so a docstring, a `-- comment` or a string literal that *mentions* SQL is never read as SQL, and a SQL value that will not parse is **exit 2**. `sqlast` / `sqllit` are the shared readers. Each gate keeps its detection here and takes its voice (gate name, re-run command, doc pointer, baseline paths) from a `Config`, so a repo that already had the gate keeps its output byte-identical |
+| `ci_kit/sql/casts.py` | `ci-sql-casts`: asyncpg bind/cast footguns -- `:x::type` (A), `CAST(:x AS timestamptz)` on a str (B, ratchet), `now() - :age` (C), `:x + interval` (D, ratchet) |
+| `ci_kit/sql/pit_reads.py` | `ci-pit-reads`: SQL wall-clock reads (`now()`, `current_date`, ...) -- plausible numbers from the WRONG day under a replay clock; a per-file count ratchet |
+| `ci_kit/sql/decimal_reads.py` | `ci-decimal-reads`: a NUMERIC column projected without a cast decodes as `Decimal`; ground truth = a `--cols` file of `schema.table.column` (missing or empty is exit 2) |
+| `ci_kit/sql/phantom_columns.py` | `ci-phantom-columns`: a single-table statement naming a column its table lacks, against a `--schema` json built from a migrated database. Precision over recall |
+| `ci_kit/sql/column_comments.py` | `ci-column-comments`: a migration column comment that declares a domain (magnitude, 0..1, enum, `>= 0`) with no CHECK enforcing it |
 | `action.yml` | composite action: run one of the above against the caller's checkout, installed from the action's own download (no second ref, no credential) |
 | `.github/workflows/doc-refs.yml` | reusable: the doc gate + its selftest, full history (`fetch-depth: 0` is load-bearing; a shallow clone is exit 2, not a blind pass) |
 | `.github/workflows/secret-argv.yml` | reusable: the secret-argv lint + its selftest |
@@ -65,6 +71,20 @@ The library, from a lockfile:
 ```toml
 [project]
 dependencies = ["ci-kit @ git+https://github.com/mjdevaccount/ci-kit@v1.0.0"]
+```
+
+The SQL gates, as a dev dependency (their baselines live in your repo):
+
+```toml
+[dependency-groups]
+dev = ["ci-kit[sql] @ git+https://github.com/mjdevaccount/ci-kit@v1.3.0"]
+```
+
+```bash
+uv run ci-sql-casts --scan-dir app --baseline ci/sql_casts_baseline.txt --d-baseline ci/sql_bind_arith_baseline.txt
+uv run ci-pit-reads --scan-dir app --baseline ci/pit_reads_baseline.txt
+uv run ci-decimal-reads --scan-dir app --cols ci/numeric_columns.txt --baseline ci/decimal_reads_baseline.txt
+uv run ci-column-comments --migrations migrations --legacy-max 7
 ```
 
 ```python

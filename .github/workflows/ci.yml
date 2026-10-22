@@ -24,7 +24,7 @@ jobs:
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v10.3.0
-      - run: uv sync --frozen
+      - run: uv sync --frozen --all-extras   # the sql extra: ci_kit.sql needs sqlglot
       - name: ruff
         run: uv run ruff check --output-format=github .
       - name: must-fire suite
@@ -48,6 +48,11 @@ jobs:
         uses: ./
         with:
           tool: ci-secret-argv-lint
+      - name: sql gate selftest (through the action, which installs the sql extra)
+        uses: ./
+        with:
+          tool: ci-sql-casts
+          args: --selftest
       - name: pin-drift blind direction (this repo pins nothing -> exit 2, never a clean 0)
         run: |
           set +e
