@@ -22,7 +22,9 @@ def git(repo: Path, *args: str) -> subprocess.CompletedProcess:
 
 def run_tool(module: str, cwd: Path, *args: str) -> subprocess.CompletedProcess:
     """Run a tool the way a caller does: from INSIDE the caller's checkout, not from the kit's own checkout."""
-    return subprocess.run([sys.executable, "-m", f"ci_kit.{module}", *args], cwd=cwd,
+    # -P: `python -m` would put cwd (the caller's checkout) on sys.path, which the installed
+    # console script never does -- a root-relative import in a guard would pass here only.
+    return subprocess.run([sys.executable, "-P", "-m", f"ci_kit.{module}", *args], cwd=cwd,
                           capture_output=True, text=True, check=False, encoding="utf-8",
                           errors="replace")
 
