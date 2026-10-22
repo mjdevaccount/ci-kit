@@ -1,6 +1,7 @@
 name: ci-kit
 description: >-
-  Run one ci_kit console script (ci-doc-lint, ci-secret-argv-lint, ci-pr-autoupdate, ci-pin-drift)
+  Run one ci_kit console script (ci-doc-lint, ci-secret-argv-lint, ci-pr-autoupdate, ci-pin-drift,
+  ci-manual-lint, ci-guard-selfproof)
   against the caller's checkout, installed with uvx from THIS action's own download of ci-kit.
 
 # WHY AN ACTION AND NOT `uvx --from git+https://github.com/<owner>/ci-kit@v1` IN EVERY WORKFLOW.
@@ -11,7 +12,7 @@ description: >-
 
 inputs:
   tool:
-    description: console script to run (ci-doc-lint | ci-secret-argv-lint | ci-pr-autoupdate | ci-pin-drift)
+    description: console script to run (ci-doc-lint | ci-secret-argv-lint | ci-pr-autoupdate | ci-pin-drift | ci-manual-lint | ci-guard-selfproof)
     required: true
   args:
     description: arguments, word-split by the shell
@@ -36,7 +37,7 @@ runs:
       run: |
         set -euo pipefail
         case "$TOOL" in
-          ci-doc-lint|ci-secret-argv-lint|ci-pr-autoupdate|ci-pin-drift) ;;
+          ci-doc-lint|ci-secret-argv-lint|ci-pr-autoupdate|ci-pin-drift|ci-manual-lint|ci-guard-selfproof) ;;
           *) echo "::error::unknown ci_kit tool: $TOOL"; exit 2 ;;
         esac
         # word-split ARGS on purpose; every caller passes plain flags

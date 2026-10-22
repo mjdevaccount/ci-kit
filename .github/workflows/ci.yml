@@ -55,6 +55,15 @@ jobs:
           rc=$?
           set -e
           [ "$rc" -eq 2 ] || { echo "::error::expected exit 2 (no pin found), got $rc"; exit 1; }
+      - name: manual-lint + guard-selfproof blind direction (no CLAUDE.md, no scripts/ here -> exit 2)
+        run: |
+          for tool in ci-manual-lint ci-guard-selfproof; do
+            set +e
+            uvx --quiet --from . "$tool"
+            rc=$?
+            set -e
+            [ "$rc" -eq 2 ] || { echo "::error::$tool: expected exit 2 (nothing to look at), got $rc"; exit 1; }
+          done
       - name: actionlint
         run: docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:latest -color
 

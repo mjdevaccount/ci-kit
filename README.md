@@ -16,6 +16,8 @@ nothing has verified nothing.
 | `ci_kit/secret_argv.py` | `ci-secret-argv-lint`: no secret expanded on the **host** into a `docker exec` / `curl` / `ssh` argv (it lands in `docker events`, `docker inspect`, `ps`), nor hoisted with `$(docker exec c printenv KEY)`. The fix is to let it expand where it lives: `docker exec c sh -c '... "$KEY" ...'` |
 | `ci_kit/pr_autoupdate.py` | `ci-pr-autoupdate`: merge main into every open PR with auto-merge **armed**, so "require branches up to date" is affordable; a conflict gets one label and one page, never more |
 | `ci_kit/pin_drift.py` | `ci-pin-drift`: every `<kit>@vX.Y.Z` / `?tag=vX.Y.Z` pin in the given files is the newest release tag on `--remote`, else exit 1. A kit fix that never reaches a consumer must not fail silently |
+| `ci_kit/manual_lint.py` | `ci-manual-lint`: every path an agent manual (`CLAUDE.md`) names **resolves today** in `git ls-files`. The question `ci-doc-lint` deliberately cannot answer -- a path that was never real -- asked only of the file every session loads. Quiet by SHAPE (routes, flags, prose with slashes, image tags, formulas), not by allowlist; a sibling-repo pointer is checked when that checkout is present and silent when not. Optional: stale migration ranges, line budget, empty placeholder packages, reference-doc dirs + freshness stamp, a total index |
+| `ci_kit/guard_selfproof.py` | `ci-guard-selfproof`: every guard script proves it can FAIL -- `selftest() -> list[str]` (or `--selftest` for a JS guard) rejecting a known-bad input and accepting a known-good one. A guard without one is a shrink-only baseline entry; a NEW one fails. A selftest returning an int, raising, or failing to import is a failure by name |
 | `ci_kit/ratchet.py` | library: `RatchetSet` / `RatchetCount`, the shrink-only baseline every ratchet lint shares |
 | `ci_kit/discover.py` | library: `tracked()` = `git ls-files`, never a filesystem walk (a walk sees your untracked files, CI does not; a checkout under `.claude/worktrees/` once blinded three gates); `require_scanned()` = zero files is exit 2 |
 | `ci_kit/site_lint.py` | library: the ratchet gate's scan / fixture selftest / CLI -- a per-file count (`RatchetCount`) or a set of keys (`RatchetSet`), with the gate's own words through optional hooks (`header`, `describe`, `ok`, `written`, and `hard` for findings no baseline grants) -- so a second ratchet lint is a predicate, not a copy |
@@ -92,6 +94,12 @@ pre-commit:
   pointers into `docs/` only; `--code-doc-dir` adds another tree.
 - `ci-pin-drift` has no default remote: `--remote` is required, and the kit's name in a pin is
   the remote's last path component (`--name` to override).
+- `ci-manual-lint` checks `CLAUDE.md` (`--manual` for another) and nothing else unless asked:
+  sibling repos (`--sibling`), a migrations dir, a line budget, placeholder packages, reference-doc
+  dirs, a stamp and a total index are all flags. Commit them in an args file and run
+  `ci-manual-lint @scripts/manual_lint.args` so CI and a workstation sweep read the same rules.
+- `ci-guard-selfproof` reads `scripts/` for `lint_*` by default; `--scripts`, `--prefix`,
+  `--baseline` and `--js` (prove `.mjs`/`.js` guards through `node <guard> --selftest`) are yours.
 - `pr-autoupdate.yml` declares generic secret names; `--label` renames the conflict label.
 - The tree a gate reads is `--root`, else `CI_KIT_ROOT`, else the git toplevel holding the
   working directory. Never the tool's own location.
