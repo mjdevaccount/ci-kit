@@ -26,8 +26,9 @@ import re
 import sys
 from collections.abc import Sequence
 
-from ci_kit import discover
+from ci_kit import discover, site_lint
 from ci_kit.ratchet import RatchetSet
+from ci_kit.sql import _cli
 
 # A column definition line carrying a trailing `-- comment`. Anchored on the comma or line end so a
 # multi-line CREATE TABLE body parses without a SQL parser.
@@ -158,8 +159,8 @@ def main(argv: Sequence[str] | None = None, cfg: Config | None = None, *,
          description: str | None = None) -> int:
     ap = argparse.ArgumentParser(description=description or __doc__)
     ap.add_argument("--write-baseline", action="store_true")
+    ap.add_argument("--selftest", action="store_true", help="prove the rule can fire")
     if cfg is None:
-        ap.add_argument("--selftest", action="store_true", help="prove the rule can fire")
         ap.add_argument("--root", type=pathlib.Path, default=pathlib.Path.cwd())
         ap.add_argument("--migrations", default=Config.migrations, metavar="DIR")
         ap.add_argument("--baseline", type=pathlib.Path, default=None,
@@ -171,32 +172,36 @@ def main(argv: Sequence[str] | None = None, cfg: Config | None = None, *,
         baseline = args.baseline or pathlib.Path(args.migrations) / ".column_comment_baseline.json"
         cfg = Config(root=args.root.resolve(), migrations=args.migrations, baseline=baseline,
                      legacy_max=args.legacy_max)
-        if args.selftest:
-            fails = selftest(cfg)
-            for f in fails:
-                print(f"  SELFTEST FAIL: {f}", file=sys.stderr)
-            print(f"{cfg.label}: selftest {'FAILED' if fails else 'OK'}")
-            return 1 if fails else 0
-    if args.write_baseline:
-        keys = [o.split(" — ")[0] for o in offenders(cfg)]
-        cfg.ratchet().write(keys)
+    c = cfg
+
+    def write() -> int:
+        keys = [o.split(" — ")[0] for o in offenders(c)]
+        c.ratchet().write(keys)
         print(f"baseline written: {len(keys)} grandfathered")
         return 0
-    files = sql_files(cfg)
-    if not files:
-        print(f"{cfg.label}: no {cfg.migrations}/*.sql under {cfg.root} -- nothing was read, "
-              "so nothing was verified (exit 2, could not look)", file=sys.stderr)
-        return 2
-    probs = offenders(cfg, files)
-    if not probs:
-        print(f"{cfg.label}: clean")
-        return 0
-    print("A column comment states a domain that nothing enforces.\n"
-          "Add a CHECK (NOT VALID first if the table has history), or — if the domain genuinely\n"
-          f"cannot be expressed — run: {cfg.cmd} --write-baseline\n")
-    for p in probs:
-        print(f"  {p}")
-    return 1
+
+    def scan() -> list[str]:
+        files = sql_files(c)
+        if not files:
+            print(f"{c.label}: no {c.migrations}/*.sql under {c.root} -- nothing was read, "
+                  "so nothing was verified (exit 2, could not look)", file=sys.stderr)
+            raise SystemExit(2)
+        return offenders(c, files)
+
+    def report(probs: Sequence[str]) -> None:
+        if not probs:
+            print(f"{c.label}: clean")
+            return
+        print("A column comment states a domain that nothing enforces.\n"
+              "Add a CHECK (NOT VALID first if the table has history), or — if the domain genuinely\n"
+              f"cannot be expressed — run: {c.cmd} --write-baseline\n")
+        for p in probs:
+            print(f"  {p}")
+
+    return site_lint.check(
+        _cli.flags(args, "selftest", "write_baseline"), gate=c.label, scan=scan,
+        selftest=lambda: selftest(c), selftest_report=_cli.selftest_report(f"{c.label}: selftest"),
+        modes={"--write-baseline": write}, report=report)
 
 
 if __name__ == "__main__":

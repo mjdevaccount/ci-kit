@@ -35,8 +35,8 @@ from collections.abc import Sequence
 
 from sqlglot import exp
 
-from ci_kit import astread, discover
-from ci_kit.sql import sqlast
+from ci_kit import astread, discover, site_lint
+from ci_kit.sql import _cli, sqlast
 
 #: Postgres system columns -- real, queryable, and absent from information_schema.columns.
 NON_COLUMNS = frozenset({"ctid", "xmin", "xmax", "cmin", "cmax", "tableoid", "oid"})
@@ -137,14 +137,11 @@ def load_schema(path: str, cfg: Config) -> dict[str, list[str]] | int:
 
 
 def run(schema_path: str, scan_dir: pathlib.Path, cfg: Config) -> int:
-    schema = load_schema(schema_path, cfg)
-    if isinstance(schema, int):
-        return schema
-    hits = scan(scan_dir, schema, cfg)
-    for path, lineno, table, bad in hits:
-        print(f"{path}:{lineno}  {table}  no such column: {', '.join(bad)}")
-    print(f"\n{len(hits)} phantom-column statement(s)")
-    return 1 if hits else 0
+    """The check as a function: 0 clean, 1 phantoms, 2 could not look (returned, not raised)."""
+    try:
+        return _check([], schema_path, scan_dir, cfg)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 2
 
 
 def selftest(cfg: Config) -> list[str]:
@@ -184,38 +181,60 @@ def selftest(cfg: Config) -> list[str]:
     # skipped as ambiguous.
     if found("WITH w AS (SELECT risk_usd::float8 AS r FROM quant.operator_trades) SELECT r FROM w"):
         f.append("a CTE statement was analysed; its columns are ambiguous")
-    try:
-        phantoms("q = " + repr("".join(("SEL", "ECT FROM WHERE"))), "<selftest>", schema, cfg)
-        f.append("an unparseable SQL value did not exit 2")
-    except SystemExit as exc:
-        if exc.code != 2:
-            f.append(f"an unparseable SQL value exited {exc.code}, not 2")
-    return f
+    blind = _cli.blind_probe(
+        lambda: phantoms("q = " + repr("".join(("SEL", "ECT FROM WHERE"))), "<selftest>", schema, cfg),
+        missed="an unparseable SQL value did not exit 2",
+        wrong="an unparseable SQL value exited {code}, not 2")
+    return f + ([blind] if blind else [])
 
 
 def run_selftest(cfg: Config) -> int:
-    fails = selftest(cfg)
-    for x in fails:
-        print(f"  SELFTEST FAIL: {x}")
-    print(f"{cfg.label}: selftest {'FAILED' if fails else 'OK'}")
-    return 1 if fails else 0
+    return _check(["--selftest"], "", cfg.root, cfg)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
+def _check(flags: list[str], schema_path: str, scan_dir: pathlib.Path, cfg: Config) -> int:
+    """The run, on `site_lint.check`: a schema that cannot be used exits 2 from the scan."""
+    def find() -> list[tuple[str, int, str, list[str]]]:
+        schema = load_schema(schema_path, cfg)
+        if isinstance(schema, int):
+            raise SystemExit(schema)
+        return scan(scan_dir, schema, cfg)
+
+    def report(hits: Sequence[tuple[str, int, str, list[str]]]) -> None:
+        for path, lineno, table, bad in hits:
+            print(f"{path}:{lineno}  {table}  no such column: {', '.join(bad)}")
+        print(f"\n{len(hits)} phantom-column statement(s)")
+
+    return site_lint.check(
+        flags, gate=cfg.gate, scan=find, selftest=lambda: selftest(cfg),
+        selftest_report=_cli.selftest_report(f"{cfg.label}: selftest", stream="stdout"),
+        report=report)
+
+
+def main(argv: Sequence[str] | None = None, cfg: Config | None = None, *,
+         scan_dir: str | None = None, scan_dir_flag: str = "--scan-dir",
+         description: str | None = None) -> int:
+    """The CLI, on `site_lint.check`. A repo that wraps this passes its `cfg` (whose root is the
+    repository), may default the directory it reads with `scan_dir`, and may keep its own
+    spelling of that flag (`scan_dir_flag`; `--root` is free once `cfg` is given)."""
+    ap = argparse.ArgumentParser(description=description or __doc__)
     ap.add_argument("--schema", help='{"schema.table": ["col", ...]} from a migrated database')
-    ap.add_argument("--root", type=pathlib.Path, default=pathlib.Path.cwd(),
-                    help="the repository root (default: cwd)")
-    ap.add_argument("--scan-dir", default=None, metavar="DIR",
-                    help="the directory to read, relative to --root (required unless --selftest)")
+    if cfg is None:
+        ap.add_argument("--root", type=pathlib.Path, default=pathlib.Path.cwd(),
+                        help="the repository root (default: cwd)")
+    # A wrapper's own flag keeps argparse's own metavar for it (`--root ROOT`), so its usage line
+    # stays what it printed before.
+    metavar = "DIR" if scan_dir_flag == "--scan-dir" else scan_dir_flag.lstrip("-").replace("-", "_").upper()
+    ap.add_argument(scan_dir_flag, dest="scan_dir", default=scan_dir, metavar=metavar,
+                    help="the directory to read, relative to the root (required unless --selftest)")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
-    cfg = Config(root=args.root.resolve())
-    if args.selftest:
-        return run_selftest(cfg)
-    if not args.schema or not args.scan_dir:
-        ap.error("--schema and --scan-dir are required (or use --selftest)")
-    return run(args.schema, cfg.root / args.scan_dir, cfg)
+    if cfg is None:
+        cfg = Config(root=args.root.resolve())
+    need = [f for f, v in (("--schema", args.schema), (scan_dir_flag, args.scan_dir)) if not v]
+    if need and not args.selftest:
+        ap.error(f"{' and '.join(need)} {'is' if len(need) == 1 else 'are'} required (or use --selftest)")
+    return _check(_cli.flags(args, "selftest"), args.schema or "", cfg.root / (args.scan_dir or ""), cfg)
 
 
 if __name__ == "__main__":
