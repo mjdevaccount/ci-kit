@@ -43,6 +43,24 @@ def test_pins_in_reads_every_spelling_and_skips_moving_refs() -> None:
     assert pin_drift.pins_in(text, "ci-kit") == [(1, "v1.1.0"), (2, "v1.2.3"), (3, "v2.0.10"), (7, "v1.4.0")]
 
 
+def test_pins_in_reads_a_release_asset_url() -> None:
+    url = "https://github.com/example-org/ci-kit/releases/download/{}/ci_kit-1-py3-none-any.whl"
+    text = (f'a "ci-kit @ {url.format("v0.1.1")}",\n'                 # pyproject PEP 508
+            f'b ci-kit = {{ url = "{url.format("v0.2.0")}" }}\n'        # [tool.uv.sources] / uv.lock
+            f'c "{url.format("v0.1.1-rc1")}"\n'                         # pre-release: not a pin
+            'd https://github.com/example-org/my-ci-kit/releases/download/v9.9.9/x.whl\n')
+    assert pin_drift.pins_in(text, "ci-kit") == [(1, "v0.1.1"), (2, "v0.2.0")]
+
+
+def test_lagging_release_asset_pin_is_exit_1(new_repo, tmp_path: Path) -> None:
+    rem = _remote(new_repo, "v0.1.0", "v0.1.1", "v0.2.0")
+    lock = _consumer(tmp_path, 'source = { url = "https://github.com/example-org/ci-kit/releases/'
+                               'download/v0.1.1/ci_kit-0.1.1-py3-none-any.whl" }\n')
+    r = run_tool("pin_drift", tmp_path, "--file", str(lock), "--remote", str(rem))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "behind ci-kit v0.2.0" in r.stdout and f"{lock}:1: v0.1.1" in r.stdout
+
+
 def test_pin_naming_no_release_is_exit_1(new_repo, tmp_path: Path) -> None:
     # newer than the newest tag (typo / bump past a release) AND a hole between real tags
     rem = _remote(new_repo, "v1.0.0", "v1.1.0")
