@@ -11,6 +11,7 @@ WHAT IT READS. Every `--file` given is scanned for exact-version pins of the kit
 
     <name>@v1.1.0                                pyproject / requirements / a workflow `uses:`
     <name>?tag=v1.1.0  <name>.git?tag=v1.1.0     uv.lock's git source
+    <name>/releases/download/v1.1.0/<asset>      a release-asset wheel URL (pyproject / uv.lock)
 
 Moving refs (`@v1`) and SHA pins are deliberately NOT pins here: `v1` cannot lag by construction,
 and a SHA says nothing comparable. The newest release is the highest `vX.Y.Z` tag on `--remote`
@@ -39,11 +40,14 @@ def name_of(remote: str) -> str:
 
 
 def pin_re(name: str) -> re.Pattern[str]:
-    """`name` as a whole word (not `my-name`), optionally `.git` or a path inside the repo (a
-    reusable workflow: `name/.github/workflows/x.yml@v1.1.0`), then `@` or `?tag=`, then an EXACT
-    vX.Y.Z -- not a pre-release (`-rc1`), not a longer dotted string."""
-    return re.compile(r"(?<![\w.-])" + re.escape(name)
-                      + r"(?:\.git)?(?:/[^@\s?#\"']*)?(?:@|\?tag=)(v\d+\.\d+\.\d+)(?![\w.-])")
+    """`name` as a whole word (not `my-name`), optionally `.git`, then EITHER a GitHub release
+    asset (`name/releases/download/v1.1.0/<wheel>`: a kit no index publishes) OR an optional path
+    inside the repo (a reusable workflow: `name/.github/workflows/x.yml@v1.1.0`) and `@` or
+    `?tag=` -- then an EXACT vX.Y.Z, not a pre-release (`-rc1`), not a longer dotted string."""
+    tag = r"(v\d+\.\d+\.\d+)"
+    return re.compile(r"(?<![\w.-])" + re.escape(name) + r"(?:\.git)?(?:"
+                      + r"/releases/download/" + tag + r"/"
+                      + r"|(?:/[^@\s?#\"']*)?(?:@|\?tag=)" + tag + r"(?![\w.-]))")
 
 
 def _ver(tag: str) -> tuple[int, ...]:
@@ -53,7 +57,8 @@ def _ver(tag: str) -> tuple[int, ...]:
 def pins_in(text: str, name: str) -> list[tuple[int, str]]:
     """(line number, pinned tag) for every exact-version pin of `name` in `text`."""
     rx = pin_re(name)
-    return [(i, m.group(1)) for i, ln in enumerate(text.splitlines(), 1) for m in rx.finditer(ln)]
+    return [(i, m.group(1) or m.group(2))
+            for i, ln in enumerate(text.splitlines(), 1) for m in rx.finditer(ln)]
 
 
 def release_tags(remote: str) -> list[str]:
