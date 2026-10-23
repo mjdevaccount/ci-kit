@@ -1,4 +1,5 @@
-"""The per-file SITE-COUNT lint, defined once: scan, fixture selftest, CLI.
+"""The per-file SITE-COUNT lint, defined once: scan, fixture selftest, CLI -- and `check`, the same
+CLI for a PASS/FAIL gate that has no baseline at all.
 
 A site lint is a predicate `findings_in(source, origin) -> [line]` plus mechanics every such gate
 shares: a per-file count ratchet (`RatchetCount`) or a set-of-keys one (`RatchetSet`),
@@ -173,3 +174,66 @@ def _ok(gate: str, scanned: int, current: Any, slack: list[Any], write_flag: str
     tail = f", {len(slack)} file(s) shrank - tighten with {write_flag}" if slack else ""
     return (f"{gate}: OK - {scanned} scanned, {sum(current.values())} grandfathered site(s) "
             f"in {len(current)} file(s), none new{tail}")
+
+
+def check(argv: Sequence[str], *, gate: str, scan: Callable[[], Sequence[Any]],
+          selftest: Callable[[], list[str]], selftest_fail: int = 1,
+          selftest_report: Callable[[list[str]], str | None] | None = None,
+          modes: Mapping[str, Callable[[], int]] | None = None,
+          scanned: Callable[[], int] | None = None, scan_dirs: Sequence[str] = (), floor: int = 1,
+          header: Callable[[int], str] | None = None, describe: Callable[[Any], str] | None = None,
+          advice: Sequence[str] = (), ok: Callable[[], str] | None = None,
+          report: Callable[[Sequence[Any]], None] | None = None) -> int:
+    """The PASS/FAIL CLI: `--selftest`, a gate's own mode flags, or check. Exit 0 clean - 1
+    findings - 2 could not look. The sibling of `run` for a gate with NO baseline: every finding
+    fails and nothing can grandfather one, so there is no write flag unless a mode adds one.
+
+    `scan()` returns the findings (any sequence; empty = clean). A scan that cannot look prints
+    its own reason and raises `SystemExit(2)` -- it passes through; any other exception is printed
+    as DID NOT FINISH LOOKING and is 2. With `scanned`, the scan must have read at least `floor`
+    inputs (`discover.require_scanned`): a gate that read nothing has verified nothing.
+
+    `modes` maps a flag to a callable returning the exit code (`--list-allowed`, `--report`, a
+    refused `--write`); the first flag present in `argv` runs instead of the check. Flags that
+    carry a VALUE (`--dsn X`, `--today D`) are the gate's to parse before it calls `check`.
+
+    THE VOICE STAYS THE CALLER'S. On findings the default prints `header(n)` (else
+    `<gate>: N finding(s)`), each `describe(f)` indented two spaces (else `str(f)`), then
+    `advice`; clean prints `ok()` (else `<gate>: OK`). A gate whose output does not fit that shape
+    (stderr, a summary after the list, an OK line that still exits 1) passes `report(findings)`,
+    which is called on BOTH outcomes and prints everything itself -- the exit code stays the kit's.
+    `selftest_report(fails)` replaces the selftest's lines (None prints nothing);
+    `selftest_fail` is a failing selftest's exit code (gates that shipped 2 keep 2).
+    """
+    if "--selftest" in argv:
+        fails = selftest()
+        if selftest_report is not None:
+            text = selftest_report(fails)
+            if text is not None:
+                print(text)
+        else:
+            for f in fails:
+                print(f"  SELFTEST FAIL: {f}")
+            print(f"{gate}: selftest {'FAILED' if fails else 'OK'}")
+        return selftest_fail if fails else 0
+    for flag, mode in (modes or {}).items():
+        if flag in argv:
+            return mode()
+    try:
+        findings = list(scan())
+    except Exception as e:                              # noqa: BLE001 - exit 2 IS the report
+        print(f"{gate}: DID NOT FINISH LOOKING - {type(e).__name__}: {e}")
+        return 2
+    if scanned is not None:
+        discover.require_scanned(scanned(), gate=gate, dirs=scan_dirs, floor=floor)
+    if report is not None:
+        report(findings)
+    elif findings:
+        print(header(len(findings)) if header else f"{gate}: {len(findings)} finding(s)")
+        for f in findings:
+            print(f"  {describe(f) if describe else f}")
+        for line in advice:
+            print(f"  {line}")
+    else:
+        print(ok() if ok else f"{gate}: OK")
+    return 1 if findings else 0
