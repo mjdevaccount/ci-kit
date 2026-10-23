@@ -49,9 +49,9 @@ from collections.abc import Sequence
 from sqlglot import exp
 from sqlglot.tokens import TokenType
 
-from ci_kit import astread, discover
+from ci_kit import astread, discover, site_lint
 from ci_kit.ratchet import RatchetSet
-from ci_kit.sql import sqlast
+from ci_kit.sql import _cli, sqlast
 
 #: RULE B's target types: ones a python str can't be binary-encoded as. text/varchar/json/jsonb/
 #: array/vector are EXCLUDED -- asyncpg encodes a str for those fine. Values are the key spelling,
@@ -354,12 +354,12 @@ def selftest(cfg: Config) -> list[str]:
 
     # A SQL VALUE sqlglot CANNOT PARSE MUST EXIT 2 — never a clean pass, never exit 1.
     checks += 1
-    try:
-        scan_text("selftest.py", _q("".join(("SEL", "ECT FROM WHERE CAST(:x AS"))), cfg)
-        fails.append("  an unparseable SQL value did NOT exit 2 — the gate would pass it unread")
-    except SystemExit as exc:
-        if exc.code != 2:
-            fails.append(f"  an unparseable SQL value exited {exc.code}, not 2")
+    blind = _cli.blind_probe(
+        lambda: scan_text("selftest.py", _q("".join(("SEL", "ECT FROM WHERE CAST(:x AS"))), cfg),
+        missed="  an unparseable SQL value did NOT exit 2 — the gate would pass it unread",
+        wrong="  an unparseable SQL value exited {code}, not 2")
+    if blind:
+        fails.append(blind)
 
     # THE COVERAGE RATCHET, EXERCISED FOR REAL. The stderr line it prints is the mechanism WORKING.
     if cfg.required_dirs:
@@ -402,52 +402,61 @@ def _parser(description: str | None, standalone: bool) -> argparse.ArgumentParse
 
 def main(argv: Sequence[str] | None = None, cfg: Config | None = None, *,
          description: str | None = None) -> int:
-    """The CLI. A repo that wraps this passes its own `cfg` (and docstring); standalone, the
-    scan dirs come from `--scan-dir` and every one of them is required."""
+    """The CLI, on `site_lint.check`. A repo that wraps this passes its own `cfg` (and
+    docstring); standalone, the scan dirs come from `--scan-dir` and every one of them is required."""
     args = _parser(description, cfg is None).parse_args(argv)
     if cfg is None and args.selftest:
-        return 1 if selftest(Config(root=args.root.resolve())) else 0
-    if cfg is None:
+        cfg = Config(root=args.root.resolve())
+    elif cfg is None:
         if not args.scan_dir:
             print("ci-sql-casts: no --scan-dir given -- nothing to read (exit 2)", file=sys.stderr)
             return 2
         dirs = tuple(args.scan_dir)
         cfg = Config(root=args.root.resolve(), scan_dirs=dirs, required_dirs=dirs,
                      baseline=args.baseline, d_baseline=args.d_baseline)
+    c = cfg
+    counts: dict[str, int] = {}
 
-    if args.selftest:
-        return 1 if selftest(cfg) else 0
-
-    if args.write_baseline:
+    def write() -> int:
         # RE-BLESSING NEEDS A STATED REASON (ci_kit.ratchet), so the per-rule diff is printed,
         # and `--rule` keeps reviewing one Rule-D site from blessing every pending B.
-        _, b_keys, d_keys = scan(cfg)
-        rb, rd = cfg.ratchets()
+        _, b_keys, d_keys = scan(c)
+        rb, rd = c.ratchets()
         for rule, keys, ratchet in (("b", b_keys, rb), ("d", d_keys, rd)):
             if args.rule not in (rule, "both"):
                 continue
             was = ratchet.load()
             for k in sorted(keys - was):
-                print(f"[{cfg.gate}]   + RULE {rule.upper()} {k}")
+                print(f"[{c.gate}]   + RULE {rule.upper()} {k}")
             for k in sorted(was - keys):
-                print(f"[{cfg.gate}]   - RULE {rule.upper()} {k}")
+                print(f"[{c.gate}]   - RULE {rule.upper()} {k}")
             ratchet.write(keys)
-            print(f"[{cfg.gate}] wrote {len(keys)} Rule-{rule.upper()} key(s) "
-                  f"({len(keys - was)} added, {len(was - keys)} removed) -> {cfg.rel(ratchet.path)}")
+            print(f"[{c.gate}] wrote {len(keys)} Rule-{rule.upper()} key(s) "
+                  f"({len(keys - was)} added, {len(was - keys)} removed) -> {c.rel(ratchet.path)}")
         return 0
 
-    found, b_now, d_now = check(cfg)
-    if found:
-        print(f"[{cfg.gate}] asyncpg CAST-on-str footgun check FAILED:\n", file=sys.stderr)
-        for p in found:
-            print(f"  {p}", file=sys.stderr)
-        print(f"\n[{cfg.gate}] {len(found)} problem(s). See {cfg.doc} "
-              f"for the fix + waiver docs.", file=sys.stderr)
-        return 1
-    # THE COUNTS COME FROM THE RUN, never from prose.
-    print(f"[{cfg.gate}] OK — no Rule A/C violations; "
-          f"{len(b_now)} Rule-B site(s) and {len(d_now)} Rule-D site(s), all baselined.")
-    return 0
+    def run_check() -> list[str]:
+        found, b_now, d_now = check(c)
+        counts.update(b=len(b_now), d=len(d_now))
+        return found
+
+    def report(found: Sequence[str]) -> None:
+        if found:
+            print(f"[{c.gate}] asyncpg CAST-on-str footgun check FAILED:\n", file=sys.stderr)
+            for p in found:
+                print(f"  {p}", file=sys.stderr)
+            print(f"\n[{c.gate}] {len(found)} problem(s). See {c.doc} "
+                  f"for the fix + waiver docs.", file=sys.stderr)
+            return
+        # THE COUNTS COME FROM THE RUN, never from prose.
+        print(f"[{c.gate}] OK — no Rule A/C violations; "
+              f"{counts['b']} Rule-B site(s) and {counts['d']} Rule-D site(s), all baselined.")
+
+    # selftest() prints its own lines, so the report adds none.
+    return site_lint.check(
+        _cli.flags(args, "selftest", "write_baseline"), gate=c.gate, scan=run_check,
+        selftest=lambda: selftest(c), selftest_report=lambda _fails: None,
+        modes={"--write-baseline": write}, report=report)
 
 
 if __name__ == "__main__":

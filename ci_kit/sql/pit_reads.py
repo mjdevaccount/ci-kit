@@ -27,9 +27,9 @@ from collections.abc import Sequence
 
 from sqlglot import exp
 
-from ci_kit import astread, discover
+from ci_kit import astread, discover, site_lint
 from ci_kit.ratchet import RatchetCount
-from ci_kit.sql import sqlast
+from ci_kit.sql import _cli, sqlast
 
 #: the SQL wall clocks as sqlglot's postgres dialect parses them. `now()` and
 #: `current_timestamp` are ONE node type, told apart by the source text the node spans.
@@ -176,52 +176,51 @@ def selftest(cfg: Config) -> list[str]:
     if scan_(concat).get(key) != 1:
         fails.append(f"a {w} on one line of a concatenated literal must waive ITS line only")
 
-    try:
-        scan_("q(" + repr("".join(("SEL", "ECT FROM WHERE now("))) + ")")
-        fails.append("an unparseable SQL value did not exit 2")
-    except SystemExit as exc:
-        if exc.code != 2:
-            fails.append(f"an unparseable SQL value exited {exc.code}, not 2")
-    return fails
+    blind = _cli.blind_probe(lambda: scan_("q(" + repr("".join(("SEL", "ECT FROM WHERE now("))) + ")"),
+                             missed="an unparseable SQL value did not exit 2",
+                             wrong="an unparseable SQL value exited {code}, not 2")
+    return fails + ([blind] if blind else [])
 
 
 def main(argv: Sequence[str] | None = None, cfg: Config | None = None, *,
          description: str | None = None) -> int:
+    """The CLI, on `site_lint.check`. A repo that wraps this passes its own `cfg` (and docstring)."""
     ap = argparse.ArgumentParser(description=description or __doc__)
     ap.add_argument("--write-baseline", action="store_true",
                     help="re-freeze the baseline to the current tree")
+    ap.add_argument("--selftest", action="store_true", help="prove the rule can fire")
     if cfg is None:
-        ap.add_argument("--selftest", action="store_true", help="prove the rule can fire")
         ap.add_argument("--root", type=pathlib.Path, default=pathlib.Path.cwd())
         ap.add_argument("--scan-dir", action="append", default=[], metavar="DIR")
         ap.add_argument("--baseline", type=pathlib.Path, default=Config.baseline)
     args = ap.parse_args(argv)
     if cfg is None:
         cfg = Config(root=args.root.resolve(), scan_dirs=tuple(args.scan_dir), baseline=args.baseline)
-        if args.selftest:
-            fails = selftest(cfg)
-            for f in fails:
-                print(f"  SELFTEST FAIL: {f}", file=sys.stderr)
-            print(f"[{cfg.gate}] selftest {'FAILED' if fails else 'OK'}")
-            return 1 if fails else 0
-        if not cfg.scan_dirs:
+        if not cfg.scan_dirs and not args.selftest:
             print(f"{cfg.gate}: no --scan-dir given -- nothing to read (exit 2)", file=sys.stderr)
             return 2
-    if args.write_baseline:
-        counts = scan(cfg)
-        ratchet = cfg.ratchet()
+    c = cfg
+
+    def write() -> int:
+        counts = scan(c)
+        ratchet = c.ratchet()
         ratchet.write(counts)
-        print(f"[{cfg.gate}] wrote {len(counts)} baseline keys -> {cfg.rel(ratchet.path)}")
+        print(f"[{c.gate}] wrote {len(counts)} baseline keys -> {c.rel(ratchet.path)}")
         return 0
-    found = check(cfg)
-    if found:
-        print(f"[{cfg.gate}] SQL wall-clock ratchet FAILED:\n", file=sys.stderr)
-        for p in found:
-            print(f"  {p}", file=sys.stderr)
-        print(f"\n[{cfg.gate}] {len(found)} problem(s). See {cfg.doc}.", file=sys.stderr)
-        return 1
-    print(f"[{cfg.gate}] OK — no new SQL wall-clock reads beyond the baseline.")
-    return 0
+
+    def report(found: Sequence[str]) -> None:
+        if found:
+            print(f"[{c.gate}] SQL wall-clock ratchet FAILED:\n", file=sys.stderr)
+            for p in found:
+                print(f"  {p}", file=sys.stderr)
+            print(f"\n[{c.gate}] {len(found)} problem(s). See {c.doc}.", file=sys.stderr)
+        else:
+            print(f"[{c.gate}] OK — no new SQL wall-clock reads beyond the baseline.")
+
+    return site_lint.check(
+        _cli.flags(args, "selftest", "write_baseline"), gate=c.gate, scan=lambda: check(c),
+        selftest=lambda: selftest(c), selftest_report=_cli.selftest_report(f"[{c.gate}] selftest"),
+        modes={"--write-baseline": write}, report=report)
 
 
 if __name__ == "__main__":

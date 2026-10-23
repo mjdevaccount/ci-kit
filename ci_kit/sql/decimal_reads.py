@@ -41,9 +41,9 @@ from collections.abc import Callable, Sequence
 
 from sqlglot import exp
 
-from ci_kit import astread, discover
+from ci_kit import astread, discover, site_lint
 from ci_kit.ratchet import RatchetSet
-from ci_kit.sql import sqlast
+from ci_kit.sql import _cli, sqlast
 
 #: a cast to any of these anywhere in the item passes it. `numeric` is kept on purpose
 #: (`round(x::numeric, 2)` still decodes as Decimal, but that is an explicit choice at the site).
@@ -201,13 +201,10 @@ def selftest(cfg: Config) -> list[str]:
     for should_fire, name, src in cases:
         if fired(src) != should_fire:
             fails.append(f"{name}: expected {'a finding' if should_fire else 'silence'}")
-    try:
-        fired("q(" + repr("".join(("SEL", "ECT FROM WHERE"))) + ")")
-        fails.append("an unparseable SQL value did not exit 2")
-    except SystemExit as exc:
-        if exc.code != 2:
-            fails.append(f"an unparseable SQL value exited {exc.code}, not 2")
-    return fails
+    blind = _cli.blind_probe(lambda: fired("q(" + repr("".join(("SEL", "ECT FROM WHERE"))) + ")"),
+                             missed="an unparseable SQL value did not exit 2",
+                             wrong="an unparseable SQL value exited {code}, not 2")
+    return fails + ([blind] if blind else [])
 
 
 def main(argv: Sequence[str] | None = None, cfg: Config | None = None, *,
@@ -216,12 +213,13 @@ def main(argv: Sequence[str] | None = None, cfg: Config | None = None, *,
          before_scan: Callable[[argparse.Namespace], int | None] | None = None) -> int:
     """The CLI. A wrapping repo passes its `cfg`, and may add flags (`extra_args`) and a check that
     runs before the scan and may end the run with its own exit code (`before_scan`) -- the place
-    for a ground-truth freshness check that the kit cannot know how to ask."""
+    for a ground-truth freshness check that the kit cannot know how to ask. The run itself is
+    `site_lint.check`'s; `before_scan` is the caller's and runs ahead of it (never on --selftest)."""
     ap = argparse.ArgumentParser(description=description or __doc__)
     ap.add_argument("--write-baseline", action="store_true")
     ap.add_argument("--list", action="store_true", help="dump raw findings, ignore baseline")
+    ap.add_argument("--selftest", action="store_true", help="prove the rule can fire")
     if cfg is None:
-        ap.add_argument("--selftest", action="store_true", help="prove the rule can fire")
         ap.add_argument("--root", type=pathlib.Path, default=pathlib.Path.cwd())
         ap.add_argument("--scan-dir", action="append", default=[], metavar="DIR")
         ap.add_argument("--cols", type=pathlib.Path, default=Config.cols,
@@ -233,44 +231,54 @@ def main(argv: Sequence[str] | None = None, cfg: Config | None = None, *,
     if cfg is None:
         cfg = Config(root=args.root.resolve(), scan_dirs=tuple(args.scan_dir), cols=args.cols,
                      baseline=args.baseline)
-        if args.selftest:
-            fails = selftest(cfg)
-            for f in fails:
-                print(f"  SELFTEST FAIL: {f}", file=sys.stderr)
-            print(f"[{cfg.gate}] selftest {'FAILED' if fails else 'OK'}")
-            return 1 if fails else 0
-        if not cfg.scan_dirs:
+        if not cfg.scan_dirs and not args.selftest:
             print(f"{cfg.gate}: no --scan-dir given -- nothing to read (exit 2)", file=sys.stderr)
             return 2
-    if before_scan is not None:
+    if before_scan is not None and not args.selftest:
         rc = before_scan(args)
         if rc is not None:
             return rc
-    cols = load_cols(cfg)
-    findings = scan(cols, cfg)
-    if args.list:
+    c = cfg
+    seen: dict[str, int] = {}
+
+    def keys() -> set[str]:
+        return {k for k, _ in scan(load_cols(c), c)}
+
+    def list_raw() -> int:
+        findings = scan(load_cols(c), c)
         for k, _ in findings:
             print(k)
-        print(f"[{cfg.gate}] {len(findings)} raw finding(s) across "
+        print(f"[{c.gate}] {len(findings)} raw finding(s) across "
               f"{len({k.split('|')[0] for k, _ in findings})} file(s)")
         return 0
-    keys = {k for k, _ in findings}
-    ratchet = cfg.ratchet()
-    if args.write_baseline:
-        ratchet.write(keys)
-        print(f"[{cfg.gate}] wrote {len(keys)} baseline keys")
+
+    def write() -> int:
+        now = keys()
+        c.ratchet().write(now)
+        print(f"[{c.gate}] wrote {len(now)} baseline keys")
         return 0
-    new = sorted(keys - ratchet.load())
-    if new:
-        print(f"[{cfg.gate}] NEW uncast NUMERIC reads (THE DECIMAL LAW):\n", file=sys.stderr)
-        for k in new:
-            print(f"  {k}", file=sys.stderr)
-        print(f"\n[{cfg.gate}] {len(new)} new. Cast with ::float8, waive with "
-              f"-- {cfg.waiver}, or --write-baseline after review.", file=sys.stderr)
-        return 1
-    print(f"[{cfg.gate}] OK — no un-baselined uncast NUMERIC reads "
-          f"({len(keys)} grandfathered).")
-    return 0
+
+    def new_keys() -> list[str]:
+        now = keys()
+        seen["keys"] = len(now)
+        return sorted(now - c.ratchet().load())
+
+    def report(new: Sequence[str]) -> None:
+        if new:
+            print(f"[{c.gate}] NEW uncast NUMERIC reads (THE DECIMAL LAW):\n", file=sys.stderr)
+            for k in new:
+                print(f"  {k}", file=sys.stderr)
+            print(f"\n[{c.gate}] {len(new)} new. Cast with ::float8, waive with "
+                  f"-- {c.waiver}, or --write-baseline after review.", file=sys.stderr)
+            return
+        print(f"[{c.gate}] OK — no un-baselined uncast NUMERIC reads "
+              f"({seen['keys']} grandfathered).")
+
+    # --list is read before --write-baseline, as it always was.
+    return site_lint.check(
+        _cli.flags(args, "selftest", "list", "write_baseline"), gate=c.gate, scan=new_keys,
+        selftest=lambda: selftest(c), selftest_report=_cli.selftest_report(f"[{c.gate}] selftest"),
+        modes={"--list": list_raw, "--write-baseline": write}, report=report)
 
 
 if __name__ == "__main__":
