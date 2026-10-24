@@ -28,7 +28,11 @@ KNOWN BLIND (stated, not hidden): `. .env` / `source .env` (bash, not compose, i
 `while IFS== read -r k v; do ...; done < .env`, a presence check (`grep -q '^KEY=' FILE`), a key
 read through a variable holding the whole pattern (`grep "$pat" FILE`), Python and PowerShell
 parsers, and a `<(...)` / `$(...)` that splits the pipeline across physical lines without a
-continuation.
+continuation. Also not matched (none in the estate at 2026-10-24; review round 2): an UNQUOTED
+pattern (`grep ^K= .env`), `'^K=.*'`, `'^export K='`, `--regexp=`, sed capture groups
+(`s/^K=\\(.*\\)/\\1/p`), address forms (`/^K=/s/^K=//p`), a trailing `;` in the sed script, awk
+field tests (`$1=="K"`) or any awk script holding a `"`, and the file on the LEFT (`cat .env |
+grep`, `< .env grep`).
 
 A per-file count ratchet: a NEW site, or a file whose count grows, fails; migrating one shrinks it.
 Exit 0 clean / 1 findings / 2 could not look (git ls-files failed, a file would not decode, no
@@ -76,6 +80,30 @@ _CUT_EQ = r"cut\s+(?:-\S+\s+)*(?:-d\s*['\"]?=|--delimiter[=\s]['\"]?=)"
 GREP_SPLITS = re.compile(r"\|\s*(?:" + _CUT_EQ + r"|sed\b[^|]*\bs([/|#,:])[^/|#,:]*=\1\1|awk\s+-F\s*['\"]?=)")
 # the pipeline a grep feeds ends at a list operator; a later `; x=$(echo a=b | cut -d= -f2)` is not it
 PIPELINE_END = re.compile(r";|&&|\|\||(?<![|&>])&(?![&>])")
+
+
+def pipeline_end(line: str, start: int) -> int:
+    """Index of the first list operator at or after `start` OUTSIDE quotes, else len(line).
+    Quote-blind, `sed 's|^K=||'` or `sed 's/;.*//'` further down the pipe ended it early."""
+    quote = ""
+    i = start
+    while i < len(line):
+        c = line[i]
+        if quote:
+            if c == quote:
+                quote = ""
+            elif c == "\\" and quote == '"':
+                i += 1
+        elif c in "'\"":
+            quote = c
+        elif c == "\\":
+            i += 1
+        else:
+            m = PIPELINE_END.match(line, i)
+            if m:
+                return i
+        i += 1
+    return len(line)
 AWK = re.compile(r"\bawk\s+-F\s*['\"]?=['\"]?\s+(['\"])[^'\"]*/\^" + KEY + r"=/[^'\"]*\1" + OPERAND)
 
 WAIVER = re.compile(r"#\s*env-read-ok:\s*\S")
@@ -96,11 +124,13 @@ def wants_scan(root: pathlib.Path, rel: str) -> bool:
         return True
     if "." in rel.rsplit("/", 1)[-1]:
         return False
+    if not (root / rel).is_file():
+        return False  # a submodule gitlink, a symlink to a directory: not a script
     try:
         with open(root / rel, "rb") as fh:
             head = fh.readline(256)
     except OSError:
-        return True  # let read_source say it could not look
+        return True  # a regular file we cannot open: let read_source say it could not look
     return bool(SHEBANG.match(head.decode("utf-8", errors="replace")))
 
 
@@ -132,8 +162,7 @@ def is_hand_read(line: str) -> bool:
     if SED.search(line) or AWK.search(line) or GREP_P.search(line):
         return True
     for m in GREP.finditer(line):
-        end = PIPELINE_END.search(line, m.end())
-        if GREP_SPLITS.search(line[: end.start()] if end else line, m.end()):
+        if GREP_SPLITS.search(line[: pipeline_end(line, m.end())], m.end()):
             return True
     return False
 
@@ -161,6 +190,8 @@ BAD = [
     "v=$(grep '^K=' < .env | cut --delimiter== -f2-)",
     "v=$(sed -n 's|^K=||p' .env)",
     "v=$(sed -n 's/^K=//p' < .env)",
+    "v=$(grep '^K=' .env | sed 's|^K=||')",
+    "v=$(grep '^K=' .env | sed 's/;.*//' | cut -d= -f2-)",
 ]
 GOOD = [
     "baked=$(docker inspect c --format '{{.Config.Env}}' | sed -n 's/^GIT_SHA=//p' | sed -n 1p)",

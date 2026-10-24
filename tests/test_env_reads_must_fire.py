@@ -82,6 +82,17 @@ def test_a_tracked_binary_is_skipped_not_blind(new_repo) -> None:
     assert _run(repo).returncode == 0
 
 
+def test_a_submodule_gitlink_is_skipped_not_blind(new_repo) -> None:
+    # a gitlink at an extensionless path is a directory on disk: not a script, never exit 2
+    repo = tracked_repo(new_repo, {"scripts/a.sh": GOOD})
+    added = git(repo, "update-index", "--add", "--cacheinfo", "160000," + "1" * 40 + ",vendor")
+    assert added.returncode == 0, added.stderr
+    (repo / "vendor").mkdir()
+    assert "vendor" in git(repo, "ls-files").stdout.split()
+    r = _run(repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 def test_a_grep_lookbehind_read_fires(new_repo) -> None:
     # grep -oP '(?<=^K=).*' FILE -- one command, no pipe, still a hand reader (edge-host's
     # mcp-grafana-stdio.sh was one, found only after this shape was added).
