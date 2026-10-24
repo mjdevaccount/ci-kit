@@ -15,6 +15,15 @@ RED = {"__typename": "CheckRun", "name": "unit tests", "status": "COMPLETED", "c
 OPTIONAL_RED = {"__typename": "CheckRun", "name": "nice to have", "status": "COMPLETED", "conclusion": "FAILURE"}
 
 
+def gql(prs: list[dict]) -> str:
+    """`gh pr list`-shaped rows -> the GraphQL answer ci_kit.pr_list.rows reads back."""
+    return json.dumps({"data": {"repository": {"pullRequests": {"nodes": [{
+        **{k: v for k, v in p.items() if k not in ("labels", "statusCheckRollup")},
+        "labels": {"nodes": p.get("labels") or []},
+        "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": p.get("statusCheckRollup") or []}}}}]},
+    } for p in prs]}}}})
+
+
 def _pr(n: int, merge: str, *checks: dict, armed_at: str = "") -> dict:
     return {"number": n, "mergeStateStatus": merge, "statusCheckRollup": list(checks),
             "autoMergeRequest": {"enabledAt": armed_at or f"2026-10-24T00:{n:02d}:00Z"}}
@@ -89,16 +98,16 @@ def test_run_puts_only_the_queue_head(monkeypatch: pytest.MonkeyPatch) -> None:
     prs = [{**base, **_pr(n, "BEHIND", GREEN), "headRefName": f"b{n}"} for n in (7, 8)]
     calls: list[tuple] = []
 
-    def fake(*a: str, check: bool = True) -> _Done:
+    def fake(*a: str, check: bool = True, env: dict | None = None) -> _Done:
         calls.append(a)
-        if a[:2] == ("pr", "list"):
-            return _Done(0, json.dumps(prs))
+        if a[:2] == ("api", "graphql"):
+            return _Done(0, gql(prs))
         return _Done(0, "")
 
     monkeypatch.setattr(upd, "_gh", fake)
     summary: list[str] = []
     assert upd.run("o/r", summary, [], Options(max_in_flight=1)) == 0
-    puts = [c for c in calls if c[0] == "api"]
+    puts = [c for c in calls if c[:3] == ("api", "-X", "PUT")]
     assert [c[3] for c in puts] == ["repos/o/r/pulls/7/update-branch"]
     assert "#8: held, queued, position 1 (in flight: 0/1)" in summary
     assert summary[1].startswith("queue: 0/1 in flight")

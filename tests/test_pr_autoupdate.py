@@ -58,11 +58,20 @@ _PR = {"number": 9, "title": "t", "url": "u", "autoMergeRequest": {"x": 1},
        "isCrossRepository": False, "labels": [], "headRefOid": "abc", "headRefName": "b9"}
 
 
+def gql(prs: list[dict]) -> str:
+    """`gh pr list`-shaped rows -> the GraphQL answer ci_kit.pr_list.rows reads back."""
+    return json.dumps({"data": {"repository": {"pullRequests": {"nodes": [{
+        **{k: v for k, v in p.items() if k not in ("labels", "statusCheckRollup")},
+        "labels": {"nodes": p.get("labels") or []},
+        "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": p.get("statusCheckRollup") or []}}}}]},
+    } for p in prs]}}}})
+
+
 def _fake_gh(calls: list[tuple], *, edit_rc: int = 0, running: bool = False, state: str = "OPEN"):
-    def fake(*a: str, check: bool = True) -> _Done:
+    def fake(*a: str, check: bool = True, env: dict | None = None) -> _Done:
         calls.append(a)
-        if a[:2] == ("pr", "list"):
-            return _Done(0, json.dumps([_PR]))
+        if a[:2] == ("api", "graphql"):
+            return _Done(0, gql([_PR]))
         if a[:2] == ("pr", "view"):
             return _Done(0, state + chr(10))
         if a[:2] == ("run", "list"):
@@ -111,7 +120,7 @@ def test_a_pr_mid_review_is_not_updated(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(upd, "_gh", _fake_gh(calls, running=True))
     summary: list[str] = []
     assert upd.run("o/r", summary, [], Options(review_workflow="review-gate.yml")) == 0
-    assert not any(c[0] == "api" for c in calls)
+    assert not any(c[:3] == ("api", "-X", "PUT") for c in calls)
     assert "skipped, review gate running" in summary[-1]
 
 
@@ -121,7 +130,7 @@ def test_without_a_review_workflow_a_running_review_is_not_consulted(monkeypatch
     monkeypatch.setattr(upd, "_gh", _fake_gh(calls, running=True))
     monkeypatch.setattr(upd, "page", lambda *a: "published")
     assert upd.run("o/r", [], [], Options()) == 0
-    assert any(c[0] == "api" for c in calls) and not any(c[:2] == ("run", "list") for c in calls)
+    assert any(c[:3] == ("api", "-X", "PUT") for c in calls) and not any(c[:2] == ("run", "list") for c in calls)
 
 
 def test_a_failed_gh_call_names_gh_stderr_in_the_summary(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
