@@ -25,6 +25,19 @@ jobs:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v10.3.0
       - run: uv sync --frozen --all-extras   # the sql extra: ci_kit.sql needs sqlglot
+      # The README's rule: `version` in pyproject.toml moves with each vX.Y.Z tag. Nothing checked
+      # it, so v1.6.1, v1.7.0 and v1.7.1 were all cut from commits that still said 1.6.0. A tag is
+      # immutable once pushed, so this cannot stop a stale one. It turns the NEXT PR red until
+      # the version catches up, and a version bumped ahead of its tag passes. Exit 2 = could not read.
+      - name: pyproject version is not behind the newest release tag
+        run: |
+          set -euo pipefail
+          have=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -1)
+          top=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+          [ -n "$have" ] && [ -n "$top" ] || { echo "::error::could not read version ('$have') or newest tag ('$top')"; exit 2; }
+          newest=$(printf '%s\n%s\n' "v$have" "$top" | sort -V | tail -1)
+          [ "$newest" = "v$have" ] || { echo "::error::pyproject.toml version $have is behind release tag $top -- bump it (README: the two move together)"; exit 1; }
+          echo "version $have, newest tag $top: ok"
       - name: ruff
         run: uv run ruff check --output-format=github .
       - name: must-fire suite
