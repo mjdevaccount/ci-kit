@@ -47,7 +47,7 @@ import sys
 import urllib.request
 from dataclasses import dataclass
 
-from ci_kit import pr_queue
+from ci_kit import pr_list, pr_queue
 
 LABEL = "conflict"
 
@@ -156,11 +156,18 @@ def _gh_read(*args: str) -> subprocess.CompletedProcess[str]:
     as before rather than differently.
     """
     read = os.environ.get(READ_TOKEN, "")
+    first = ""
     if read:
         r = _gh(*args, check=False, env={**os.environ, "GH_TOKEN": read})
         if r.returncode == 0:
             return r
-    return _gh(*args)
+        first = (r.stderr or "").strip()
+    r = _gh(*args, check=False)
+    if r.returncode:
+        # name BOTH refusals: the fallback's alone hid why the read token failed (2026-10-24)
+        err = (r.stderr or "").strip() + (f" | read token said: {first[-300:]}" if first else "")
+        raise subprocess.CalledProcessError(r.returncode, ["gh", *args[:2]], r.stdout, err)
+    return r
 
 
 def page(title: str, body: str, click: str) -> str:
@@ -178,9 +185,7 @@ def page(title: str, body: str, click: str) -> str:
 
 
 def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
-    prs = json.loads(_gh_read("pr", "list", "-R", repo, "--state", "open", "--limit", "200", "--json",
-                         "number,title,url,autoMergeRequest,isCrossRepository,labels,headRefOid,headRefName,"
-                         "mergeStateStatus,statusCheckRollup").stdout)
+    prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout))
     armed = [p for p in prs if p.get("autoMergeRequest") and not p.get("isCrossRepository")]
     summary.append(f"{len(armed)} armed PR(s) of {len(prs)} open")
     q = pr_queue.plan(armed, opts.max_in_flight, opts.required)
