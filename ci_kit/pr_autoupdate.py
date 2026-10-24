@@ -138,8 +138,29 @@ def page_text(repo: str, pr: dict, row: str, opts: Options) -> tuple[str, str]:
     return f"{repo.rsplit('/', 1)[-1]} #{pr['number']}: conflicts with main", body
 
 
-def _gh(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["gh", *args], check=check, capture_output=True, text=True)
+def _gh(*args: str, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["gh", *args], check=check, capture_output=True, text=True, env=env)
+
+
+READ_TOKEN = "CI_KIT_READ_TOKEN"
+
+
+def _gh_read(*args: str) -> subprocess.CompletedProcess[str]:
+    """A read-only gh call, made with CI_KIT_READ_TOKEN (the job's GITHUB_TOKEN) when set.
+
+    The push token is a fine-grained PAT, and GitHub refuses a fine-grained PAT the check runs
+    inside `statusCheckRollup` ("Resource not accessible by personal access token", live
+    2026-10-24 on every repo with an open PR once v1.6.0 asked for it). GITHUB_TOKEN with
+    `checks: read` + `statuses: read` can read them. Falls back to the push token when the read
+    token is unset or refused, so a caller that has not granted those permissions fails exactly
+    as before rather than differently.
+    """
+    read = os.environ.get(READ_TOKEN, "")
+    if read:
+        r = _gh(*args, check=False, env={**os.environ, "GH_TOKEN": read})
+        if r.returncode == 0:
+            return r
+    return _gh(*args)
 
 
 def page(title: str, body: str, click: str) -> str:
@@ -157,7 +178,7 @@ def page(title: str, body: str, click: str) -> str:
 
 
 def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
-    prs = json.loads(_gh("pr", "list", "-R", repo, "--state", "open", "--limit", "200", "--json",
+    prs = json.loads(_gh_read("pr", "list", "-R", repo, "--state", "open", "--limit", "200", "--json",
                          "number,title,url,autoMergeRequest,isCrossRepository,labels,headRefOid,headRefName,"
                          "mergeStateStatus,statusCheckRollup").stdout)
     armed = [p for p in prs if p.get("autoMergeRequest") and not p.get("isCrossRepository")]
