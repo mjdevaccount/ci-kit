@@ -133,3 +133,24 @@ def test_a_failed_gh_call_names_gh_stderr_in_the_summary(monkeypatch: pytest.Mon
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     assert upd.main(["--repo", "o/r"]) == 2
     assert "gh said: GraphQL: Resource not accessible by personal access token" in capsys.readouterr().out
+
+
+def test_the_pr_list_reads_with_the_read_token_and_falls_back_to_the_push_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 2026-10-24: a fine-grained PAT is refused the check runs in statusCheckRollup
+    seen: list[str | None] = []
+
+    def fake(args: list[str], check: bool, capture_output: bool, text: bool, env: dict[str, str] | None):
+        seen.append((env or {}).get("GH_TOKEN"))
+        rc = 1 if env is not None else 0
+        if rc and check:
+            raise subprocess.CalledProcessError(rc, args)
+        return subprocess.CompletedProcess(args, rc, "[]", "refused" if rc else "")
+
+    monkeypatch.setattr(upd.subprocess, "run", fake)
+    monkeypatch.setenv("CI_KIT_READ_TOKEN", "ghs_read")
+    assert upd._gh_read("pr", "list").stdout == "[]"
+    assert seen == ["ghs_read", None]
+    seen.clear()
+    monkeypatch.delenv("CI_KIT_READ_TOKEN")
+    upd._gh_read("pr", "list")
+    assert seen == [None]

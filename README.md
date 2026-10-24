@@ -60,6 +60,8 @@ jobs:
 jobs:
   update:
     uses: mjdevaccount/ci-kit/.github/workflows/pr-autoupdate.yml@v1
+    # the PR list (with check results) is read with GITHUB_TOKEN: a fine-grained PAT cannot read check runs
+    permissions: { contents: read, pull-requests: read, checks: read, statuses: read }
     secrets:
       token: ${{ secrets.YOUR_PR_UPDATE_TOKEN }}   # fine-grained PAT; GITHUB_TOKEN fires no CI
       ntfy-url: ${{ secrets.YOUR_NTFY_URL }}       # optional

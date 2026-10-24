@@ -7,6 +7,7 @@
 #     push: { branches: [main] }
 #     workflow_dispatch:
 #   concurrency: { group: pr-autoupdate, cancel-in-progress: false }
+#   permissions: { contents: read, pull-requests: read, checks: read, statuses: read }
 #   jobs:
 #     update:
 #       uses: mjdevaccount/ci-kit/.github/workflows/pr-autoupdate.yml@v1
@@ -70,8 +71,14 @@ on:
         description: JSON list of PR numbers newly labelled as conflicting by this run
         value: ${{ jobs.update.outputs.relock }}
 
+# The open-PR list reads `statusCheckRollup` with GITHUB_TOKEN (CI_KIT_READ_TOKEN below): GitHub
+# refuses a fine-grained PAT the check runs inside it (2026-10-24, every caller with an open PR).
+# A caller must GRANT these reads -- a called workflow can only narrow the caller's permissions.
 permissions:
   contents: read
+  pull-requests: read
+  checks: read
+  statuses: read
 
 jobs:
   update:
@@ -84,6 +91,7 @@ jobs:
       relock: ${{ steps.update.outputs.relock }}
     env:
       GH_TOKEN: ${{ secrets.token }}
+      CI_KIT_READ_TOKEN: ${{ github.token }}
       NTFY_URL: ${{ secrets.ntfy-url }}
       # check names carry spaces ("unit tests"), and the action word-splits `args`: an env var, not a flag
       CI_KIT_REQUIRED_CHECKS: ${{ inputs.required-checks }}
