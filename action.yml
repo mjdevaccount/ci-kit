@@ -1,7 +1,7 @@
 name: ci-kit
 description: >-
   Run one ci_kit console script (ci-doc-lint, ci-secret-argv-lint, ci-pr-autoupdate, ci-pin-drift,
-  ci-manual-lint, ci-guard-selfproof, or a SQL gate: ci-sql-casts, ci-pit-reads, ci-decimal-reads,
+  ci-manual-lint, ci-guard-selfproof, ci-env-reads, or a SQL gate: ci-sql-casts, ci-pit-reads, ci-decimal-reads,
   ci-phantom-columns, ci-column-comments)
   against the caller's checkout, installed with uvx from THIS action's own download of ci-kit.
 
@@ -13,7 +13,7 @@ description: >-
 
 inputs:
   tool:
-    description: console script to run (ci-doc-lint | ci-secret-argv-lint | ci-pr-autoupdate | ci-pin-drift | ci-manual-lint | ci-guard-selfproof | ci-sql-casts | ci-pit-reads | ci-decimal-reads | ci-phantom-columns | ci-column-comments)
+    description: console script to run (ci-doc-lint | ci-secret-argv-lint | ci-pr-autoupdate | ci-pin-drift | ci-manual-lint | ci-guard-selfproof | ci-env-reads | ci-sql-casts | ci-pit-reads | ci-decimal-reads | ci-phantom-columns | ci-column-comments)
     required: true
   args:
     description: arguments, word-split by the shell
@@ -39,7 +39,7 @@ runs:
         set -euo pipefail
         # the SQL gates need the `sql` extra (sqlglot); every other tool is zero-dependency
         case "$TOOL" in
-          ci-doc-lint|ci-secret-argv-lint|ci-pr-autoupdate|ci-pin-drift|ci-queue-wait|ci-manual-lint|ci-guard-selfproof) from="$GITHUB_ACTION_PATH" ;;
+          ci-doc-lint|ci-secret-argv-lint|ci-pr-autoupdate|ci-pin-drift|ci-queue-wait|ci-manual-lint|ci-guard-selfproof|ci-env-reads) from="$GITHUB_ACTION_PATH" ;;
           ci-sql-casts|ci-pit-reads|ci-decimal-reads|ci-phantom-columns|ci-column-comments)
             from="ci-kit[sql] @ file://$GITHUB_ACTION_PATH" ;;
           *) echo "::error::unknown ci_kit tool: $TOOL"; exit 2 ;;

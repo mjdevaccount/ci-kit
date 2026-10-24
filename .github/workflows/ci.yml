@@ -61,6 +61,11 @@ jobs:
         uses: ./
         with:
           tool: ci-secret-argv-lint
+      - name: env-reads selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-env-reads
+          args: --selftest
       - name: sql gate selftest (through the action, which installs the sql extra)
         uses: ./
         with:
