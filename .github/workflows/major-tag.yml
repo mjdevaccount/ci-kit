@@ -13,12 +13,18 @@
 # daily cron that heals a major tag left behind by a failed run. Nothing else watches a tag-push
 # run, so the cron is the outside witness; mcp/scripts/ci-schedule-audit.py REGISTRY watches the
 # cron. The job VERIFIES each move with ls-remote and fails if the remote did not take it.
+#
+# REUSABLE (2026-10-24): `workflow_call` lets another repo run this same job against ITS OWN
+# tags -- checkout and the token are the caller's, so the caller declares the three triggers
+# and `permissions: contents: write`, and calls `...ci-kit/.github/workflows/major-tag.yml@v1`.
+# edge-ci's v1 sat two releases behind for want of exactly this; one rule, not a copy per repo.
 name: major-tag
 
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
+  workflow_call:
   schedule:
     - cron: '17 6 * * *'
 
