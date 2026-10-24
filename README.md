@@ -15,6 +15,7 @@ nothing has verified nothing.
 | `ci_kit/doc_lint.py` | `ci-doc-lint`: a doc names a path that **existed and is gone**. Not "does this resolve today" (~90% noise over a real corpus) but Tan/Wagner/Treude's question (EMSE 2024): *did this path's count fall from a positive integer to zero?* Routes, flag lists and prose were never files, so they go quiet with **no allowlist**. Also reads source files for `docs/**.md` pointers and `.claude/rules/*.md` auto-load triggers. Shrink-only baseline; `<!-- doc-rot: historical -->` opts a teardown record out, in the file itself |
 | `ci_kit/secret_argv.py` | `ci-secret-argv-lint`: no secret expanded on the **host** into a `docker exec` / `curl` / `ssh` argv (it lands in `docker events`, `docker inspect`, `ps`), nor hoisted with `$(docker exec c printenv KEY)`. The fix is to let it expand where it lives: `docker exec c sh -c '... "$KEY" ...'` |
 | `ci_kit/pr_autoupdate.py` | `ci-pr-autoupdate`: merge main into every open PR with auto-merge **armed**, so "require branches up to date" is affordable; a conflict gets one label and one page, never more. `--max-in-flight N` makes it a **serial queue** (`ci_kit/pr_queue.py`): at most N armed PRs tested against current main at once, oldest-armed first, skipping a PR whose own checks are red or still running. Under strict protection only one PR merges per main sha, so updating all of them threw away 70% of PR CI runs (trade-data, 2026-10-24) |
+| `ci_kit/pr_list.py` | library: the updater's open-PR list as ONE narrow GraphQL query (check-run name/status/conclusion, status context/state, nothing more), returned in `gh pr list --json` shape. `gh pr list --json statusCheckRollup` also selects each check's workflow run, which a token without `actions: read` is refused (v1.7.0 still was, live 2026-10-24) |
 | `ci_kit/queue_wait.py` | `ci-queue-wait`: p90 time one workflow's runs waited for a runner over the last N hours, exit 1 over `--max-p90`, 2 when fewer than `--min-runs` were measured. The number the treadmill above hid |
 | `ci_kit/pin_drift.py` | `ci-pin-drift`: every `<kit>@vX.Y.Z` / `?tag=vX.Y.Z` / `<kit>/releases/download/vX.Y.Z/` pin in the given files is the newest release tag on `--remote`, else exit 1. A kit fix that never reaches a consumer must not fail silently |
 | `ci_kit/manual_lint.py` | `ci-manual-lint`: every path an agent manual (`CLAUDE.md`) names **resolves today** in `git ls-files`. The question `ci-doc-lint` deliberately cannot answer -- a path that was never real -- asked only of the file every session loads. Quiet by SHAPE (routes, flags, prose with slashes, image tags, formulas), not by allowlist; a sibling-repo pointer is checked when that checkout is present and silent when not. Optional: stale migration ranges, line budget, empty placeholder packages, reference-doc dirs + freshness stamp, a total index |
@@ -34,6 +35,7 @@ nothing has verified nothing.
 | `.github/workflows/secret-argv.yml` | reusable: the secret-argv lint + its selftest |
 | `.github/workflows/gitleaks.yml` | reusable: secret scan, `mode: tree / history / action` |
 | `.github/workflows/pr-autoupdate.yml` | reusable: the armed-PR updater; output `relock` |
+| `.github/workflows/major-tag.yml` | this repo's own: moves each floating `vX` to its highest `vX.Y.Z` on every release tag |
 | `.pre-commit-hooks.yaml` | hooks `doc-refs`, `secret-argv` |
 
 ## Using it
@@ -60,7 +62,8 @@ jobs:
 jobs:
   update:
     uses: mjdevaccount/ci-kit/.github/workflows/pr-autoupdate.yml@v1
-    # the PR list (with check results) is read with GITHUB_TOKEN: a fine-grained PAT cannot read check runs
+    # the PR list (with check results) is read with GITHUB_TOKEN via one narrow GraphQL query
+    # (ci_kit/pr_list.py): a fine-grained PAT cannot read check runs
     permissions: { contents: read, pull-requests: read, checks: read, statuses: read }
     secrets:
       token: ${{ secrets.YOUR_PR_UPDATE_TOKEN }}   # fine-grained PAT; GITHUB_TOKEN fires no CI
