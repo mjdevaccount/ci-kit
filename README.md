@@ -145,6 +145,9 @@ kit's own gitleaks workflow.
 Change, PR, CI green, merge. **Library releases are immutable `vX.Y.Z` tags, never moved**: a
 consumer's lockfile records the tag and its commit, so moving one breaks `--frozen` installs; a
 fix is the next patch tag, and `version` in `pyproject.toml` moves with it. The reusable
-workflows reference the action as `mjdevaccount/ci-kit@v1`, a moving major that is re-pointed at
-each release (`git tag -f v1 && git push -f origin v1` only after that release's CI is green); a
-breaking change is a new major (`v2`) with those references updated in the same commit.
+workflows reference the action as `mjdevaccount/ci-kit@v1`, a moving major. **Nobody moves it by
+hand**: `.github/workflows/major-tag.yml` points each `vX` at the highest `vX.Y.Z` on every release
+tag push, on `workflow_dispatch`, and daily, and verifies the move with `ls-remote` (a backport or
+pre-release tag never moves it). So push the `vX.Y.Z` tag only after that release's CI is green;
+the major follows. A breaking change is a new major (`v2`) with those references updated in the
+same commit.
