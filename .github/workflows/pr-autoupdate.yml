@@ -46,6 +46,18 @@ on:
         description: the conflict label (the page dedup)
         type: string
         default: conflict
+      max-in-flight:
+        description: >-
+          armed PRs tested against current main at once, oldest-armed first (0 = update every armed
+          PR). Under strict protection only one PR merges per main sha, so 1 wastes no CI run; call
+          this workflow on `workflow_run` of your check workflows too, or a held PR waits for the next
+          push to main (ci_kit/pr_queue.py)
+        type: number
+        default: 0
+      required-checks:
+        description: comma-separated check names the queue reads (your branch protection's required contexts; '' = every check)
+        type: string
+        default: ""
     secrets:
       token:
         description: fine-grained PAT with contents, pull requests and workflows RW, actions read, on the caller repo
@@ -73,6 +85,8 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.token }}
       NTFY_URL: ${{ secrets.ntfy-url }}
+      # check names carry spaces ("unit tests"), and the action word-splits `args`: an env var, not a flag
+      CI_KIT_REQUIRED_CHECKS: ${{ inputs.required-checks }}
     steps:
       - name: Refuse to run unconfigured
         run: |
@@ -89,5 +103,6 @@ jobs:
             --repo ${{ github.repository }}
             --tracker ${{ inputs.tracker }}
             --label ${{ inputs.label }}
+            --max-in-flight ${{ inputs.max-in-flight }}
             ${{ inputs.review-workflow != '' && format('--review-workflow {0}', inputs.review-workflow) || '' }}
             ${{ inputs.relock && '--relock' || '' }}

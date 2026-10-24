@@ -21,7 +21,10 @@ actions read; workflows because an update that brings in a main commit touching
 
 OPTIONS. `--review-workflow` (skip a PR whose review gate is running; empty = the repo has none),
 `--tracker` (the issue whose row a page quotes; 0 = none), `--relock` (the caller relocks
-lockfile-only conflicts, so the page says so) and `--label` (the conflict label; `conflict`).
+lockfile-only conflicts, so the page says so), `--label` (the conflict label; `conflict`), and
+`--max-in-flight N` + `--required-checks a,b` (a serial queue: at most N armed PRs tested against
+current main at once, oldest-armed first; 0 = every armed PR. The policy and the measurement
+behind it: ci_kit/pr_queue.py).
 
 CONFLICT = TRANSITION-ONLY PAGE. The conflict label is the dedup state: a PR that conflicts and
 is not labelled gets the label AND one ntfy push (env `NTFY_URL`; unset = no push) naming the PR
@@ -44,6 +47,8 @@ import sys
 import urllib.request
 from dataclasses import dataclass
 
+from ci_kit import pr_queue
+
 LABEL = "conflict"
 
 
@@ -53,6 +58,8 @@ class Options:
     tracker: int = 0  # the issue whose row for a PR is quoted in the page; 0 = none
     relock: bool = False  # the caller relocks lockfile-only conflicts
     label: str = LABEL  # the conflict label (the page dedup)
+    max_in_flight: int = 0  # PRs tested against current main at once (pr_queue); 0 = update every armed PR
+    required: tuple[str, ...] = ()  # the check names that count for pr_queue; () = every check
 
 
 @dataclass(frozen=True)
@@ -151,15 +158,23 @@ def page(title: str, body: str, click: str) -> str:
 
 def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     prs = json.loads(_gh("pr", "list", "-R", repo, "--state", "open", "--limit", "200", "--json",
-                         "number,title,url,autoMergeRequest,isCrossRepository,labels,headRefOid,headRefName").stdout)
+                         "number,title,url,autoMergeRequest,isCrossRepository,labels,headRefOid,headRefName,"
+                         "mergeStateStatus,statusCheckRollup").stdout)
     armed = [p for p in prs if p.get("autoMergeRequest") and not p.get("isCrossRepository")]
     summary.append(f"{len(armed)} armed PR(s) of {len(prs)} open")
+    q = pr_queue.plan(armed, opts.max_in_flight, opts.required)
+    if opts.max_in_flight > 0:
+        summary.append(f"queue: {len(q.in_flight)}/{opts.max_in_flight} in flight "
+                       f"[{', '.join('#' + str(p['number']) for p in q.in_flight)}], {len(q.update)} to attempt, "
+                       f"{len(q.held)} held")
+        summary += [f"#{p['number']}: in flight against current main" for p in q.in_flight]
+        summary += [f"#{p['number']}: held, {why}" for p, why in q.held]
     tracker = ""
     if opts.tracker:
         tracker = _gh("issue", "view", str(opts.tracker), "-R", repo, "--json", "body", "-q",
                       ".body", check=False).stdout
     errors = 0
-    for p in armed:
+    for p in q.update:
         n = p["number"]
         labelled = any(lb.get("name") == opts.label for lb in p.get("labels") or [])
         if reviewing(repo, p["headRefName"], opts.review_workflow):
@@ -207,9 +222,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--relock", action="store_true",
                     help="the caller relocks lockfile-only conflicts; say so in the page")
     ap.add_argument("--label", default=LABEL, help="the conflict label (default: %(default)s)")
+    ap.add_argument("--max-in-flight", type=int, default=0,
+                    help="armed PRs tested against current main at once, oldest-armed first (0: every armed PR)")
+    ap.add_argument("--required-checks", default=os.environ.get("CI_KIT_REQUIRED_CHECKS", ""),
+                    help="comma-separated check names that count for the queue ('' : every check on the head;"
+                         " default: env CI_KIT_REQUIRED_CHECKS, since names carry spaces)")
     args = ap.parse_args(argv)
     opts = Options(review_workflow=args.review_workflow, tracker=args.tracker, relock=args.relock,
-                   label=args.label)
+                   label=args.label, max_in_flight=args.max_in_flight,
+                   required=tuple(s.strip() for s in args.required_checks.split(",") if s.strip()))
     summary: list[str] = []
     relock: list[int] = []
     try:
