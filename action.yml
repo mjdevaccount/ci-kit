@@ -39,7 +39,7 @@ runs:
         set -euo pipefail
         # the SQL gates need the `sql` extra (sqlglot); every other tool is zero-dependency
         case "$TOOL" in
-          ci-doc-lint|ci-secret-argv-lint|ci-pr-autoupdate|ci-pin-drift|ci-manual-lint|ci-guard-selfproof) from="$GITHUB_ACTION_PATH" ;;
+          ci-doc-lint|ci-secret-argv-lint|ci-pr-autoupdate|ci-pin-drift|ci-queue-wait|ci-manual-lint|ci-guard-selfproof) from="$GITHUB_ACTION_PATH" ;;
           ci-sql-casts|ci-pit-reads|ci-decimal-reads|ci-phantom-columns|ci-column-comments)
             from="ci-kit[sql] @ file://$GITHUB_ACTION_PATH" ;;
           *) echo "::error::unknown ci_kit tool: $TOOL"; exit 2 ;;
