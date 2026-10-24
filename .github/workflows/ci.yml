@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - run: uv sync --frozen --all-extras   # the sql extra: ci_kit.sql needs sqlglot
       # The README's rule: `version` in pyproject.toml moves with each vX.Y.Z tag. Nothing checked
       # it, so v1.6.1, v1.7.0 and v1.7.1 were all cut from commits that still said 1.6.0. A tag is

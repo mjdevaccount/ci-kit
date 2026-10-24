@@ -28,7 +28,7 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: astral-sh/setup-uv@v10.3.0
+    - uses: astral-sh/setup-uv@v10.3.2
     - name: ${{ inputs.tool }} ${{ inputs.args }}
       id: run
       shell: bash
