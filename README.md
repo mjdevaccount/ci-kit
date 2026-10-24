@@ -35,7 +35,7 @@ nothing has verified nothing.
 | `.github/workflows/secret-argv.yml` | reusable: the secret-argv lint + its selftest |
 | `.github/workflows/gitleaks.yml` | reusable: secret scan, `mode: tree / history / action` |
 | `.github/workflows/pr-autoupdate.yml` | reusable: the armed-PR updater; output `relock` |
-| `.github/workflows/major-tag.yml` | this repo's own: moves each floating `vX` to its highest `vX.Y.Z` on every release tag |
+| `.github/workflows/major-tag.yml` | moves each floating `vX` to its highest `vX.Y.Z` on every release tag; also reusable (`workflow_call`) -- the caller declares the triggers and `contents: write` |
 | `.pre-commit-hooks.yaml` | hooks `doc-refs`, `secret-argv` |
 
 ## Using it
