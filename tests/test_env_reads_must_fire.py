@@ -70,6 +70,26 @@ def test_an_undecodable_file_is_2(new_repo) -> None:
     assert r.returncode == 2 and "DID NOT FINISH LOOKING" in r.stdout + r.stderr, r.stdout + r.stderr
 
 
+def test_a_tracked_binary_is_skipped_not_blind(new_repo) -> None:
+    # A .png in the tree is not a shell file: it must neither fail the run (2) nor hide a real site.
+    repo = tracked_repo(new_repo, {"scripts/a.sh": HAND})
+    (repo / "docs").mkdir()
+    (repo / "docs/logo.png").write_bytes(bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xFF, 0x00]))
+    git(repo, "add", "-A")
+    r = _run(repo)
+    assert r.returncode == 1 and "scripts/a.sh: 1 site(s)" in r.stdout, r.stdout + r.stderr
+    write(repo / "scripts/a.sh", GOOD)
+    assert _run(repo).returncode == 0
+
+
+def test_a_grep_lookbehind_read_fires(new_repo) -> None:
+    # grep -oP '(?<=^K=).*' FILE -- one command, no pipe, still a hand reader (edge-host's
+    # mcp-grafana-stdio.sh was one, found only after this shape was added).
+    look = "TOK=$(grep -oP '(?<=^GRAFANA_MCP_TOKEN=).*' \"$ENVF\" 2>/dev/null || true)" + NL
+    r = _run(tracked_repo(new_repo, {"scripts/g.sh": look}))
+    assert r.returncode == 1 and "scripts/g.sh: 1 site(s)" in r.stdout, r.stdout + r.stderr
+
+
 def test_selftest_passes(new_repo) -> None:
     r = run_tool("env_reads", new_repo(), "--selftest")
     assert r.returncode == 0 and "selftest OK" in r.stdout, r.stdout + r.stderr
