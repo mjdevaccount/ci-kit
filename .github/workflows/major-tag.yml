@@ -1,0 +1,59 @@
+# major-tag -- every floating major tag (v1, v2, ...) points at the highest vX.Y.Z of its major.
+#
+# WHY (2026-10-24). Consumers pin `@v1` (doc-refs.yml@v1, `uvx --from ...ci-kit@v1`). Moving v1
+# was a hand step after every release: v1.6.0 shipped and v1 stayed on v1.5.0 because a session's
+# force-push was refused and the move waited on a human question. The operator's rule: a version
+# tag is a logic decision, not a permission question -- so no session decides it; this does.
+#
+# THE RULE: vX moves to the commit of the highest vX.Y.Z (semver order, `sort -V`), never to a
+# lower one, so a backport tag (v1.4.1 after v1.6.0) leaves v1 alone. Pre-release tags
+# (v1.7.0-rc1) never move it. A major with no vX tag yet gets one.
+#
+# THREE TRIGGERS, ONE JOB: a vX.Y.Z push (the normal path), workflow_dispatch (catch-up), and a
+# daily cron that heals a major tag left behind by a failed run. Nothing else watches a tag-push
+# run, so the cron is the outside witness; mcp/scripts/ci-schedule-audit.py REGISTRY watches the
+# cron. The job VERIFIES each move with ls-remote and fails if the remote did not take it.
+name: major-tag
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: major-tag
+  cancel-in-progress: false
+
+jobs:
+  follow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - name: Move each vX to its highest vX.Y.Z
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          moved=0
+          for major in $(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | cut -d. -f1 | sort -u); do
+            top=$(git tag -l "${major}.*" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+            want=$(git rev-parse "${top}^{commit}")
+            have=$(git rev-parse -q --verify "refs/tags/${major}^{commit}" || echo none)
+            if [ "$have" = "$want" ]; then
+              echo "${major}: at ${top} (${want:0:7})"
+              continue
+            fi
+            echo "${major}: ${have:0:7} -> ${top} (${want:0:7})"
+            git tag -f "$major" "$want"
+            git push -f origin "refs/tags/${major}"
+            got=$(git ls-remote origin "refs/tags/${major}" | cut -f1)
+            [ "$got" = "$want" ] || { echo "::error::${major} push not taken: remote ${got:0:7}, want ${want:0:7}"; exit 1; }
+            moved=$((moved + 1))
+          done
+          echo "major-tag: ${moved} moved" >> "$GITHUB_STEP_SUMMARY"
