@@ -41,6 +41,7 @@ shell file under the scan dirs).
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import re
 import sys
@@ -56,15 +57,25 @@ SHEBANG = re.compile(r"^#!.*\b(?:ba|da|k|z)?sh\b")
 # a literal key, or a shell expansion that names it at run time
 KEY = r"(?:[A-Za-z_]\w*|\$\{[^}]*\}|\$\w+)"
 # A FILE operand: the next word is not a pipe, a redirection, a list operator or the end of the
-# command. `2>/dev/null` before the operand is skipped; `<` / `<<<` (a here-string) is not a file.
+# command -- or a plain `< FILE` input redirect, which reads the file just the same. `2>/dev/null`
+# before the operand is skipped; `<<<` (a here-string) and `<(...)` are not a file.
 _REDIRS = r"(?:\s+\d*>{1,2}\s*\S+)*"
-OPERAND = _REDIRS + r"\s+(?![|;&)<>]|\d*>)[^\s|;&)<>]"
-# the program's own flags may sit before its script: `sed -n -E`, `grep -m1 -E`
-FLAGS = r"(?:\s+-[A-Za-z0-9]+)*\s+"
+_WORD = r"[^\s|;&)<>]"
+OPERAND = _REDIRS + r"(?:\s+(?![|;&)<>]|\d*>)" + _WORD + r"|\s*<(?![<(])\s*" + _WORD + r")"
+# the program's own flags may sit before its script: `sed -n -E`, `grep -m1 -E`, `grep -m 1`,
+# `--max-count=1`, `--`
+FLAGS = r"(?:\s+(?:--[\w-]+(?:=\S+)?|--|-[A-Za-z0-9]+(?:\s+\d+)?))*\s+"
+_Q = r"(['\"])"
 
-SED = re.compile(r"\bsed" + FLAGS + r"(['\"])s/\^" + KEY + r"=//p\1" + OPERAND)
-GREP = re.compile(r"\bgrep" + FLAGS + r"(['\"])\^" + KEY + r"=\1" + OPERAND)
-GREP_SPLITS = re.compile(r"\|\s*(?:cut\s+-d\s*['\"]?=|sed\b[^|]*\bs/[^/]*=//|awk\s+-F\s*['\"]?=)")
+# `s/^K=//p`, with any of the usual delimiters (`s|^K=||p`, `s#^K=##p`)
+SED = re.compile(r"\bsed" + FLAGS + _Q + r"s([/|#,:])\^" + KEY + r"=\2\2p\1" + OPERAND)
+GREP = re.compile(r"\bgrep" + FLAGS + _Q + r"\^" + KEY + r"=\1" + OPERAND)
+# grep -oP that prints only the value: `(?<=^K=).*` and `^K=\K.*`
+GREP_P = re.compile(r"\bgrep" + FLAGS + _Q + r"(?:\(\?<=\^" + KEY + r"=\)|\^" + KEY + r"=\\K)[^'\"]*\1" + OPERAND)
+_CUT_EQ = r"cut\s+(?:-\S+\s+)*(?:-d\s*['\"]?=|--delimiter[=\s]['\"]?=)"
+GREP_SPLITS = re.compile(r"\|\s*(?:" + _CUT_EQ + r"|sed\b[^|]*\bs([/|#,:])[^/|#,:]*=\1\1|awk\s+-F\s*['\"]?=)")
+# the pipeline a grep feeds ends at a list operator; a later `; x=$(echo a=b | cut -d= -f2)` is not it
+PIPELINE_END = re.compile(r";|&&|\|\||(?<![|&>])&(?![&>])")
 AWK = re.compile(r"\bawk\s+-F\s*['\"]?=['\"]?\s+(['\"])[^'\"]*/\^" + KEY + r"=/[^'\"]*\1" + OPERAND)
 
 WAIVER = re.compile(r"#\s*env-read-ok:\s*\S")
@@ -76,6 +87,21 @@ def is_shell(rel: str, text: str) -> bool:
     if "." in rel.rsplit("/", 1)[-1]:
         return False
     return bool(SHEBANG.match(text.split("\n", 1)[0]))
+
+
+def wants_scan(root: pathlib.Path, rel: str) -> bool:
+    """Shell by suffix, or an extensionless file whose first line is a shell shebang -- decided
+    from the first bytes only, so a tracked binary (a .png, an age-encrypted .env) is never decoded."""
+    if rel.endswith(SHELL_SUFFIX):
+        return True
+    if "." in rel.rsplit("/", 1)[-1]:
+        return False
+    try:
+        with open(root / rel, "rb") as fh:
+            head = fh.readline(256)
+    except OSError:
+        return True  # let read_source say it could not look
+    return bool(SHEBANG.match(head.decode("utf-8", errors="replace")))
 
 
 def logical_lines(text: str) -> list[tuple[int, str]]:
@@ -103,10 +129,13 @@ def logical_lines(text: str) -> list[tuple[int, str]]:
 def is_hand_read(line: str) -> bool:
     if line.lstrip().startswith("#") or WAIVER.search(line):
         return False
-    if SED.search(line) or AWK.search(line):
+    if SED.search(line) or AWK.search(line) or GREP_P.search(line):
         return True
-    m = GREP.search(line)
-    return bool(m and GREP_SPLITS.search(line, m.end()))
+    for m in GREP.finditer(line):
+        end = PIPELINE_END.search(line, m.end())
+        if GREP_SPLITS.search(line[: end.start()] if end else line, m.end()):
+            return True
+    return False
 
 
 def findings_in(text: str, rel: str = "") -> list[int]:
@@ -125,6 +154,13 @@ BAD = [
     "ip=$(awk -F= '/^OBSERVER_LAN_IP=/ {print $2}' \"$ENV\")",
     "ip=$(sed -n 's/^OBSERVER_LAN_IP=//p' \"$F\" 2>/dev/null |\n  sed -n 1p)",
     "x=$(grep '^K=' \\\n  \"$F\" | cut -d= -f2-)",
+    "t=$(grep -oP '(?<=^WINDMILL_TOKEN=).*' \"$ENVF\" | tail -1)",
+    "t=$(grep -Po '^K=\\K.*' .env)",
+    "v=$(grep -m 1 '^K=' .env | cut -d= -f2-)",
+    "v=$(grep --max-count=1 -- '^K=' .env | cut -f2- -d=)",
+    "v=$(grep '^K=' < .env | cut --delimiter== -f2-)",
+    "v=$(sed -n 's|^K=||p' .env)",
+    "v=$(sed -n 's/^K=//p' < .env)",
 ]
 GOOD = [
     "baked=$(docker inspect c --format '{{.Config.Env}}' | sed -n 's/^GIT_SHA=//p' | sed -n 1p)",
@@ -136,6 +172,9 @@ GOOD = [
     "slot=$(env_get SVC_ACTIVE \"$ENV_FILE\")",
     "n=$(grep -c '^K=' \"$F\")",
     "echo \"$line\" | cut -d= -f2-",
+    "n=$(grep -c '^K=' .env); m=$(echo $s | cut -d= -f2)",
+    "grep -q '^K=' .env && x=$(echo a=b | cut -d= -f2)",
+    "grep -q '^K=' .env 2>&1 && x=$(echo a=b | cut -d= -f2)",
 ]
 WAIVER_NO_REASON = "id=$(sed -n 's/^ID=//p' /etc/os-release)  # env-read-ok:"
 
@@ -177,7 +216,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--write-baseline", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
-    root = (args.root or discover.repo_root()).resolve()
+    env_root = os.environ.get("CI_KIT_ROOT")  # same order as the kit's other gates
+    root = (args.root or (pathlib.Path(env_root) if env_root else None) or discover.repo_root()).resolve()
     scan_dirs = args.scan_dir or ["."]
     baseline = args.baseline if args.baseline.is_absolute() else root / args.baseline
     seen = {"n": 0}
@@ -188,9 +228,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         for rel in discover.tracked(scan_dirs, suffix="", root=root):
             if rel in skip:
                 continue
-            text = site_lint.read_source(root / rel, rel, gate=GATE)
-            if not is_shell(rel, text):
+            if not wants_scan(root, rel):
                 continue
+            text = site_lint.read_source(root / rel, rel, gate=GATE)
             seen["n"] += 1
             n = len(findings_in(text, rel))
             if n:
