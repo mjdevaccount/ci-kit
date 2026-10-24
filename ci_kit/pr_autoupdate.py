@@ -236,7 +236,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         rc = run(args.repo, summary, relock, opts)
     except (subprocess.CalledProcessError, ValueError, KeyError) as e:
-        summary.append(f"DID NOT FINISH: {e}")
+        # gh's stderr is the only place the cause is named (a token scope, a GraphQL limit);
+        # without it the run says only "returned non-zero exit status 1" (2026-10-24)
+        err = (getattr(e, "stderr", "") or "").strip()
+        summary.append(f"DID NOT FINISH: {e}" + (f" -- gh said: {err[-500:]}" if err else ""))
         rc = 2
     text = "\n".join(f"- {s}" for s in summary)
     print(text)

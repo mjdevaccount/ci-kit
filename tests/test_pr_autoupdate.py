@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -121,3 +122,14 @@ def test_without_a_review_workflow_a_running_review_is_not_consulted(monkeypatch
     monkeypatch.setattr(upd, "page", lambda *a: "published")
     assert upd.run("o/r", [], [], Options()) == 0
     assert any(c[0] == "api" for c in calls) and not any(c[:2] == ("run", "list") for c in calls)
+
+
+def test_a_failed_gh_call_names_gh_stderr_in_the_summary(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # 2026-10-24: the run said only "returned non-zero exit status 1"; the cause lives in stderr
+    def boom(*a: object, **k: object) -> None:
+        raise subprocess.CalledProcessError(1, "gh pr list", "", "GraphQL: Resource not accessible by personal access token")
+    monkeypatch.setattr(upd, "run", boom)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    assert upd.main(["--repo", "o/r"]) == 2
+    assert "gh said: GraphQL: Resource not accessible by personal access token" in capsys.readouterr().out
