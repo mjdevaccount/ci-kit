@@ -98,6 +98,27 @@ def test_require_scanned_floor_both_directions() -> None:
     discover.require_scanned(100, gate="probe", dirs=["svc"], floor=100)
 
 
+def test_count_by_dir_counts_every_ruled_dir_and_zero_for_a_dark_one() -> None:
+    got = discover.count_by_dir(["svc/a.py", "svc/b/c.py", "src/d.py", "svcx/e.py"],
+                                ("svc", "src", "scripts/"))
+    assert got == {"svc": 2, "src": 1, "scripts/": 0}      # `svcx/` is not under `svc/`
+
+
+def test_require_scanned_each_both_directions() -> None:
+    floors = {"svc": 2, "src": 1}
+    discover.require_scanned_each({"svc": 2, "src": 1}, floors, gate="probe")    # at floor passes
+    for by_dir in ({"svc": 2, "src": 0}, {"svc": 1, "src": 5}, {"svc": 9}):       # last: src never counted
+        with pytest.raises(SystemExit) as e:
+            discover.require_scanned_each(by_dir, floors, gate="probe")
+        assert e.value.code == 2
+
+
+def test_require_scanned_each_names_the_dark_dir(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        discover.require_scanned_each({"svc": 5, "src": 0}, {"svc": 1, "src": 1}, gate="probe")
+    assert "probe[src]" in capsys.readouterr().err
+
+
 def test_env_has_no_git_dir_leak() -> None:
     # Guard the guard: a GIT_DIR in the test env would point every `git -C` at one repo and make
     # the cases above prove nothing.

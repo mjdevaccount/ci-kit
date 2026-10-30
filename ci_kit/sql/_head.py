@@ -6,16 +6,22 @@ then refuses it and the gate exits 2, where answering "not SQL" would let every 
 
 Split out of `sqlast.py` at review, which found two holes a head-only read had: a value opening
 with a `--` / `/* */` comment, and `WITH t(a) AS`.
+
+TRUNCATE (v1.9.0): a write the head cut never opened, so no gate read a TRUNCATE value or the
+statements chained after it (`TRUNCATE a; DELETE FROM b`). trade-data's `lint_sql_placement`
+carried its own fold + parse for it over this package's privates; that branch moved here.
 """
 
 from __future__ import annotations
 
 from sqlglot.dialects.postgres import Postgres
 from sqlglot.errors import SqlglotError
-from sqlglot.tokens import TokenType
+from sqlglot.tokens import Token, TokenType
 
 _DIALECT = Postgres()
-_HEADS = ("SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "CREATE")
+#: a hole in a folded value (an f-string `{x}`, a name the fold could not reach)
+INTERP = "__interp__"
+_HEADS = ("SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "CREATE", "TRUNCATE")
 _LEAD_PAIRS = {TokenType.INSERT: TokenType.INTO, TokenType.DELETE: TokenType.FROM}
 #: what may stand between UPDATE and SET: `[ONLY] schema.table [AS] alias`
 _UPDATE_TARGET = {TokenType.VAR, TokenType.DOT, TokenType.ALIAS, TokenType.ONLY}
@@ -41,7 +47,7 @@ def leads_sql(text: str) -> bool:
     """Does the value OPEN a statement? The head is tokenized cut at the first quote, so an
     apostrophe in a prose tail cannot make a real statement 'not SQL' or vice versa."""
     body = skip_lead(text)
-    if not body[:6].upper().startswith(_HEADS):
+    if not body[:8].upper().startswith(_HEADS):     # 8 = len("TRUNCATE"), the longest head
         return False
     try:
         toks = [t for t in _DIALECT.tokenize(body[:80].split("'", 1)[0])
@@ -60,7 +66,19 @@ def leads_sql(text: str) -> bool:
         return _update_sets(body)
     if first == TokenType.CREATE:
         return _create_as(kinds[1:])
+    if first == TokenType.TRUNCATE:
+        return len(toks) > 1 and (body[:8] == "TRUNCATE" or _truncate_target(toks[1:3]))
     return False
+
+
+def _truncate_target(toks: list[Token]) -> bool:
+    """`truncate [TABLE|ONLY] s.t` / `truncate s.t` / `truncate {hole}` -- never "truncate
+    disabled" or "Truncate to the cap": prose reads exactly like an unqualified lower-case target,
+    so that one shape is not SQL. Spelled upper-case (`TRUNCATE x`) it always is. A bare verb
+    (`"TRUNCATE"` in a deny-list) is not, like a bare `"INSERT"` or `"DELETE"`."""
+    kinds = [t.token_type for t in toks]
+    return (kinds[:1] in ([TokenType.TABLE], [TokenType.ONLY]) or kinds[1:2] == [TokenType.DOT]
+            or (bool(toks) and toks[0].text == INTERP))
 
 
 def _with_as(kinds: list[TokenType]) -> bool:

@@ -30,7 +30,7 @@ from __future__ import annotations
 import pathlib
 import subprocess
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 
 def _git(args: list[str], *, timeout: int) -> subprocess.CompletedProcess[bytes]:
@@ -101,3 +101,24 @@ def require_scanned(n: int, *, gate: str, dirs: Iterable[str], floor: int = 1) -
               f"NOT verified anything, so this is exit 2 (could not look), never a clean pass",
               file=sys.stderr)
         raise SystemExit(2)
+
+
+def count_by_dir(rels: Iterable[str], dirs: Iterable[str]) -> dict[str, int]:
+    """{dir: files under it} for EVERY one of `dirs`, 0 when none -- the read a per-dir floor judges.
+
+    A total floor over several trees cannot see one of them go dark: `sources/` read as zero
+    hides under `service/`'s hundreds. v1.9.0: nine trade-data gates each hand-counted this."""
+    out = dict.fromkeys(dirs, 0)
+    for rel in rels:
+        for d in out:
+            if rel == d or rel.startswith(d.rstrip("/") + "/"):
+                out[d] += 1
+    return out
+
+
+def require_scanned_each(by_dir: Mapping[str, int], floors: Mapping[str, int], *, gate: str) -> None:
+    """`require_scanned` per ruled dir: exit 2 naming `gate[dir]` when any dir read under its floor.
+
+    A dir in `floors` that `by_dir` never counted is ZERO (exit 2), never skipped."""
+    for d, floor in floors.items():
+        require_scanned(by_dir.get(d, 0), gate=f"{gate}[{d}]", dirs=(d,), floor=floor)
