@@ -51,10 +51,10 @@ from sqlglot.errors import SqlglotError
 from sqlglot.tokens import Token, TokenType
 
 from ci_kit import astread
+from ci_kit.sql._head import INTERP as INTERP  # re-export: gates read sqlast.INTERP; _head owns it
 from ci_kit.sql._head import leads_sql
 from ci_kit.sql._pos import py_tokens, segments
 
-INTERP = "__interp__"
 BIND_PREFIX = "b__"
 _MAX_MIXES = 5            # 3**5 fill mixes, then give up and exit 2
 

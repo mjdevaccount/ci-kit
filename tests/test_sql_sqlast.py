@@ -149,3 +149,19 @@ def test_a_node_with_no_python_line_is_held_STRICT_never_widened() -> None:
     site = _sites(src)[0]
     assert not site.segments
     assert not site.waived("pit-ok", site.statements[0].find(exp.CurrentTimestamp))
+
+
+def test_TRUNCATE_opens_a_value_and_what_is_chained_after_it_is_read() -> None:
+    """v1.9.0: no TRUNCATE head, so no gate read a TRUNCATE value -- or the DELETE after it."""
+    site = _sites("q(" + repr("TRUNCATE quant.a; DELETE FROM quant.b WHERE x = 1") + ")")[0]
+    assert [type(s) for s in site.statements] == [exp.TruncateTable, exp.Delete]
+    for sql in ("truncate only s.t", "truncate TABLE t", "truncate quant.x"):
+        assert len(_sites("q(" + repr(sql) + ")")) == 1, sql
+    assert len(_sites("D = 'TRUNCATE ' + ', '.join(T) + ' RESTART IDENTITY'")) == 1
+    assert len(_sites("E = f'truncate {s}.{t}'")) == 1
+
+
+@pytest.mark.parametrize("prose", ["truncate disabled", "Truncate to the cap", "TRUNCATE", "truncate"])
+def test_TRUNCATE_prose_and_a_bare_verb_are_not_SQL(prose: str) -> None:
+    """An unqualified lower-case target reads exactly like prose; a bare verb is a deny-list entry."""
+    assert _sites("m = " + repr(prose)) == []
