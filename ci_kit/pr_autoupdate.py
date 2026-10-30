@@ -31,8 +31,10 @@ is not labelled gets the label AND one ntfy push (env `NTFY_URL`; unset = no pus
 and its tracker row; one already labelled gets neither again. A PR that updates cleanly loses the
 label. Each NEWLY labelled PR is emitted as output `relock` for a caller that can relock a
 lockfile-only conflict. Not a `labeled` trigger: GitHub runs no `pull_request` workflow on a PR
-with a merge conflict, so that trigger could never fire. A label that cannot be added is an error
-and NO page (the label is the dedup; without it every merge to main would page again).
+with a merge conflict, so that trigger could never fire. A repo with no such label refuses the
+add, so a failed add looks the label up, CREATES it when missing (a `::notice::` names repo and
+label: the create is itself an event) and retries the add ONCE. Only a second failure is an
+error, with NO page (the label is the dedup; without it every merge to main would page again).
 
 Exit 0 = every armed PR handled; 1 = at least one update failed for a reason other than a
 conflict (named in the log, red run); 2 = could not list the PRs at all (did not finish looking).
@@ -44,6 +46,7 @@ import json
 import os
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
@@ -170,6 +173,29 @@ def _gh_read(*args: str) -> subprocess.CompletedProcess[str]:
     return r
 
 
+LABEL_COLOR = "d93f0b"
+LABEL_DESCRIPTION = "pr-autoupdate: conflicts with main (dedup state for the page)"
+
+
+def add_label(repo: str, n: int, label: str) -> tuple[bool, bool]:
+    """(added, created). A failed add creates the label when the repo lacks it, then retries ONCE.
+
+    Live 2026-10-30: home-host had no `conflict` label, so every add failed and the run went red
+    six times in a row while armed PRs sat behind main; ten more repos had the same hole.
+    """
+    edit = ("pr", "edit", str(n), "-R", repo, "--add-label", label)
+    if _gh(*edit, check=False).returncode == 0:
+        return True, False
+    created = False
+    if _gh("api", f"repos/{repo}/labels/{urllib.parse.quote(label, safe='')}", check=False).returncode:
+        if _gh("label", "create", label, "-R", repo, "--color", LABEL_COLOR,
+               "--description", LABEL_DESCRIPTION, check=False).returncode:
+            return False, False
+        created = True
+        print(f"::notice::{repo}: created the missing `{label}` label (pr-autoupdate's conflict dedup)")
+    return _gh(*edit, check=False).returncode == 0, created
+
+
 def page(title: str, body: str, click: str) -> str:
     url = os.environ.get("NTFY_URL", "")
     if not url:
@@ -219,7 +245,10 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
         add, do_page, remove = actions_for(o, labelled)
         line = f"#{n}: {o.kind}" + (f" ({o.detail})" if o.detail else "")
         if add:
-            if _gh("pr", "edit", str(n), "-R", repo, "--add-label", opts.label, check=False).returncode:
+            added, created = add_label(repo, n, opts.label)
+            if created:
+                line += f"; `{opts.label}` label created"
+            if not added:
                 # the label IS the page dedup: unlabelled, this PR would be paged on every merge
                 o = Outcome("error", f"conflict, but the `{opts.label}` label could not be added")
                 do_page = False
