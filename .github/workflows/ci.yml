@@ -66,6 +66,15 @@ jobs:
         with:
           tool: ci-env-reads
           args: --selftest
+      - name: dup-code gate on ci-kit itself (through the action; baseline ci/jscpd-baseline.json)
+        uses: ./
+        with:
+          tool: ci-dup-code
+      - name: dup-code selftest (a planted clone fires, a clean pair passes)
+        uses: ./
+        with:
+          tool: ci-dup-code
+          args: --selftest
       - name: sql gate selftest (through the action, which installs the sql extra)
         uses: ./
         with:

@@ -21,3 +21,9 @@
   language: python
   pass_filenames: false
   always_run: true
+- id: dup-code
+  name: no new code clone above the frozen baseline (jscpd)
+  entry: ci-dup-code
+  language: python
+  pass_filenames: false
+  always_run: true
