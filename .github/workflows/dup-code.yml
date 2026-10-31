@@ -1,0 +1,51 @@
+# dup-code -- the same code written twice fails the PR (ci-dup-code: jscpd behind a shrink-only
+# fingerprint baseline), callable by any repo.
+#
+#   jobs:
+#     dup-code:
+#       uses: mjdevaccount/ci-kit/.github/workflows/dup-code.yml@v1
+#       with:
+#         args: --ignore 'windmill/**/flow.yaml'   # optional: extra ignores, --min-tokens, --format
+#
+# Reports as "<caller job> / lint". The baseline (`ci/jscpd-baseline.json`, written once with
+# `ci-dup-code --write-baseline`) freezes the clones a repo has TODAY; a PR that adds a clone above
+# the threshold fails, one that removes a clone may re-freeze smaller, and --write-baseline refuses
+# to grow. No history is read (fetch-depth 1 is enough); the binary is jscpd's pinned release,
+# sha256-verified, so a tampered or missing download is exit 2, never a pass.
+name: dup-code
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: >-
+          runs-on as a JSON label list ('' = the caller repo's CI_RUNNER variable, else
+          ubuntu-latest). Holds no secret, so it may join a shared pool; see doc-refs.yml.
+        type: string
+        default: ""
+      args:
+        description: extra ci-dup-code flags (--ignore GLOB, --min-tokens N, --min-lines N, --format LIST); none by default
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      # the gate first: a selftest-only run would be green while never looking at the corpus
+      - name: no new code clone above the frozen baseline (jscpd)
+        uses: mjdevaccount/ci-kit@v1
+        with:
+          tool: ci-dup-code
+          args: ${{ inputs.args }}
+      - name: dup-code selftest (a planted clone fires, a clean pair passes)
+        uses: mjdevaccount/ci-kit@v1
+        with:
+          tool: ci-dup-code
+          args: --selftest

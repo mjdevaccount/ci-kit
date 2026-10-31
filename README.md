@@ -21,6 +21,7 @@ nothing has verified nothing.
 | `ci_kit/manual_lint.py` | `ci-manual-lint`: every path an agent manual (`CLAUDE.md`) names **resolves today** in `git ls-files`. The question `ci-doc-lint` deliberately cannot answer -- a path that was never real -- asked only of the file every session loads. Quiet by SHAPE (routes, flags, prose with slashes, image tags, formulas), not by allowlist; a sibling-repo pointer is checked when that checkout is present and silent when not. Optional: stale migration ranges, line budget, empty placeholder packages, reference-doc dirs + freshness stamp, a total index |
 | `ci_kit/guard_selfproof.py` | `ci-guard-selfproof`: every guard script proves it can FAIL -- `selftest() -> list[str]` (or `--selftest` for a JS guard) rejecting a known-bad input and accepting a known-good one. A guard without one is a shrink-only baseline entry; a NEW one fails. A selftest returning an int, raising, or failing to import is a failure by name |
 | `ci_kit/env_reads.py` | `ci-env-reads`: a shell script pulls a key out of a `.env` FILE with a hand pipeline (`sed -n 's/^K=//p' FILE`, `grep '^K=' FILE \| cut -d= -f2-`, `awk -F= '/^K=/' FILE`) instead of the repo's reader. Hand copies disagreed in RESULTS (first vs last duplicate, quotes kept, a value cut at `#`, `$$` left doubled where compose yields `$`). Reading from a pipe (`docker inspect ... \| sed`) is quiet on purpose. Per-file count ratchet (`--baseline`, default `ci/env_reads_baseline.txt`), `--exempt` the reader itself, waiver `# env-read-ok: <why>` |
+| `ci_kit/dup_code.py` | `ci-dup-code`: **the same code written twice** fails the PR. [jscpd](https://github.com/kucherenko/jscpd) 5.4.2 (pinned release binary, sha256-verified, cached under `CI_KIT_CACHE_DIR`; no node) over code formats (python, bash, powershell, csharp, js/ts, sql, yaml, ...; json/md/toml are noise, not code) at **70 tokens / 7 lines** -- measured 2026-10-31 on three live repos: below that the hits are 5-line test prologues, above it they are copied helpers and lab-script twins, the complaint itself. jscpd's own fingerprint baseline (`ci/jscpd-baseline.json`, `--write-baseline`): a line shift or a rename is not new, an edit INSIDE a frozen clone splits it into new clones (consolidate, not re-freeze), and `--write-baseline` **refuses to grow**. A clone counts only between two `git ls-files` files (CI == laptop). The verdict is read from the JSON report, never from jscpd's exit code (0 on a missing path and an empty scan): no report or zero files analyzed is **exit 2**. Chosen over pylint `duplicate-code`: one language, no stable clone identity to baseline. Kit ignores: worktrees, venvs, `**/migrations/**`, fixtures/testdata/golden/snapshots, lockfiles, minified; add `--ignore GLOB` / `--format` |
 | `ci_kit/ratchet.py` | library: `RatchetSet` / `RatchetCount`, the shrink-only baseline every ratchet lint shares |
 | `ci_kit/discover.py` | library: `tracked()` = `git ls-files`, never a filesystem walk (a walk sees your untracked files, CI does not; a checkout under `.claude/worktrees/` once blinded three gates); `require_scanned()` = zero files is exit 2; `count_by_dir()` + `require_scanned_each()` (v1.9.0) = a floor PER ruled dir, so one tree going dark cannot hide under another's hundreds |
 | `ci_kit/site_lint.py` | library: the ratchet gate's scan / fixture selftest / CLI -- a per-file count (`RatchetCount`) or a set of keys (`RatchetSet`), with the gate's own words through optional hooks (`header`, `describe`, `ok`, `written`, and `hard` for findings no baseline grants) -- so a second ratchet lint is a predicate, not a copy. `check` is the same CLI for a **pass/fail** gate with no baseline (`--selftest`, the gate's own mode flags, findings -> 1, could not look -> 2, an optional scan floor; voice via `header`/`describe`/`advice`/`ok`, or `report` for output that fits no template) |
@@ -33,11 +34,12 @@ nothing has verified nothing.
 | `ci_kit/sql/column_comments.py` | `ci-column-comments`: a migration column comment that declares a domain (magnitude, 0..1, enum, `>= 0`) with no CHECK enforcing it |
 | `action.yml` | composite action: run one of the above against the caller's checkout, installed from the action's own download (no second ref, no credential) |
 | `.github/workflows/doc-refs.yml` | reusable: the doc gate + its selftest, full history (`fetch-depth: 0` is load-bearing; a shallow clone is exit 2, not a blind pass) |
+| `.github/workflows/dup-code.yml` | reusable: the duplicate-code gate + its selftest (no history needed; the caller commits `ci/jscpd-baseline.json`) |
 | `.github/workflows/secret-argv.yml` | reusable: the secret-argv lint + its selftest |
 | `.github/workflows/gitleaks.yml` | reusable: secret scan, `mode: tree / history / action` |
 | `.github/workflows/pr-autoupdate.yml` | reusable: the armed-PR updater; output `relock` |
 | `.github/workflows/major-tag.yml` | moves each floating `vX` to its highest `vX.Y.Z` on every release tag; also reusable (`workflow_call`) -- the caller declares the triggers and `contents: write` |
-| `.pre-commit-hooks.yaml` | hooks `doc-refs`, `secret-argv` |
+| `.pre-commit-hooks.yaml` | hooks `doc-refs`, `secret-argv`, `dup-code` |
 
 ## Using it
 
@@ -51,6 +53,10 @@ jobs:
       args: --exempt-prefix u/ --code-doc-dir docs --code-doc-dir runbooks   # optional
   secret-argv:
     uses: mjdevaccount/ci-kit/.github/workflows/secret-argv.yml@v1
+  dup-code:
+    uses: mjdevaccount/ci-kit/.github/workflows/dup-code.yml@v1
+    with:
+      args: --ignore 'windmill/**/flow.yaml'   # optional
   gitleaks:
     name: gitleaks (secret scan)
     permissions: { contents: read, pull-requests: read }
@@ -104,6 +110,7 @@ Locally, or from a Makefile:
 ```bash
 uvx --from git+https://github.com/mjdevaccount/ci-kit@v1.0.0 ci-doc-lint --root ../x
 uvx --from git+https://github.com/mjdevaccount/ci-kit@v1.0.0 ci-pin-drift --file uv.lock --remote https://github.com/mjdevaccount/ci-kit.git
+uvx --from git+https://github.com/mjdevaccount/ci-kit@v1.10.0 ci-dup-code --write-baseline   # once: freezes today's clones; later runs refuse to grow it
 ```
 
 pre-commit:
@@ -111,7 +118,7 @@ pre-commit:
 ```yaml
 - repo: https://github.com/mjdevaccount/ci-kit
   rev: v1.0.0
-  hooks: [{ id: doc-refs }, { id: secret-argv }]
+  hooks: [{ id: doc-refs }, { id: secret-argv }, { id: dup-code }]
 ```
 
 ## Nothing is assumed about your repo
@@ -131,6 +138,10 @@ pre-commit:
   dependencies are installed** (`uv run`, or `pip install` ci-kit into the CI python): importing
   a guard imports what it imports. The action's isolated uvx environment holds ci-kit alone, so
   it fits only a repo whose guards are stdlib-only.
+- `ci-dup-code` reads the whole tracked tree at the kit's thresholds and ignores; a repo adds
+  `--ignore GLOB` (repeatable), `--format LIST`, `--min-tokens` / `--min-lines`. The baseline is
+  per repo (`--baseline`, default `ci/jscpd-baseline.json`) and the first `--write-baseline` is the
+  only one that may be larger than the last.
 - `pr-autoupdate.yml` declares generic secret names; `--label` renames the conflict label.
 - The tree a gate reads is `--root`, else `CI_KIT_ROOT`, else the git toplevel holding the
   working directory. Never the tool's own location.
