@@ -44,6 +44,11 @@ runs:
             from="ci-kit[sql] @ file://$GITHUB_ACTION_PATH" ;;
           *) echo "::error::unknown ci_kit tool: $TOOL"; exit 2 ;;
         esac
-        # word-split ARGS on purpose; every caller passes plain flags
+        # word-split ARGS on purpose; every caller passes PLAIN flags: no quotes (they would stay
+        # literal -- `--ignore 'a/**'` reached jscpd as `'a/**'` with the quote marks, trade-data
+        # #2693 2026-10-31) and no shell expansion of them: `set -f` so a glob such as
+        # `--ignore windmill/**/flow.yaml` is handed to the tool as written, never expanded
+        # against the checkout into a list of files.
+        set -f
         # shellcheck disable=SC2086
         uvx --quiet --from "$from" "$TOOL" $ARGS

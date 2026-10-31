@@ -5,7 +5,7 @@
 #     dup-code:
 #       uses: mjdevaccount/ci-kit/.github/workflows/dup-code.yml@v1
 #       with:
-#         args: --ignore 'windmill/**/flow.yaml'   # optional: extra ignores, --min-tokens, --format
+#         args: --ignore windmill/**/flow.yaml   # optional: extra ignores, --min-tokens, --format (plain flags, no quotes)
 #
 # Reports as "<caller job> / lint". The baseline (`ci/jscpd-baseline.json`, written once with
 # `ci-dup-code --write-baseline`) freezes the clones a repo has TODAY; a PR that adds a clone above
