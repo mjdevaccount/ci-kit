@@ -56,7 +56,7 @@ jobs:
   dup-code:
     uses: mjdevaccount/ci-kit/.github/workflows/dup-code.yml@v1
     with:
-      args: --ignore 'windmill/**/flow.yaml'   # optional
+      args: --ignore windmill/**/flow.yaml   # optional; plain flags, no quotes
   gitleaks:
     name: gitleaks (secret scan)
     permissions: { contents: read, pull-requests: read }
@@ -142,6 +142,9 @@ pre-commit:
   `--ignore GLOB` (repeatable), `--format LIST`, `--min-tokens` / `--min-lines`. The baseline is
   per repo (`--baseline`, default `ci/jscpd-baseline.json`) and the first `--write-baseline` is the
   only one that may be larger than the last.
+- `args` (the action and every reusable workflow) is word-split by the shell and nothing else:
+  plain flags, **no quotes** (they would stay literal) and no expansion of them (`set -f`, since
+  v1.10.1), so `--ignore windmill/**/flow.yaml` reaches the tool as that glob.
 - `pr-autoupdate.yml` declares generic secret names; `--label` renames the conflict label.
 - The tree a gate reads is `--root`, else `CI_KIT_ROOT`, else the git toplevel holding the
   working directory. Never the tool's own location.
