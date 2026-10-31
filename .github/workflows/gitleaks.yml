@@ -11,8 +11,15 @@
 # on purpose:
 #   tree     docker, WORKING TREE only (--no-git). For a history that carries known-leaked items
 #            pending rotation/purge, where a full-history scan would drown real signal.
-#   history  docker, FULL history, optionally with a custom config and a .gitleaksignore that
-#            baselines a known item by fingerprint, loud on anything new.
+#   history  docker, FULL history OF HEAD'S ANCESTRY, optionally with a custom config and a
+#            .gitleaksignore that baselines a known item by fingerprint, loud on anything new.
+#            HEAD's ancestry, never `--all` (2026-10-31): gitleaks' default log is
+#            `--full-history --all`, and a fetch-depth-0 checkout carries EVERY remote branch, so a
+#            fixture on one open PR branch failed every other PR in the repo (edge-host#545 red on
+#            edge-host#544's bats stub) and the red PR's author could not fix it. A PR run's HEAD is
+#            the merge ref = base + the PR's own commits: exactly what that PR can answer for. The
+#            same lesson as the doc gate's edge-ci#33. A scan that reports ZERO commits is exit 2,
+#            not a pass: a bad rev spec must not go green.
 #   action   gitleaks/gitleaks-action over full history, PR-scoped on pull_request. Needs
 #            pull-requests: read or it 403s WITHOUT SCANNING -- red for "could not look",
 #            indistinguishable from red for "found a secret".
@@ -75,11 +82,21 @@ jobs:
           [ "$MODE" = tree ] && args+=(--no-git)
           [ -n "$CONFIG" ] && args+=(--config "/repo/$CONFIG")
           [ -n "$IGNORE" ] && args+=(--gitleaks-ignore-path "/repo/$IGNORE")
+          # history: HEAD's ancestry only (header). gitleaks splits --log-opts on spaces and
+          # replaces its default `--full-history --all --diff-filter=tuxdb` with it wholesale
+          # (sources/git.go, v8.30.1), so the diff filter is restated here.
+          [ "$MODE" = history ] && args+=("--log-opts=--full-history --diff-filter=tuxdb HEAD")
           # GIT_CONFIG_* env: the container's root git refuses the runner-owned checkout
           # ("dubious ownership") without safe.directory; env-var config needs no wrapper.
           docker run --rm -v "$PWD:/repo" \
             -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
-            "$IMAGE" "${args[@]}"
+            "$IMAGE" "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/gitleaks.log"
+          # A clean history run must have LOOKED: gitleaks logs "N commits scanned" (INF, stderr).
+          # Zero or no such line = the rev spec matched nothing = did not finish looking = exit 2.
+          if [ "$MODE" = history ] && ! grep -qE '[1-9][0-9]* commits scanned' "$RUNNER_TEMP/gitleaks.log"; then
+            echo "::error::gitleaks history scan reported no commits scanned: NOTHING WAS SCANNED"
+            exit 2
+          fi
       - name: gitleaks (action, full history)
         if: inputs.mode == 'action'
         uses: gitleaks/gitleaks-action@v3
