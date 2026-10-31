@@ -36,7 +36,7 @@ nothing has verified nothing.
 | `.github/workflows/doc-refs.yml` | reusable: the doc gate + its selftest, full history (`fetch-depth: 0` is load-bearing; a shallow clone is exit 2, not a blind pass) |
 | `.github/workflows/dup-code.yml` | reusable: the duplicate-code gate + its selftest (no history needed; the caller commits `ci/jscpd-baseline.json`) |
 | `.github/workflows/secret-argv.yml` | reusable: the secret-argv lint + its selftest |
-| `.github/workflows/gitleaks.yml` | reusable: secret scan, `mode: tree / history / action` |
+| `.github/workflows/gitleaks.yml` | reusable: secret scan, `mode: tree / history / action`; `history` is HEAD's ancestry, never `--all` (a fixture on another open branch must not fail THIS PR), and zero commits scanned is exit 2 |
 | `.github/workflows/pr-autoupdate.yml` | reusable: the armed-PR updater; output `relock` |
 | `.github/workflows/major-tag.yml` | moves each floating `vX` to its highest `vX.Y.Z` on every release tag; also reusable (`workflow_call`) -- the caller declares the triggers and `contents: write` |
 | `.pre-commit-hooks.yaml` | hooks `doc-refs`, `secret-argv`, `dup-code` |
