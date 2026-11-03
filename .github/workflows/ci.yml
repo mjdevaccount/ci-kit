@@ -104,6 +104,26 @@ jobs:
       - name: actionlint
         run: docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:latest -color
 
+  # renovate/default.json5 is the estate's ONE Renovate policy: every repo extends it from main,
+  # so a typo merged here breaks Renovate everywhere and the only signal is a "Fix Renovate
+  # Configuration" issue per repo, hours later. Validated as REPO config (`--no-global`: a preset
+  # is repo-shaped; global mode skips repo-only checks), `--strict` so a needed migration is red.
+  # The annotation manager's regex has its own must-fire test in the suite above.
+  renovate-config:
+    name: renovate config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: renovate-config-validator --strict on the preset and this repo's renovate.json
+        env:
+          # renovate: datasource=npm depName=renovate
+          RENOVATE_VERSION: 44.181.0
+        run: npx --yes --package "renovate@${RENOVATE_VERSION}" -- renovate-config-validator --strict --no-global renovate/default.json5 renovate.json
+
   gitleaks:
     name: gitleaks (secret scan)
     permissions:
