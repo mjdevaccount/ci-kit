@@ -12,10 +12,13 @@ WHAT IT READS. Every `--file` given is scanned for exact-version pins of the kit
     <name>@v1.1.0                                pyproject / requirements / a workflow `uses:`
     <name>?tag=v1.1.0  <name>.git?tag=v1.1.0     uv.lock's git source
     <name>/releases/download/v1.1.0/<asset>      a release-asset wheel URL (pyproject / uv.lock)
+    <name>==1.1.0  <name>[extra,...]==1.1.0      a PEP 508 exact pin of a kit on an index (PyPI),
+                                                 read as tag v1.1.0; the name PEP 503-normalized
 
 Moving refs (`@v1`) and SHA pins are deliberately NOT pins here: `v1` cannot lag by construction,
-and a SHA says nothing comparable. The newest release is the highest `vX.Y.Z` tag on `--remote`
-(`git ls-remote --tags`), so a runner reads it with the same credential that installs the package.
+and a SHA says nothing comparable. Neither is a range (`>=1.1.0`) or a pre-release (`==1.1.0rc1`).
+The newest release is the highest `vX.Y.Z` tag on `--remote` (`git ls-remote --tags`), so a
+runner reads it with the same credential that installs the package.
 
 EXIT. 0 every pin is the newest tag - 1 a pin lags, or names no release tag (each printed with file:line) -
 2 could not look: a file missing, NO pin found in any file (a check that found nothing to compare
@@ -50,15 +53,29 @@ def pin_re(name: str) -> re.Pattern[str]:
                       + r"|(?:/[^@\s?#\"']*)?(?:@|\?tag=)" + tag + r"(?![\w.-]))")
 
 
+def index_pin_re(name: str) -> re.Pattern[str]:
+    """A PEP 508 exact pin of `name` on a package index: `name==1.1.0` or `name[a,b]==1.1.0`.
+    The name is matched PEP 503-normalized (`-`, `_`, `.` runs equal, any case), so
+    `llm_ports==1.0.0` pins `llm-ports`. Only `==` with an EXACT X.Y.Z counts: a range, a
+    pre-release (`==1.0.0rc1`) or a local/post version is not a release pin."""
+    parts = [re.escape(p) for p in re.split(r"[-_.]+", name) if p]
+    return re.compile(r"(?<![\w.-])" + r"[-_.]+".join(parts) + r"(?:\s*\[[^\]]*\])?\s*==\s*"
+                      + r"(\d+\.\d+\.\d+)(?![\w.+!-])", re.IGNORECASE)
+
+
 def _ver(tag: str) -> tuple[int, ...]:
     return tuple(int(x) for x in tag[1:].split("."))
 
 
 def pins_in(text: str, name: str) -> list[tuple[int, str]]:
-    """(line number, pinned tag) for every exact-version pin of `name` in `text`."""
-    rx = pin_re(name)
-    return [(i, m.group(1) or m.group(2))
-            for i, ln in enumerate(text.splitlines(), 1) for m in rx.finditer(ln)]
+    """(line number, pinned tag) for every exact-version pin of `name` in `text`, in line order.
+    An index pin's `1.1.0` is reported as the tag it was released from, `v1.1.0`."""
+    rx, ix = pin_re(name), index_pin_re(name)
+    out: list[tuple[int, int, str]] = []
+    for i, ln in enumerate(text.splitlines(), 1):
+        out += [(i, m.start(), m.group(1) or m.group(2)) for m in rx.finditer(ln)]
+        out += [(i, m.start(), "v" + m.group(1)) for m in ix.finditer(ln)]
+    return [(i, tag) for i, _, tag in sorted(out)]
 
 
 def release_tags(remote: str) -> list[str]:
