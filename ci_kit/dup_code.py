@@ -48,36 +48,38 @@ jscpd wrote no report, nothing analyzed).
 from __future__ import annotations
 
 import argparse
-import hashlib
-import io
 import json
 import os
 import pathlib
-import platform
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
-import urllib.request
 from collections.abc import Sequence
 from typing import Any
 
-from ci_kit import discover, site_lint
+from ci_kit import discover, release_bin, site_lint
 
 GATE = "dup-code"
+# renovate: datasource=github-releases depName=kucherenko/jscpd
 JSCPD_VERSION = "5.4.2"
-RELEASE = "https://github.com/kucherenko/jscpd/releases/download/v{v}/jscpd-{plat}.tar.gz"
 #: sha256 of each release tarball, from the release's signed checksums.txt (2026-10-20). A bump
-#: moves the version AND every hash in one edit; a tarball that does not match is exit 2.
-SHA256 = {
-    "darwin-arm64": "b51d22d7c7610d27d8fd022577021ff3266a10f13295a2e545a8b8e126133a88",
-    "darwin-x64": "ae8d24aba2719df7682b1bb2c5021ab096116b8240c45fdae88654fc1ff36b17",
-    "linux-arm64-gnu": "f796d57334c34e9361575588ee130f8b0a00388e7e42f3b27f7d50d4aecf85ae",
-    "linux-x64-gnu": "216bae5de2b30c57f893286585c7a348e8af7cd36810949831f569d29f495a3b",
-    "windows-arm64-msvc": "283a4a021570370ee145ed692455290f516d1e528cdcb1747ffe72ff9814d159",
-    "windows-x64-msvc": "a7927e3bbdd341a139459c684d3f5e0b6409b7b1660bae275d44523f63128d87",
-}
+#: moves the version AND every hash in one edit; a tarball that does not match is exit 2
+#: (ci_kit/release_bin.py, the fetch shared with ci-api-diff).
+JSCPD = release_bin.Pin(
+    name="jscpd", version=JSCPD_VERSION, env="CI_KIT_JSCPD",
+    url="https://github.com/kucherenko/jscpd/releases/download/v{v}/jscpd-{asset}.tar.gz",
+    assets={"darwin-arm64": "darwin-arm64", "darwin-x64": "darwin-x64", "linux-arm64": "linux-arm64-gnu",
+            "linux-x64": "linux-x64-gnu", "windows-arm64": "windows-arm64-msvc", "windows-x64": "windows-x64-msvc"},
+    sha256={
+        "darwin-arm64": "b51d22d7c7610d27d8fd022577021ff3266a10f13295a2e545a8b8e126133a88",
+        "darwin-x64": "ae8d24aba2719df7682b1bb2c5021ab096116b8240c45fdae88654fc1ff36b17",
+        "linux-arm64": "f796d57334c34e9361575588ee130f8b0a00388e7e42f3b27f7d50d4aecf85ae",
+        "linux-x64": "216bae5de2b30c57f893286585c7a348e8af7cd36810949831f569d29f495a3b",
+        "windows-arm64": "283a4a021570370ee145ed692455290f516d1e528cdcb1747ffe72ff9814d159",
+        "windows-x64": "a7927e3bbdd341a139459c684d3f5e0b6409b7b1660bae275d44523f63128d87",
+    },
+)
 MIN_TOKENS, MIN_LINES = 70, 7
 FORMATS = ("python,bash,powershell,csharp,javascript,jsx,typescript,tsx,sql,yaml,hcl,docker,"
            "go,rust,java,kotlin")
@@ -88,55 +90,12 @@ DEFAULT_BASELINE = pathlib.Path("ci/jscpd-baseline.json")
 
 
 def _blind(msg: str) -> None:
-    print(f"{GATE}: DID NOT FINISH LOOKING -- {msg}", file=sys.stderr)
-    raise SystemExit(2)
+    release_bin.blind(GATE, msg)
 
 
-def _platform() -> str:
-    m = platform.machine().lower()
-    arch = "arm64" if m in ("arm64", "aarch64") else "x64"
-    if sys.platform.startswith("linux"):
-        return f"linux-{arch}-gnu"
-    if sys.platform == "darwin":
-        return f"darwin-{arch}"
-    if sys.platform == "win32":
-        return f"windows-{arch}-msvc"
-    _blind(f"no jscpd release for {sys.platform}/{m}")
-    raise AssertionError  # unreachable
-
-
-def jscpd_binary(version: str = JSCPD_VERSION) -> pathlib.Path:
-    """The pinned jscpd: `$CI_KIT_JSCPD` if set, else the cached release binary, fetched and
-    sha256-verified once per version into `$CI_KIT_CACHE_DIR` (default `~/.cache/ci-kit`)."""
-    override = os.environ.get("CI_KIT_JSCPD")
-    if override:
-        return pathlib.Path(override)
-    plat = _platform()
-    cache = pathlib.Path(os.environ.get("CI_KIT_CACHE_DIR") or pathlib.Path.home() / ".cache" / "ci-kit")
-    exe = cache / f"jscpd-{version}-{plat}" / ("jscpd.exe" if sys.platform == "win32" else "jscpd")
-    if exe.exists():
-        return exe
-    url = RELEASE.format(v=version, plat=plat)
-    try:
-        with urllib.request.urlopen(url, timeout=120) as resp:  # noqa: S310 - pinned https release
-            blob = resp.read()
-    except OSError as exc:
-        _blind(f"could not fetch {url}: {exc}")
-    digest = hashlib.sha256(blob).hexdigest()
-    want = SHA256.get(plat)
-    if digest != want:
-        _blind(f"{url}: sha256 {digest} != pinned {want}")
-    exe.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
-        member = next((m for m in tar.getmembers() if m.name.rsplit("/", 1)[-1] == exe.name), None)
-        if member is None:
-            _blind(f"{url}: no {exe.name} in the tarball")
-        fh = tar.extractfile(member)
-        assert fh is not None
-        exe.write_bytes(fh.read())
-    if sys.platform != "win32":
-        exe.chmod(0o755)
-    return exe
+def jscpd_binary() -> pathlib.Path:
+    """The pinned jscpd (`$CI_KIT_JSCPD` if set), fetched and sha256-verified once per version."""
+    return release_bin.binary(JSCPD, gate=GATE)
 
 
 def _rel(name: str) -> str:

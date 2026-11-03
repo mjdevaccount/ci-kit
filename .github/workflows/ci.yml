@@ -75,6 +75,11 @@ jobs:
         with:
           tool: ci-dup-code
           args: --selftest
+      - name: api-diff selftest (a removed route + dropped field fire, an additive spec passes)
+        uses: ./
+        with:
+          tool: ci-api-diff
+          args: --selftest
       - name: sql gate selftest (through the action, which installs the sql extra)
         uses: ./
         with:
