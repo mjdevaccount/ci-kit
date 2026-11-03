@@ -243,7 +243,17 @@
     // grouped into "github actions" the `uses:` half would land apart from the rest, and
     // pin-drift reads every shape. (The python group on the next line still wins for a pep621
     // uv git source of a kit -- see customManagers.)
-    { description: "first-party kits", matchPackageNames: ["/^mjdevaccount\\//i"], groupName: null },
+    // ANY DAY, NO AGE WAIT (2026-11-03, edge-ci#7: ci-kit v1.11.0 "Awaiting Schedule" on a
+    // Tuesday while ci-pin-drift stayed red estate-wide). We publish these, so there is no
+    // yanked or hijacked upstream to wait out, and deploy-reconcile is already RTH-fenced, which
+    // covers the deploy risk the weekend window exists for. No later rule sets `schedule`.
+    {
+      description: "first-party kits",
+      matchPackageNames: ["/^mjdevaccount\\//i"],
+      groupName: null,
+      schedule: ["at any time"],
+      minimumReleaseAge: null,
+    },
     { matchManagers: ["pep621", "pip_requirements"], matchUpdateTypes: ["minor", "patch"], groupName: "python (non-major)" },
     { matchManagers: ["npm"], matchUpdateTypes: ["minor", "patch"], groupName: "npm (non-major)" },
     { matchManagers: ["nuget"], matchUpdateTypes: ["minor", "patch"], groupName: "nuget (non-major)" },
