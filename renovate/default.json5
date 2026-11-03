@@ -1,0 +1,439 @@
+// The EDGE estate's ONE Renovate policy. A PUBLIC repo's renovate.json is a single line:
+//   { "extends": ["github>mjdevaccount/ci-kit//renovate/default.json5"] }
+// A PRIVATE repo's still says `github>mjdevaccount/edge-ci//renovate/default.json5`, and that
+// file is itself one line extending this one. Either way a rule changes here, once, for all.
+//
+// WHY HERE AND NOT edge-ci (2026-11-03). This file lived in edge-ci until then. edge-ci is
+// PRIVATE, and Renovate gives a public repo a token scoped to that repo alone, so it cannot read
+// a preset in a private one (docs.renovatebot.com/getting-started/private-packages/). llm-ports
+// (public) opened #24 "Cannot find preset's package (github>mjdevaccount/edge-ci//...)" and
+// stopped opening PRs; ci-kit (public) extended the same path. ci-kit is public, so every repo
+// can read it. ONE copy: edge-ci's file is a pointer, never a second policy.
+//
+// WHY RENOVATE (2026-10-10). Dependency refreshes were a session's manual work: a lock refresh,
+// a CVE bump, "held for operator call" lists that nobody revisited. The fleet collectors KNEW
+// the boxes were behind and nothing turned that into a change. Renovate turns "a newer version
+// exists" into a PR, and CI -- the merge gate everywhere -- decides whether it lands.
+//
+// THE MERGE GATE IS STILL CI -- EVERY CHECK, NOT ONLY THE REQUIRED ONES. GitHub's own auto-merge
+// (`platformAutomerge`) waits only on the checks branch protection REQUIRES, and the checks that
+// prove a dependency bump (trade-data's PR-time image build, mattpc-llm-stack's requirements
+// resolve) are not required: the Claude app that runs sessions has no Administration permission,
+// so branch protection stays a hand click. With platformAutomerge OFF Renovate merges itself, and
+// only once every check run on the PR is green (`ignoreTests` is false; a skipped step is a real
+// green). Nothing here merges past a red check, required or not. Cost: the merge lands on
+// Renovate's next pass after the last check reports, not the second it does.
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    "config:recommended",
+    ":semanticCommits",
+    ":dependencyDashboard",      // one issue per repo: everything pending, deferred, blocked
+    ":rebaseStalePrs",
+  ],
+  timezone: "America/New_York",  // market logic is ET; so is the window below
+  // Weekend only: a merge in trade-infra / trade-data DEPLOYS (deploy-reconcile, hourly), and
+  // the weekend is the window where nothing trades. BOTH weekend days (2026-10-23): with a
+  // Saturday-only window plus the 3-day age wait, a release after Wednesday noon slipped a week.
+  // ALL OF SATURDAY, SUNDAY UNTIL 18:00 ET (2026-10-24, trade-infra#515). The window is a filter
+  // on runs Mend starts, not a run of its own: Mend runs a "hot" repo (one that has merged a
+  // Renovate PR) hourly but a "cold" one -- never merged one -- about ONCE A DAY. trade-quant was
+  // onboarded 10-10, had no in-window run on Saturday 10-17, and so opened ZERO PRs in two
+  // weeks; zero merges kept it cold, and cold kept it missing the window. Two 13-hour mornings
+  // are not guaranteed to contain a once-a-day run; a 24-hour Saturday is. Sunday stops at 18:00
+  // so the last auto-merge deploys (deploy-reconcile, hourly) hours before Monday's open.
+  schedule: ["* * * * 6", "* 0-17 * * 0"],
+  // No day-0 releases: a broken or hijacked publish is usually yanked within hours.
+  minimumReleaseAge: "3 days",
+  internalChecksFilter: "strict",
+  prConcurrentLimit: 15,
+  prHourlyLimit: 0,
+  labels: ["deps"],
+  platformAutomerge: false,   // see the header: Renovate waits on EVERY check, then merges
+  // A relock commit is still Renovate's branch. Renovate will not auto-merge (or rebase) a branch
+  // carrying a commit it did not author, and the relock workflows (edge-ci relock-uv.yml, local-mcp
+  // relock.yml) commit as github-actions[bot] -- local-mcp#221 sat CLEAN, every check green,
+  // never merged (#228 added this there; with it #350/#352 merged themselves, 2026-11-01). Here,
+  // once, so a newly wired repo cannot forget it. Only that bot: a human's commit on a Renovate
+  // branch still stops the auto-merge, which is the point of the rule.
+  gitIgnoredAuthors: ["41898282+github-actions[bot]@users.noreply.github.com"],
+
+  // Security fixes skip both the window and the age wait.
+  vulnerabilityAlerts: {
+    enabled: true,
+    schedule: ["at any time"],
+    minimumReleaseAge: null,
+    automerge: true,
+    labels: ["deps", "security"],
+  },
+  osvVulnerabilityAlerts: true,
+
+  // The transitive refresh a session used to do by hand (`uv lock --upgrade`, npm audit fix).
+  // NO AGE WAIT HERE (2026-10-31): a lock refresh delegates to the package manager, so the
+  // packages it moves carry no release timestamp, and with the default
+  // minimumReleaseAgeBehaviour (timestamp-required) the `renovate/stability-days` status stays
+  // PENDING FOR AS LONG AS minimumReleaseAge IS SET -- Renovate's own words
+  // (docs/usage/key-concepts/minimum-release-age.md, "lockFileMaintenance updates"; its
+  // security:minimumReleaseAge* presets null it for lock file maintenance for that reason).
+  // Measured: six lock-file PRs (trade-data#2566, trade-quant#93, trade-ui#756, finance-ops#94,
+  // edge-ci#40, TradingEdge.Scraper#131) sat 7 days with every CI check green and ONLY
+  // stability-days pending; every rebase after a main merge regenerated the lock and the wait
+  // began again. A wait that cannot end is a queue, not a gate. The age guard for a lock
+  // refresh belongs to the package manager (npm --before / uv exclude-newer; renovate#41652),
+  // not to a status that reads a timestamp no lock entry has. CI still gates the merge.
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ["* * * * 6", "* 0-17 * * 0"],
+    automerge: true,
+    minimumReleaseAge: null,
+  },
+
+  // ---- first-party kit pins Renovate's own managers cannot see (2026-11-01) ----------------
+  // ci-kit's ci-pin-drift (pin-drift.yml, a daily cron in each repo) DETECTS a pin older than its
+  // kit's newest vX.Y.Z tag; Renovate is the ACTOR that should bump it. Until this block no
+  // manager parsed the shapes those pins take outside `uses:`, so every kit release turned
+  // pin-drift red and nothing opened a PR: trade-ui (ci-kit v1.7.1 vs v1.10.2), trade-infra and
+  // home-host (edge-platform v0.4.0 vs v0.5.0), finance-ops (llm-ports v0.4.0 vs v0.6.0) sat red
+  // 2-8 days and were bumped by hand (trade-ui#788, trade-infra#787, home-host#140, finance-ops#110).
+  // The shapes are the ones ci_kit/pin_drift.py `pin_re` reads -- change one, change the other.
+  //   - `git+https://github.com/mjdevaccount/<kit>(.git)?@vX.Y.Z`: npm scripts (uvx --from), `run:`
+  //     pip lines, PEP 723 headers, PowerShell. The `https://github.com/` prefix is REQUIRED so a
+  //     `uses: mjdevaccount/<kit>@vX.Y.Z` stays with the github-actions manager, not two managers.
+  //     Renovate's own pep621/pep723 managers do not cover these: their shared PEP 508 parser marks
+  //     a direct-URL dependency `skipReason: invalid-value` (renovate 42.99.0 dry-run, 2026-11-01),
+  //     so the regex below is the only manager that reads them -- no double PR.
+  //   - `.../mjdevaccount/<kit>/releases/download/vX.Y.Z/<stem>-X.Y.Z-...` (a wheel no index
+  //     publishes). The version is there TWICE; Renovate replaces currentValue everywhere inside
+  //     the match (autoReplaceGlobalMatch, default true), so both move together. github-releases,
+  //     not -tags: a tag whose release asset is not built yet would be a 404 URL.
+  //   - a `.pin` file written `<kit>@vX.Y.Z` (home-host/observer/edge-platform.pin). A .pin that
+  //     holds a BARE tag with the kit only in its file name (edge-host/system/ci-kit.pin,
+  //     edge-host/system/edge-platform.pin, mcp/scripts/edge-platform.pin) is NOT read here --
+  //     nor by ci-pin-drift; write it `<kit>@vX.Y.Z` to bring it under both.
+  // Every version must END the pin (`(?:[^\w.-]|$)`, consumed: RE2 has no lookahead), so
+  // `@v1.2.3-rc1` is not read as 1.2.3 -- pin_re's `(?![\w.-])`.
+  // depName is `mjdevaccount/<kit>` in every shape -- the same name the github-actions manager
+  // gives a `uses:` -- so a kit release is ONE branch across workflows, scripts and pins (the
+  // packageRule "first-party kits" below keeps the actions group from splitting it). Exception:
+  // a uv git source (trade-data `ci-kit = { git = ..., tag = ... }`) is pep621's, and the later
+  // "python (non-major)" group wins for it -- a second PR, which pep621 DOES relock.
+  // RELOCKED IN ACTIONS, NOT HERE: a regex manager rewrites pyproject.toml and leaves uv.lock
+  // stale, and hosted Renovate runs no postUpgradeTasks. A uv repo whose kit pin only a regex
+  // reads -- a release WHEEL (finance-ops, trade-quant, trade-data: slim images with no git, so not
+  // a uv git source) or edge-ci's PEP 508 `ci-kit @ git+` (pip / pre-commit installs ignore uv
+  // sources, and `ci-kit` is unclaimed on PyPI) -- calls edge-ci's reusable `relock-uv.yml`
+  // (2026-11-01): on a renovate/ branch it runs `uv lock` and pushes uv.lock with PR_UPDATE_TOKEN so
+  // CI re-runs; `gitIgnoredAuthors` (top of this file) lets Renovate still auto-merge that branch.
+  // A dev-only uv GIT source in a repo nothing pip-installs (trade-data's ci-kit) needs no
+  // workflow: pep621 relocks it (trade-data#2694). Until a repo is wired AND holds the token, its
+  // kit bump goes RED and waits -- finance-ops and trade-quant CI run
+  // `uv sync --locked`, trade-data and edge-ci `uv lock --check`. A repo that pins a kit in
+  // pyproject without one of those must add it first, or a stale lock merges green.
+  // A pin with NO lock beside it (edge-host ci.yml's work-timeline wheel, a `run:` pip line)
+  // auto-merges on green, so it can move ahead of the same kit in a uv repo still waiting on a
+  // relock; nothing checks that two repos' pins agree.
+  // uv.lock is never in managerFilePatterns: editing a URL there without its hash breaks the lock.
+  customManagers: [
+    {
+      description: "first-party kit pinned by git URL tag (@vX.Y.Z) outside a `uses:` line",
+      customType: "regex",
+      managerFilePatterns: [
+        "/(^|/)package\\.json$/",
+        "/(^|/)pyproject\\.toml$/",
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/",
+        "/\\.(py|sh|bash|ps1|psm1)$/",
+        "/(^|/)(Docker|Container)file[^/]*$/",
+      ],
+      matchStrings: [
+        "https://github\\.com/(?<depName>mjdevaccount/[A-Za-z0-9_.-]+?)(?:\\.git)?@v(?<currentValue>\\d+\\.\\d+\\.\\d+)(?:[^\\w.-]|$)",
+      ],
+      datasourceTemplate: "github-tags",
+      versioningTemplate: "semver",
+      extractVersionTemplate: "^v(?<version>\\d+\\.\\d+\\.\\d+)$",
+    },
+    {
+      description: "first-party kit pinned by GitHub release-asset URL (version in tag AND file name)",
+      customType: "regex",
+      managerFilePatterns: [
+        "/(^|/)pyproject\\.toml$/",
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/",
+        "/\\.(py|sh|bash|ps1|psm1)$/",
+        "/(^|/)(Docker|Container)file[^/]*$/",
+      ],
+      matchStrings: [
+        "https://github\\.com/(?<depName>mjdevaccount/[A-Za-z0-9_.-]+)/releases/download/v(?<currentValue>\\d+\\.\\d+\\.\\d+)/[A-Za-z0-9_.]+-\\d+\\.\\d+\\.\\d+-",
+      ],
+      datasourceTemplate: "github-releases",
+      versioningTemplate: "semver",
+      extractVersionTemplate: "^v(?<version>\\d+\\.\\d+\\.\\d+)$",
+    },
+    {
+      description: "first-party kit named in a .pin file as <kit>@vX.Y.Z (owner implied)",
+      customType: "regex",
+      managerFilePatterns: ["/\\.pin$/"],
+      matchStrings: ["(?<kit>[A-Za-z0-9_.-]+)@v(?<currentValue>\\d+\\.\\d+\\.\\d+)(?:[^\\w.-]|$)"],
+      depNameTemplate: "mjdevaccount/{{{kit}}}",
+      datasourceTemplate: "github-tags",
+      versioningTemplate: "semver",
+      extractVersionTemplate: "^v(?<version>\\d+\\.\\d+\\.\\d+)$",
+    },
+    {
+      // THIRD-PARTY release binaries a script pins by hand (2026-11-03, ci-kit v1.11.0: jscpd and
+      // oasdiff in ci_kit/*.py). The standard Renovate annotation on the line ABOVE the version:
+      //     # renovate: datasource=github-releases depName=oasdiff/oasdiff
+      //     OASDIFF_VERSION = "1.35.0"
+      // datasource and depName come from the comment, so one manager covers any tool and source.
+      // A sha256 table beside the version is NOT moved by Renovate: the bump PR fails the tool's own
+      // selftest on the digest (exit 2) until a session moves the hashes in the same PR. That is
+      // deliberate -- no binary runs on a digest nobody read. ci-kit tests/
+      // test_renovate_annotation_must_fire.py proves this pattern reads the shape and only it.
+      description: "third-party version pinned under a `# renovate: datasource=... depName=...` comment",
+      customType: "regex",
+      managerFilePatterns: [
+        "/\\.(py|sh|bash|ps1|psm1|mjs)$/",
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/",
+      ],
+      matchStrings: [
+        "#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+)\\s+depName=(?<depName>[^\\s]+)(?:\\s+versioning=(?<versioning>[^\\s]+))?[^\\n]*\\n[^\\n]*?[\"']?v?(?<currentValue>\\d+\\.\\d+\\.\\d+)(?:[^\\w.-]|$)",
+      ],
+      versioningTemplate: "{{#if versioning}}{{{versioning}}}{{else}}semver-coerced{{/if}}",
+      extractVersionTemplate: "^v?(?<version>\\d+\\.\\d+\\.\\d+)$",
+    },
+  ],
+
+  packageRules: [
+    // ---- default: non-major lands on green, major waits for review ------------------------
+    {
+      matchUpdateTypes: ["minor", "patch", "pin", "digest", "pinDigest"],
+      automerge: true,
+    },
+    {
+      matchUpdateTypes: ["major"],
+      automerge: false,
+      labels: ["deps", "major"],
+    },
+
+    // ---- a CI action's major lands on green, because CI RUNS IT ----------------------------
+    // Measured 2026-10-17: 12 of 19 open Renovate PRs across trade-data + trade-infra were
+    // action majors (checkout v7, cache v6, setup-uv v10, docker/* ...), every one CLEAN, none
+    // read -- "major waits for review" with no reviewer is a queue, not a gate. An action's
+    // major is exercised by the very PR that bumps it: if checkout v7 breaks, the PR goes RED
+    // and the every-check rule above refuses it. That holds only for an action whose failure
+    // is LOUD. The exceptions below are the ones whose failure is a GREEN.
+    {
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["major"],
+      automerge: true,
+    },
+    // ...except an action that DECIDES WHETHER OTHER CHECKS RUN (a broken paths-filter skips
+    // the unit job, and a skipped step is a real green), or that IS a guard (a gitleaks that
+    // scans nothing passes). Their failure looks exactly like success, so a human reads them.
+    {
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["major"],
+      matchPackageNames: ["dorny/paths-filter", "gitleaks/gitleaks-action"],
+      automerge: false,
+      labels: ["deps", "major", "fails-green"],
+    },
+
+    // ---- grouping: one PR per ecosystem per week, not forty -------------------------------
+    { matchManagers: ["github-actions"], matchUpdateTypes: ["minor", "patch", "digest", "pinDigest"], groupName: "github actions" },
+    // First-party kits: NOT in the actions group. A kit release is one branch per kit, keyed on
+    // depName `mjdevaccount/<kit>`, holding its `uses:` lines AND the customManagers pins above --
+    // grouped into "github actions" the `uses:` half would land apart from the rest, and
+    // pin-drift reads every shape. (The python group on the next line still wins for a pep621
+    // uv git source of a kit -- see customManagers.)
+    { description: "first-party kits", matchPackageNames: ["/^mjdevaccount\\//i"], groupName: null },
+    { matchManagers: ["pep621", "pip_requirements"], matchUpdateTypes: ["minor", "patch"], groupName: "python (non-major)" },
+    { matchManagers: ["npm"], matchUpdateTypes: ["minor", "patch"], groupName: "npm (non-major)" },
+    { matchManagers: ["nuget"], matchUpdateTypes: ["minor", "patch"], groupName: "nuget (non-major)" },
+    { matchManagers: ["dockerfile"], groupName: "dockerfile base images" },
+
+    // ---- container images in compose files DEPLOY ON MERGE ---------------------------------
+    // trade-infra's compose is shipped by deploy-reconcile within the hour, unattended.
+    {
+      matchManagers: ["docker-compose"],
+      groupName: "compose images",
+      labels: ["deps", "deploys-on-merge"],
+    },
+    // A compose MINOR lands on green too (2026-10-23, trade-infra#515). Until then a minor
+    // waited for review, and with one operator "waits for review" meant the Dependency Dashboard
+    // grew and nothing landed. Most compose minors are observability (Prometheus, Loki, Tempo,
+    // Grafana): a bad bump costs telemetry, not trading data. The stateful exceptions are held
+    // by LATER rules -- "database images" below, and the langfuse / windmill rules at the end --
+    // so this rule sits HERE, before them, rather than at the end where it would win over them.
+    {
+      matchManagers: ["docker-compose"],
+      matchUpdateTypes: ["minor"],
+      automerge: true,
+    },
+    // A compose MAJOR is never grouped: each one is its own architecture decision, and a group
+    // makes whoever merges one ship them all. Measured 2026-10-18: trade-infra#611 bundled
+    // Langfuse 2 -> 3 (ClickHouse/Redis/S3, owned by the AI-suite thread) with Tempo 2 -> 3,
+    // which OBSERVABILITY-TRACING.md records as deliberately NOT taken. The Langfuse merge
+    // would have deployed Tempo 3 unattended within the hour. One PR per major, each read
+    // on its own. (A database image's major stays in "database images" below: later rule wins.)
+    {
+      matchManagers: ["docker-compose"],
+      matchUpdateTypes: ["major"],
+      groupName: null,
+    },
+    // A FLOATING tag pinned by digest (litellm:main-stable@sha256:...) has no version in the
+    // tag, so every move is a "digest" update to Renovate -- and digest updates auto-merge
+    // above. Measured 2026-10-10: the box ran litellm 1.91.1 behind that tag while upstream
+    // was 1.104.2, so the first Renovate pass would have auto-landed thirteen minor releases
+    // of the LLM gateway (config.yaml schema included) as one unattended digest bump. A
+    // digest move on a floating tag is a release, not a rebuild; it waits for review.
+    {
+      matchManagers: ["docker-compose"],
+      matchPackageNames: ["ghcr.io/berriai/litellm"],
+      matchUpdateTypes: ["digest"],
+      automerge: false,
+      labels: ["deps", "deploys-on-merge", "floating-tag"],
+    },
+
+    // ---- the review gate's own action never auto-merges -----------------------------------
+    // trade-data's `review gate` (review-gate.yml) is a required check that is GRADED BY THE
+    // EDITED WORKFLOW: a PR that changes review-gate.yml is judged by the version it carries.
+    // CLAUDE.md names that hole for human PRs; Renovate would make it recurring, because the
+    // action's SHA bump rides the auto-merging "github actions" group and lands in that file.
+    // So the pin on the gate's action is the one actions update a human reads first.
+    {
+      matchPackageNames: ["anthropics/claude-code-action"],
+      automerge: false,
+      labels: ["deps", "review-gate"],
+    },
+
+    // Dockerfile bumps are NOT held, and that is safe ONLY in a repo whose CI builds its images
+    // on the PR -- with platformAutomerge off above, that check gates the merge whether or not
+    // branch protection requires it. THIS PRESET IS SHARED, so the claim is per repo. Until
+    // 2026-10-17 it rested on trade-data's image-pr.yml alone: trade-infra built nothing, and its
+    // #608 (python:3.14) auto-merged green, failed the first build on the box and wedged
+    // deploy-reconcile for 13h. Repos on this preset that hold a Dockerfile, and their PR build:
+    //   trade-data   image-pr.yml `image-pr-build`        trade-infra  ci.yml `images` (required)
+    //   trade-quant  ci.yml `image-build`                 trade-ui     ci.yml `image-build`
+    //   finance-ops  ci.yml (build-push-action)
+    //   TradingEdge.Scraper  NONE -- built post-merge by Cloud Build (cd.yml). Not exposed today
+    //     only because its bases float on `dotnet/*:10.0` with no digest, so the sole Renovate
+    //     update is a major, which its own renovate.json turns off (#133: the move is a TFM
+    //     retarget, not an image bump). Pinning a digest there arms the auto-merge.
+    // A new repo with a Dockerfile that extends this preset adds its PR build FIRST, or Renovate
+    // auto-merges an image nobody built.
+
+    // ---- the database is never automatic ---------------------------------------------------
+    // A Postgres / Timescale image change is a dba window (pg_upgrade, extension versions,
+    // pgbackrest compatibility), never a Saturday auto-merge.
+    {
+      matchPackageNames: [
+        "timescale/timescaledb-ha",
+        "postgres",
+        "edoburu/pgbouncer",
+        "timescale/pgai-vectorizer-worker",
+        "woblerr/pgbackrest_exporter",
+      ],
+      groupName: "database images",
+      automerge: false,
+      labels: ["deps", "dba"],
+    },
+    {
+      // pg18.4-ts2.28.3-all: Postgres major/minor, then the Timescale version.
+      matchPackageNames: ["timescale/timescaledb-ha"],
+      versioning: "regex:^pg(?<major>\\d+)\\.(?<minor>\\d+)-ts(?<patch>\\d+)\\.(?<build>\\d+)\\.(?<revision>\\d+)-(?<compatibility>.+)$",
+    },
+
+    // ---- single-operator self-drive (2026-10-23, trade-infra#515) --------------------------
+    // These come LAST on purpose: in Renovate a later matching rule wins, so each one below
+    // overrides the broad groups and auto-merge defaults above.
+
+    // Langfuse is STATEFUL: it runs Prisma and ClickHouse migrations at startup, so a bump is
+    // a one-way schema change. One PR for the four images it moves with, read before merging.
+    {
+      matchPackageNames: [
+        "langfuse/langfuse",
+        "langfuse/langfuse-worker",
+        "clickhouse/clickhouse-server",
+        "redis",
+      ],
+      matchUpdateTypes: ["minor", "patch", "digest"],
+      groupName: "langfuse stack",
+      automerge: false,
+      labels: ["deps", "deploys-on-merge", "stateful"],
+    },
+    // Windmill server (compose) and workers (worker.Dockerfile FROM) MUST share one version, so
+    // one group spans both managers. It is held for a held-deploy anyway, so a ghcr release with
+    // no timestamp must not also sit behind minimumReleaseAge forever.
+    {
+      matchPackageNames: ["ghcr.io/windmill-labs/windmill"],
+      groupName: "windmill",
+      automerge: false,
+      labels: ["deps", "held-deploy"],
+      minimumReleaseAgeBehaviour: "timestamp-optional",
+    },
+    // A Python base-image bump changes the interpreter under every image built on it (#608:
+    // python:3.14 auto-merged and wedged deploy-reconcile for 13h). Its own PR, read first.
+    // NO AGE WAIT HERE EITHER (2026-10-31, trade-infra#515): the official `python:X.Y-slim` tag is
+    // REBUILT every time Debian slim moves (3.15-slim: created 2026-10-28, ~weekly), and Renovate's
+    // docker datasource reads the rebuild's `created` as the release timestamp -- so a 3-day
+    // minimumReleaseAge RE-ARMS on every rebuild and the update sits in "Pending Status Checks"
+    // with no branch and no PR (trade-infra's dashboard, Friday 2026-10-30: python 3.15 pending,
+    // 02:00Z 10-31 it cleared, and the next rebuild would have re-pended it). The age guard is
+    // yank protection for an UNATTENDED merge; this rule never auto-merges, and every repo on it
+    // builds the image on the PR (the table above), so the wait only hides the PR a session must
+    // read. The weekend window still applies.
+    {
+      matchManagers: ["dockerfile"],
+      matchPackageNames: ["python"],
+      groupName: "python base image",
+      automerge: false,
+      minimumReleaseAge: null,
+    },
+    // A pgbouncer PATCH lands on green: CI runs scripts/test_pgbouncer_lan.sh against the
+    // image, so a broken patch is a red check. After "database images" so it wins for patches.
+    {
+      matchPackageNames: ["edoburu/pgbouncer"],
+      matchUpdateTypes: ["patch"],
+      groupName: "pgbouncer",
+      automerge: true,
+    },
+    // langfuse-db is the Langfuse v2 ROLLBACK database (postgres:17, nothing writes it now). It
+    // never moves to 18 -- trade-infra#613 was closed for exactly that.
+    {
+      matchPackageNames: ["postgres"],
+      matchCurrentValue: "/^17/",
+      allowedVersions: "<18",
+    },
+    // Redis stays on 7 until the Langfuse thread picks Redis 8 or the valkey already in the
+    // stack. Redis 8 also changed its license.
+    {
+      matchPackageNames: ["redis"],
+      allowedVersions: "<8",
+    },
+    // ClickHouse follows the series LANGFUSE recommends, not ClickHouse's newest (2026-10-30). It
+    // exists here only as Langfuse v4's store, and Langfuse documents "25.12 minimum, 26.4
+    // recommended" (langfuse-docs self-hosting/upgrade/upgrade-guides/upgrade-v3-to-v4.mdx)
+    // while its own docker-compose.yml still pins 25.12 at v4.72.0. trade-infra#698 grouped
+    // 26.4.5 -> 26.10.3: past the 26.8 LTS and 26.9's mandatory analyzer, after Langfuse had
+    // already broken on 26.6's analyzer (langfuse#15125, #15977) and on 26.8's DateTime64 parsing
+    // (#16858). ClickHouse does not promise a downgrade, so a bad jump is a restore, not a revert.
+    // Raise this cap when Langfuse's recommended series moves -- in the same PR that cites it.
+    {
+      matchPackageNames: ["clickhouse/clickhouse-server"],
+      allowedVersions: "<26.5",
+    },
+
+    // ---- first-party packages skip the age wait (2026-10-24) -------------------------------
+    // minimumReleaseAge guards against a THIRD party's broken or hijacked publish being yanked
+    // within hours. Our own tags (ci-kit, edge-ci, a sibling repo pinned by commit) are cut by
+    // the same sessions that consume them, and a bad one is fixed by the next tag, not a yank.
+    // The wait also never ENDS for some of them: a git-refs pin (local-mcp's .github/scraper.ref
+    // -> TradingEdge.Scraper) carries no release timestamp, and minimumReleaseAgeBehaviour's
+    // default (timestamp-required) treats that as "not old enough" forever -- it sat in
+    // "Pending Status Checks" from 10-18 with no branch and no PR. The weekend window still
+    // applies; only the 3-day wait is lifted. Both package-name shapes: "owner/repo" (actions,
+    // github-tags) and the URL form (git-refs, uv git sources).
+    {
+      matchPackageNames: ["/^(https://github\\.com/)?mjdevaccount//i"],
+      minimumReleaseAge: null,
+    },
+  ],
+}
