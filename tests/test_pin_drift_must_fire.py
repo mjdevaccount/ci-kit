@@ -142,3 +142,34 @@ def test_name_is_derived_from_the_remote_or_given(new_repo, tmp_path: Path) -> N
     assert run_tool("pin_drift", tmp_path, "--file", str(f), "--remote", str(rem)).returncode == 2
     r = run_tool("pin_drift", tmp_path, "--file", str(f), "--remote", str(rem), "--name", "other-kit")
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_pins_in_reads_a_pep508_index_pin() -> None:
+    text = ('a "ci-kit==1.2.0",\n'                                   # plain exact pin
+            'b "ci-kit[sql,dev]==1.3.0",\n'                          # with extras
+            'c "ci_kit == 2.0.10"\n'                                 # PEP 503: _ equals -, spaces
+            'd "CI.Kit==1.0.0"\n'                                    # any case, any separator
+            'e "ci-kit>=1.2.0"\n'                                    # a range: not a pin
+            'f "ci-kit==1.2.0rc1"\n'                                 # pre-release: not a pin
+            'g "ci-kit==1.2.0.post1"\n'                              # post release: not a pin
+            'h "my-ci-kit==9.9.9"\n'                                 # a different name
+            'i "ci-kit==1.2.0+local"\n')                             # local version: not a pin
+    assert pin_drift.pins_in(text, "ci-kit") == [(1, "v1.2.0"), (2, "v1.3.0"), (3, "v2.0.10"), (4, "v1.0.0")]
+
+
+def test_lagging_index_pin_is_exit_1_and_current_is_0(new_repo, tmp_path: Path) -> None:
+    rem = _remote(new_repo, "v1.0.0rc1", "v1.0.0", "v1.1.0")
+    old = _consumer(tmp_path, 'dependencies = ["ci-kit[sql]==1.0.0"]\n', "old/pyproject.toml")
+    r = run_tool("pin_drift", tmp_path, "--file", str(old), "--remote", str(rem))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "v1.0.0" in r.stdout and "v1.1.0" in r.stdout
+    new = _consumer(tmp_path, 'dependencies = ["ci-kit[sql]==1.1.0"]\n', "new/pyproject.toml")
+    r = run_tool("pin_drift", tmp_path, "--file", str(new), "--remote", str(rem))
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_a_prerelease_index_pin_alone_is_no_pin_exit_2(new_repo, tmp_path: Path) -> None:
+    rem = _remote(new_repo, "v1.0.0")
+    rc = _consumer(tmp_path, 'dependencies = ["ci-kit==1.1.0rc1"]\n', "pyproject.toml")
+    r = run_tool("pin_drift", tmp_path, "--file", str(rc), "--remote", str(rem))
+    assert r.returncode == 2, r.stdout + r.stderr
