@@ -258,6 +258,21 @@
     { matchManagers: ["npm"], matchUpdateTypes: ["minor", "patch"], groupName: "npm (non-major)" },
     { matchManagers: ["nuget"], matchUpdateTypes: ["minor", "patch"], groupName: "nuget (non-major)" },
     { matchManagers: ["dockerfile"], groupName: "dockerfile base images" },
+    // First-party packages PUBLISHED TO A REGISTRY, matched by source repo, not name (2026-11-04).
+    // finance-ops#116 moved llm-ports from a release-wheel URL (depName `mjdevaccount/llm-ports`,
+    // caught by "first-party kits" above) to PyPI (depName `llm-ports`), and the rule stopped
+    // matching: v1.1.0 sat "Pending Status Checks" behind the 3-day age wait inside the weekly
+    // "python (non-major)" group while ci-pin-drift was red on the day it shipped. The pypi/npm
+    // datasources read the package's repository URL, so this follows a kit to ANY registry under
+    // ANY name. AFTER the grouping rules on purpose: a later packageRule wins, and the python
+    // group would otherwise fold a kit bump into the weekly PR.
+    {
+      description: "first-party packages on a registry (llm-ports on PyPI)",
+      matchSourceUrls: ["https://github.com/mjdevaccount/**"],
+      groupName: null,
+      schedule: ["at any time"],
+      minimumReleaseAge: null,
+    },
 
     // ---- container images in compose files DEPLOY ON MERGE ---------------------------------
     // trade-infra's compose is shipped by deploy-reconcile within the hour, unattended.
