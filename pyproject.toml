@@ -36,7 +36,11 @@ build-backend = "hatchling.build"
 packages = ["ci_kit"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = [
+    "json5>=0.17.3",
+    "pytest>=8",
+    "ruff>=0.6",
+]
 
 [tool.ruff]
 line-length = 140
