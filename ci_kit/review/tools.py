@@ -37,8 +37,10 @@ RUFF_READ_FLAGS = ("--diff", "--statistics", "--select", "--extend-select", "--i
                    "--output-format", "--no-cache", "--quiet", "-q", "--exit-zero", "--show-files")
 SECRET_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN",
               "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "NTFY_URL")
-# the gate's own venv must not leak into the PR project's `uv run`
-VENV_ENV = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "PYTHONHOME")
+# the gate's own venv must not leak into the PR project's `uv run`; nor its PYTHONSAFEPATH (the
+# workflow sets it so a PR-added ci_kit/ cannot shadow the gate), which would stop the project's own
+# `python -m pytest` from importing its packages off the cwd
+VENV_ENV = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "PYTHONHOME", "PYTHONSAFEPATH")
 TOOLS = ("read_file", "grep", "glob_files", "run")
 
 INSTRUCTIONS = """You review a pull request as its pre-merge CI gate. You never edit. Use the tools

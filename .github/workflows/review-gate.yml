@@ -141,6 +141,11 @@ jobs:
     name: review
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # every `python -m ci_kit...` runs with the PR checkout as cwd, and -m puts the cwd AHEAD of
+      # PYTHONPATH: a PR-added ci_kit/ would replace the gate that grades it. Cleared in Install (the
+      # caller's own build) and in the reviewer's tool runs (tools.VENV_ENV). v1.15.1.
+      PYTHONSAFEPATH: "1"
     permissions:
       contents: read
       pull-requests: write   # the verdict comment
@@ -259,6 +264,7 @@ jobs:
         env:
           KIT: ${{ steps.kit.outputs.dir }}
           INSTALL: ${{ inputs.install }}
+          PYTHONSAFEPATH: ""   # the caller's project builds and imports as it does locally
         run: |
           set -euo pipefail
           # the gate's own locked deps, in ITS venv: never the caller's
