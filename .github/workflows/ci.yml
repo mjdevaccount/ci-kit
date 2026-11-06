@@ -80,6 +80,15 @@ jobs:
         with:
           tool: ci-api-diff
           args: --selftest
+      - name: gate-lint selftest (through the action, which installs the workflow extra)
+        uses: ./
+        with:
+          tool: ci-gate-lint
+          args: --selftest
+      - name: gate-lint on ci-kit's own ci.yml (through the action)
+        uses: ./
+        with:
+          tool: ci-gate-lint
       - name: sql gate selftest (through the action, which installs the sql extra)
         uses: ./
         with:
