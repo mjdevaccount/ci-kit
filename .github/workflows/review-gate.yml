@@ -1,0 +1,435 @@
+# review-gate -- a pre-merge model reviewer whose verdict is a CI check auto-merge waits for.
+#
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened, ready_for_review]   # NO `labeled` (below)
+#   permissions: { contents: read, pull-requests: write, actions: read }
+#   concurrency: { group: review-gate-${{ github.event.pull_request.number }}, cancel-in-progress: true }
+#   jobs:
+#     review:
+#       name: reviewer
+#       uses: mjdevaccount/ci-kit/.github/workflows/review-gate.yml@v1
+#       with:
+#         guard-paths: |            # YOUR guard paths, dorny/paths-filter globs, one `- '...'` per line
+#           - 'migrations/**'
+#           - '.github/workflows/**'
+#         charter: Your charter is REVIEW.md. Read it first and follow it.
+#       secrets:                    # the names are yours; map onto these
+#         claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+#         anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+#         ntfy-url: ${{ secrets.NTFY_URL }}                 # optional
+#     gate:                         # THE required check: one always() aggregate (ci-gate-lint's shape)
+#       name: review gate
+#       needs: [review]
+#       if: always()
+#       runs-on: ubuntu-latest
+#       steps:
+#         - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+#           with: { jobs: '${{ toJSON(needs) }}' }
+#
+# WHY (trade-data, 2026-09-26). PRs open READY with auto-merge armed at open; CI is the only merge
+# gate. "Review a guard or a 3+ commit loop before merging" lived in session memory and lost every
+# race: trade-data#2059 auto-merged 30s after opening, the reviewer's DO NOT SHIP arrived after.
+# 41 of 134 closed reviewer dispatches found a blocking defect. Anthropic's managed Code Review
+# never blocks a merge. Moved here from trade-data 2026-11-06 (scripts/review_gate_*.py ->
+# ci_kit/review/), so every repo calls ONE gate.
+#
+# WHY REUSABLE CLOSES MOST OF THE SELF-GRADING HOLE. `pull_request` runs the PR HEAD's copy of a
+# workflow, so a PR editing an in-repo gate was graded by its own edit (it could drop the tier,
+# the prompt or the Gate step). Here the policy, the prompt, the tools and the verdict all run from
+# ci-kit at the caller's pinned ref; a caller PR can only edit its STANZA (the ref, the inputs, the
+# aggregate). That residual wants a session reviewer on any diff to the caller file. Still open,
+# as before: the review job runs the PR's own pytest as the runner user, which can read the
+# credential and rewrite the installed gate under $RUNNER_TEMP. Fork heads get no secrets.
+#
+# ALWAYS RUNS, NEVER SKIPS. A required check that is path-filtered at the trigger never reports on
+# an out-of-tier PR, and a job skipped by a job-level `if:` counts as PASSED. So the job always
+# starts and a STEP decides (ci_kit.review.tier): every code PR is reviewed; guard path / 3+
+# non-merge commits / the label are the REASONS it reads; a docs/lockfile-only diff passes with no
+# model call. The check name is `<caller job> / review`, so the caller's `review gate` aggregate
+# above is what branch protection lists -- it keeps a pre-existing check name, and `record`
+# (continue-on-error) can never turn it red.
+#
+# FAILS CLOSED. In the tier with no credential (UNARMED), a fork head, a reviewer that crashed,
+# timed out or wrote no parseable verdict = BLIND = RED, with the cause in the PR comment.
+#
+# TWO TRANSPORTS, ONE TOGGLE: the caller repo's VARIABLE REVIEW_GATE_AUTH (or input auth-mode) =
+# subscription (claude-code-oauth-token, the Claude Code CLI) | api (anthropic-api-key, pydantic-ai
+# on the plain Messages API) | auto/unset (subscription first). Only the chosen credential reaches
+# the Review step: with both set, `claude -p` would prefer the API key and bill the account the
+# subscription mode exists to spare. mcp/scripts/review_gate_auth.py flips every repo at once.
+#
+# CARRIED VERDICTS: the armed-PR updater merges main into every armed PR; each move re-runs this.
+# When the PR's OWN diff (merge-base..head) hashes the same as one a previous run PASSED, it passes
+# with "verdict carried from <sha>" and no model run (ci_kit.review.carry). The record is an
+# ARTIFACT written by the separate `record` job (a comment is editable by any token holder).
+#
+# THE GATE'S CODE: `kit-ref` (default v1) is fetched into $RUNNER_TEMP and its locked `review`
+# extra synced there -- the reviewer never runs in the caller's venv. The comment names the ref,
+# version and sha that graded the PR. kit-ref exists for a bootstrap or a test of an unreleased
+# change; a caller pinned to @v1 leaves it alone.
+name: review-gate
+
+on:
+  workflow_call:
+    inputs:
+      guard-paths:
+        description: >-
+          The caller's guard paths as dorny/paths-filter globs, one YAML list item per line
+          (`- 'migrations/**'`). A guard path is a REASON the reviewer reads and moves the review
+          to `guard-model`; it never decides whether the review runs.
+        type: string
+        required: true
+      label:
+        description: the PR label that adds a reason; must be on the PR AT OPEN (no `labeled` trigger)
+        type: string
+        default: review:required
+      charter:
+        description: the repo's review charter, appended to the prompt (which files to read, what to hunt)
+        type: string
+        default: If the repository has a REVIEW.md, read it first and follow it.
+      install:
+        description: the command that installs the caller's project, so the reviewer can run its tests
+        type: string
+        default: uv sync --all-groups --frozen
+      python-version:
+        description: setup-uv python-version for the caller's project ('' = uv's choice)
+        type: string
+        default: ""
+      model:
+        description: the reviewer's model
+        type: string
+        default: claude-sonnet-5-5
+      guard-model:
+        description: the reviewer's model when a guard path is in the diff
+        type: string
+        default: claude-opus-5-5
+      not-prose:
+        description: space-separated path prefixes never read as prose by the docs-only skip
+        type: string
+        default: .claude/ prompts/
+      auth-mode:
+        description: subscription | api | auto ('' = the caller repo's REVIEW_GATE_AUTH variable, else auto)
+        type: string
+        default: ""
+      claude-code-version:
+        description: the subscription transport's pinned Claude Code CLI
+        type: string
+        # renovate: datasource=npm depName=@anthropic-ai/claude-code
+        default: 2.1.311
+      kit-ref:
+        description: the ci-kit ref whose ci_kit.review grades the PR (a tag, branch or sha)
+        type: string
+        default: v1
+    secrets:
+      claude-code-oauth-token:
+        description: the `subscription` credential (`claude setup-token`)
+        required: false
+      anthropic-api-key:
+        description: the `api` credential
+        required: false
+      ntfy-url:
+        description: optional; a block or BLIND is pushed here (priority 3)
+        required: false
+    outputs:
+      result:
+        description: pass | block | blind ('' when the diff was not in the tier)
+        value: ${{ jobs.review.outputs.result }}
+
+jobs:
+  review:
+    name: review
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: write   # the verdict comment
+      actions: read          # find + download the last passing run's verdict artifact (carry)
+    outputs:
+      # frozen at each step's end; the `record` job reads them on a runner the PR's code never ran on
+      result: ${{ steps.verdict.outputs.result }}
+      hash: ${{ steps.carry.outputs.hash }}
+      origin: ${{ steps.carry.outputs.origin }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Fetch the gate (ci-kit at kit-ref)
+        id: kit
+        env:
+          KIT_REF: ${{ inputs.kit-ref }}
+        run: |
+          set -euo pipefail
+          kit="$RUNNER_TEMP/ci-kit"
+          git init -q "$kit"
+          git -C "$kit" fetch -q --depth 1 https://github.com/mjdevaccount/ci-kit.git "$KIT_REF"
+          git -C "$kit" checkout -q --detach FETCH_HEAD
+          sha=$(git -C "$kit" rev-parse HEAD)
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$kit/pyproject.toml" | head -1)
+          ref=$(printf '%s' "$KIT_REF" | tr -cd 'A-Za-z0-9._/-' | cut -c1-64)
+          echo "dir=$kit" >> "$GITHUB_OUTPUT"
+          echo "label=ci-kit $ref (${version:-?}, ${sha:0:7})" >> "$GITHUB_OUTPUT"
+          echo "Gate: ci-kit $ref (${version:-?}, ${sha:0:7})" >> "$GITHUB_STEP_SUMMARY"
+
+      # dorny reads a filter FILE (no ':' or newline in the input), so the caller's list keeps its
+      # own YAML; an empty list is a YAML null, which dorny refuses -> red, never a silent no-guard
+      - name: Guard paths
+        env:
+          GUARD_PATHS: ${{ inputs.guard-paths }}
+        run: |
+          set -euo pipefail
+          { echo 'guard:'; printf '%s\n' "$GUARD_PATHS" | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*/  /'; } \
+            > "$RUNNER_TEMP/review-gate-filters.yml"
+          cat "$RUNNER_TEMP/review-gate-filters.yml"
+      - uses: dorny/paths-filter@v4
+        id: tier
+        with:
+          list-files: shell
+          filters: ${{ runner.temp }}/review-gate-filters.yml
+
+      - name: Decide
+        id: decide
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          GUARD: ${{ steps.tier.outputs.guard }}
+          GUARD_FILES: ${{ steps.tier.outputs.guard_files }}
+          LABELED: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HAS_KEY: ${{ secrets.anthropic-api-key != '' }}
+          HAS_OAUTH: ${{ secrets.claude-code-oauth-token != '' }}
+          AUTH_MODE: ${{ inputs.auth-mode || vars.REVIEW_GATE_AUTH }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MODEL: ${{ inputs.model }}
+          GUARD_MODEL: ${{ inputs.guard-model }}
+          LABEL: ${{ inputs.label }}
+          NOT_PROSE: ${{ inputs.not-prose }}
+        run: |
+          set -euo pipefail
+          np=()
+          for p in $NOT_PROSE; do np+=(--not-prose "$p"); done
+          python3 -m ci_kit.review.tier --model "$MODEL" --guard-model "$GUARD_MODEL" --label "$LABEL" "${np[@]}"
+          echo "schema=$(python3 -m ci_kit.review.verdict --print-schema)" >> "$GITHUB_OUTPUT"
+
+      - name: Carry
+        id: carry
+        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == ''
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          # the CALLER's workflow file (github.* is the caller's context): its runs hold the records
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -uo pipefail
+          wf=${WORKFLOW_REF%@*}; wf=${wf##*/}
+          # exit 2 = could not finish looking: that is NO carry (a full review), never a pass --
+          # and no hash output, so the `record` job records nothing for this run
+          python3 -m ci_kit.review.carry carry --repo "$GITHUB_REPOSITORY" --pr "$PR" \
+            --base "$BASE_SHA" --head "$HEAD_SHA" --branch "$HEAD_REF" --run-id "$GITHUB_RUN_ID" \
+            --workflow "$wf" \
+            || printf 'carried=false\nhash=\nwhy=carry check did not finish; full review\n' >> "$GITHUB_OUTPUT"
+
+      - name: Siblings
+        id: siblings
+        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true'
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 -m ci_kit.review.carry siblings --repo "$GITHUB_REPOSITORY" --pr "$PR" \
+            --base "$BASE_SHA" --head "$HEAD_SHA" \
+            || echo "text=(sibling list unavailable: the lookup failed)" >> "$GITHUB_OUTPUT"
+
+      # the reviewer's first move is proving a guard's red path, which needs the real toolchain
+      - uses: astral-sh/setup-uv@v10.3.3
+        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true'
+        with:
+          python-version: ${{ inputs.python-version }}
+          enable-cache: true
+      - name: Install
+        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true'
+        env:
+          KIT: ${{ steps.kit.outputs.dir }}
+          INSTALL: ${{ inputs.install }}
+        run: |
+          set -euo pipefail
+          # the gate's own locked deps, in ITS venv: never the caller's
+          uv sync --project "$KIT" --frozen --no-dev --extra review
+          eval "$INSTALL"
+      - name: Install Claude Code
+        # the subscription transport's CLI, pinned. A failed install must still reach Review, which
+        # names it as the BLIND's cause (claude not found) instead of skipping the verdict.
+        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true' && steps.decide.outputs.credential == 'oauth'
+        continue-on-error: true
+        env:
+          CLAUDE_CODE_VERSION: ${{ inputs.claude-code-version }}
+        run: npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" && claude --version
+
+      - name: Review
+        id: review
+        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true'
+        # a failed or timed-out review must still reach Verdict, which reads the missing output as BLIND
+        continue-on-error: true
+        # below the job timeout, so a hang lands in continue-on-error -> BLIND with comment + push
+        timeout-minutes: 35
+        run: |
+          if [ "$CREDENTIAL" = "oauth" ]; then transport=claude; else transport=agent; fi
+          "$KIT/.venv/bin/python" -m "ci_kit.review.$transport" --model "$MODEL" --schema "$SCHEMA"
+        env:
+          KIT: ${{ steps.kit.outputs.dir }}
+          CREDENTIAL: ${{ steps.decide.outputs.credential }}
+          # ONLY the chosen credential reaches the step
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ steps.decide.outputs.credential == 'oauth' && secrets.claude-code-oauth-token || '' }}
+          ANTHROPIC_API_KEY: ${{ steps.decide.outputs.credential == 'api_key' && secrets.anthropic-api-key || '' }}
+          MODEL: ${{ steps.decide.outputs.model }}
+          SCHEMA: ${{ steps.decide.outputs.schema }}
+          REVIEW_PROMPT: |
+            You are the reviewer for ${{ github.repository }}, running as its pre-merge CI gate.
+            ${{ inputs.charter }}
+            You may read the code and run git, ruff and pytest; you never edit.
+
+            PR #${{ github.event.pull_request.number }} (read its title and body with git log; judge the diff, not the description)
+            Diff under review: git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+            Commits: git log --oneline ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+            Why this PR is in the review tier: ${{ steps.decide.outputs.reasons }}
+
+            Open sibling PRs whose changed files intersect this one (context only; they may merge
+            before or after this PR -- look for a SEMANTIC collision with this diff, e.g. a name
+            one renames and another reads):
+            ${{ steps.siblings.outputs.text }}
+
+            Read the diff before the description. For every guard the diff adds or edits, name the
+            execution path that makes it fire and prove its red path (run the test, or mutate and
+            re-run). Report findings only.
+
+            Return the structured output:
+            - ship: SHIP, SHIP WITH NOTED RISK, or DO NOT SHIP.
+            - findings: most severe first, each with severity (blocking, risk or note), verdict
+              (CONFIRMED if you traced it, PLAUSIBLE if you suspect it), file, line, summary and a
+              concrete failure_scenario.
+            - not_reviewed: what you did not check, and why.
+            A CONFIRMED blocking finding means DO NOT SHIP.
+
+      - name: Verdict
+        id: verdict
+        if: steps.decide.outputs.required == 'true'
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          REVIEW_JSON: ${{ steps.review.outputs.structured_output }}
+          CAUSE: ${{ steps.review.outputs.cause }}
+          CRED_NAME: ${{ steps.decide.outputs.credential_name }}
+          BLIND: ${{ steps.decide.outputs.blind }}
+          REASONS: ${{ steps.decide.outputs.reasons }}
+          GATE: ${{ steps.kit.outputs.label }}
+          CARRIED: ${{ steps.carry.outputs.carried }}
+          CARRY_WHY: ${{ steps.carry.outputs.why }}
+        run: |
+          set -euo pipefail
+          if [ "$CARRIED" = "true" ] && [ -z "$BLIND" ]; then
+            # the PR's own diff has the same hash as one a previous run PASSED: only main moved
+            {
+              echo "<!-- review-gate -->"
+              echo "### review gate"
+              echo
+              echo "In the review tier because: $REASONS"
+              echo
+              echo "**PASS, $CARRY_WHY** -- the PR's own diff is unchanged since that review (only main moved), so the reviewer was not re-run."
+            } > body.md
+            echo "result=pass" >> "$GITHUB_OUTPUT"
+            echo "title=review gate passed: $CARRY_WHY" >> "$GITHUB_OUTPUT"
+            cat body.md >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "carry: ${CARRY_WHY:-not checked}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$BLIND" ]; then REVIEW_JSON=""; REASONS="$REASONS; BLIND: $BLIND"; fi
+          # A BLIND with no cause is undiagnosable (td#2373: four BLINDs before anyone could read
+          # "Credit balance is too low"). Each transport writes `cause` whenever it writes no verdict.
+          if [ -z "$REVIEW_JSON" ] && [ -n "$CAUSE" ]; then REASONS="$REASONS; CAUSE ($CRED_NAME): $CAUSE"; fi
+          REVIEW_JSON="$REVIEW_JSON" python3 -m ci_kit.review.verdict --reasons "$REASONS" --body-out body.md
+          echo "_gate: ${GATE}_" >> body.md
+          cat body.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the PR
+        if: steps.decide.outputs.required == 'true' && !cancelled()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [ -f body.md ] || echo "<!-- review-gate -->"$'\n'"review gate: the verdict step did not run" > body.md
+          # one sticky comment, found by its marker, so a re-review edits instead of piling up
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                 -q '.[] | select(.body | startswith("<!-- review-gate -->")) | .id' | tail -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@body.md >/dev/null
+          else
+            gh pr comment "$PR" --body-file body.md
+          fi
+
+      - name: Push a block to ntfy
+        # A blocked PR with no live session sits silently until someone looks; this is the push.
+        # Priority 3: a PR is never a reason to wake the operator.
+        if: steps.decide.outputs.required == 'true' && steps.verdict.outputs.result != 'pass' && steps.decide.outputs.unarmed != 'true' && !cancelled()
+        env:
+          NTFY_URL: ${{ secrets.ntfy-url }}
+          TITLE: ${{ steps.verdict.outputs.title || 'review gate did not produce a verdict' }}
+          URL: ${{ github.event.pull_request.html_url }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.event.repository.name }}
+          # via env, never ${{ }} inside `run:` -- a PR title is attacker-shaped text
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if [ -z "${NTFY_URL:-}" ]; then echo "::warning::ntfy-url unset; the block was not pushed"; exit 0; fi
+          curl -fsS -X POST "$NTFY_URL" -H "Title: $REPO #$PR: $TITLE" \
+            -H "Priority: 3" -H "Tags: mag" -H "Click: $URL" \
+            --data-binary "$PR_TITLE" >/dev/null \
+            || echo "::warning::ntfy push failed"
+
+      - name: Gate
+        if: steps.decide.outputs.required == 'true' && !cancelled()
+        env:
+          RESULT: ${{ steps.verdict.outputs.result }}
+        run: |
+          case "$RESULT" in
+            pass) echo "review gate: pass" ;;
+            block) echo "::error::review gate BLOCKED -- see the PR comment"; exit 1 ;;
+            *) echo "::error::review gate BLIND ($RESULT) -- the reviewer did not finish looking"; exit 1 ;;
+          esac
+
+  record:
+    # What a later run of this PR compares against to carry a verdict (ci_kit.review.carry).
+    # A SEPARATE JOB on purpose: the review job runs the PR's own tests, which could rewrite any
+    # file on that runner; this runner never checks the PR out. Pass AND block are recorded (the
+    # newest record wins, so an older pass cannot outvote a newer block); BLIND records nothing.
+    # continue-on-error: a failure here only means the next run reviews in full, and must never
+    # turn the caller's aggregate red.
+    name: record verdict
+    needs: review
+    if: always() && needs.review.outputs.hash != '' && (needs.review.outputs.result == 'pass' || needs.review.outputs.result == 'block')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions: {}
+    steps:
+      - name: Write
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          HASH: ${{ needs.review.outputs.hash }}
+          ORIGIN: ${{ needs.review.outputs.origin }}
+          RESULT: ${{ needs.review.outputs.result }}
+        run: |
+          python3 -c 'import json, os; e = os.environ; print(json.dumps({"pr": int(e["PR"]), "hash": e["HASH"], "head_sha": e["ORIGIN"], "result": e["RESULT"]}))' > verdict.json
+          cat verdict.json >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: review-verdict-${{ github.event.pull_request.number }}
+          path: verdict.json
+          retention-days: 90
