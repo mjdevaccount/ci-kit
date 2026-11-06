@@ -14,6 +14,8 @@ every other job, and [re-actors/alls-green](https://github.com/re-actors/alls-gr
   no-aggregate   a job has `needs:` (it skips when its need fails) but no alls-green job exists
   many           more than one alls-green job (which one does branch protection require?)
   not-always     the aggregate's `if:` is not `always()` -- it skips with its needs
+  no-python      it runs on a self-hosted/expression runner with no setup-python first --
+                 alls-green runs `python -m ...`; a python3-only image exits 127 (trade-infra, 2026-11-06)
   jobs-input     its `jobs:` input is not `${{ toJSON(needs) }}` -- it judges something else
   uncovered      a job missing from the aggregate's `needs:` -- a check nothing requires
   skip-upstream  an allowed skip names a job others `need` -- its skip hides theirs (detect)
@@ -59,6 +61,24 @@ def _alls_green_step(job: dict) -> dict | None:
     return None
 
 
+_HOSTED = re.compile(r"^(ubuntu|windows|macos)-[\w.-]+$")
+
+
+def _hosted(runs_on: Any) -> bool:
+    """A plain GitHub-hosted label (it ships `python`). An expression or a self-hosted label is not."""
+    return isinstance(runs_on, str) and bool(_HOSTED.match(runs_on.strip()))
+
+
+def _python_before(job: dict) -> bool:
+    for step in job.get("steps") or []:
+        uses = str(step.get("uses", "")) if isinstance(step, dict) else ""
+        if uses.startswith(ALLS_GREEN):
+            return False
+        if uses.startswith("actions/setup-python@"):
+            return True
+    return False
+
+
 def findings_in(jobs: dict[str, dict], origin: str) -> list[str]:
     """Every rule above, over one workflow's `jobs:` mapping. Pure."""
     aggs = [j for j, b in jobs.items() if _alls_green_step(b)]
@@ -77,6 +97,9 @@ def findings_in(jobs: dict[str, dict], origin: str) -> list[str]:
     with_ = step.get("with") or {}
     if _bare(body.get("if", "")) != "always()":
         out.append(f"{origin}: not-always -- `{agg}` has if: {body.get('if')!r}; it must be `always()`")
+    if not _hosted(body.get("runs-on")) and not _python_before(body):
+        out.append(f"{origin}: no-python -- `{agg}` runs on {body.get('runs-on')!r} with no actions/setup-python "
+                   f"before alls-green, which runs `python -m ...` (a python3-only runner exits 127)")
     if _bare(with_.get("jobs", "")) != "toJSON(needs)":
         out.append(f"{origin}: jobs-input -- `{agg}` passes jobs: {with_.get('jobs')!r}, not ${{{{ toJSON(needs) }}}}")
     covered = set(_needs(body))
@@ -122,7 +145,7 @@ jobs:
   gate:
     if: ${{ always() }}
     needs: [detect, test, lint]
-    runs-on: x
+    runs-on: ubuntu-latest
     steps:
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35
         with: {allowed-skips: test, jobs: '${{ toJSON(needs) }}'}
@@ -130,11 +153,13 @@ jobs:
 
 #: (label, old, new) -- each mutation of _GOOD must produce exactly the named finding
 _MUTATIONS = [
-    ("no-aggregate", "  gate:\n    if: ${{ always() }}\n    needs: [detect, test, lint]\n    runs-on: x\n    steps:\n"
+    ("no-aggregate", "  gate:\n    if: ${{ always() }}\n    needs: [detect, test, lint]\n    runs-on: ubuntu-latest\n    steps:\n"
                      "      - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35\n"
                      "        with: {allowed-skips: test, jobs: '${{ toJSON(needs) }}'}\n", ""),
     ("not-always", "if: ${{ always() }}", "if: success()"),
     ("jobs-input", "jobs: '${{ toJSON(needs) }}'", "jobs: '{}'"),
+    ("no-python", "    needs: [detect, test, lint]\n    runs-on: ubuntu-latest",
+                  "    needs: [detect, test, lint]\n    runs-on: [self-hosted, home]"),
     ("uncovered", "needs: [detect, test, lint]", "needs: [detect, test]"),
     ("skip-upstream", "allowed-skips: test,", "allowed-skips: 'test, detect',"),
     ("skip-no-if", "allowed-skips: test,", "allowed-skips: 'test, lint',"),

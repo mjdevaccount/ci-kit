@@ -26,7 +26,7 @@ FIXED = SHAPE_806 + """
   gate:
     if: always()
     needs: [detect, validate, python, gitleaks]
-    runs-on: x
+    runs-on: ubuntu-latest
     permissions: {}
     steps:
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
@@ -60,6 +60,7 @@ def test_the_aggregate_passes(tmp_path, capsys) -> None:
     ("allowed-skips: validate, python", "allowed-skips: validate, python, detect", "skip-upstream"),
     ("allowed-skips: validate, python", "allowed-skips: validate, python, gitleaks", "skip-no-if"),
     ("jobs: ${{ toJSON(needs) }}", "jobs: ${{ toJSON(needs.detect) }}", "jobs-input"),
+    ("runs-on: ubuntu-latest", "runs-on: ${{ fromJSON(vars.CI_RUNNER) }}", "no-python"),
 ])
 def test_each_rot_of_the_aggregate_fails(tmp_path, capsys, old, new, rule) -> None:
     assert old in FIXED
@@ -98,3 +99,11 @@ def test_a_missing_workflow_is_2(tmp_path) -> None:
 def test_selftest_passes_and_names_its_mutations() -> None:
     assert ci_gate.selftest() == []
     assert {m[0] for m in ci_gate._MUTATIONS} >= {"no-aggregate", "not-always", "uncovered", "skip-upstream"}
+
+
+def test_a_self_hosted_aggregate_with_setup_python_passes(tmp_path) -> None:
+    text = FIXED.replace("runs-on: ubuntu-latest\n    permissions: {}\n    steps:\n",
+                         "runs-on: [self-hosted, home]\n    permissions: {}\n    steps:\n"
+                         "      - uses: actions/setup-python@v7\n")
+    assert "setup-python" in text
+    assert ci_gate.main(["--root", str(_repo(tmp_path, text))]) == 0
