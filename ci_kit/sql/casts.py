@@ -137,13 +137,7 @@ def iter_files(cfg: Config) -> list[pathlib.Path]:
               f"shrink (see REQUIRED_DIRS). Exit 2: this gate did not look where it must.",
               file=sys.stderr)
         raise SystemExit(2)
-    rels: list[str] = []
-    for d in cfg.scan_dirs:
-        got = discover.tracked((d,), root=cfg.root)
-        discover.require_scanned(len(got), gate=f"{cfg.gate}[{d}]", dirs=(d,), floor=1)
-        rels.extend(got)
-    skip = {p.resolve() for p in cfg.exclude}
-    return [p for r in rels if (p := cfg.root / r).resolve() not in skip]
+    return discover.tracked_each(cfg.scan_dirs, gate=cfg.gate, root=cfg.root, exclude=cfg.exclude)
 
 
 def ruleb_key(relpath: str, name: str, type_: str) -> str:

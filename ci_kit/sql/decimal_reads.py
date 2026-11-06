@@ -157,13 +157,7 @@ def scan_text(relpath: str, text: str, cols: set[str], cfg: Config) -> list[tupl
 
 def iter_files(cfg: Config) -> list[pathlib.Path]:
     """Tracked .py under `cfg.scan_dirs` (`git ls-files`, never a walk); a dir yielding none exits 2."""
-    skip = {p.resolve() for p in cfg.exclude}
-    out: list[pathlib.Path] = []
-    for d in cfg.scan_dirs:
-        rels = discover.tracked((d,), root=cfg.root)
-        discover.require_scanned(len(rels), gate=f"{cfg.gate}[{d}]", dirs=(d,), floor=1)
-        out.extend(p for rel in rels if (p := cfg.root / rel).resolve() not in skip)
-    return out
+    return discover.tracked_each(cfg.scan_dirs, gate=cfg.gate, root=cfg.root, exclude=cfg.exclude)
 
 
 def scan(cols: set[str], cfg: Config) -> list[tuple[str, str]]:

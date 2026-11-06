@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import collections
 import pathlib
+import re
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, NoReturn
@@ -42,6 +43,43 @@ def read_source(path: pathlib.Path, rel: str, *, gate: str = "site-lint") -> str
         return path.read_text(encoding=ENCODING)
     except (OSError, UnicodeDecodeError) as exc:
         _blind(rel, exc, gate=gate)
+
+
+#: What a waiver's reason is stripped of before its length is judged (an em dash included).
+_WAIVER_LEAD = " :-—"
+
+
+def waived_lines(text: str, waiver: str, *, min_reason: int = 8) -> tuple[set[int], list[tuple[int, str]]]:
+    """(lines carrying a JUSTIFIED `waiver`, [(lineno, stripped line)] carrying a BARE one).
+
+    A waiver must say why: the text after the marker, stripped of leading ` :-` and em dashes,
+    must be at least `min_reason` characters, else the line is BARE and the gate reports it rather
+    than honouring it -- a waiver that costs nothing to write reproduces the defect it waives.
+    The marker matches anywhere on the line, followed by a word boundary. v1.14.0: three
+    trade-data gates (`# zero-ok`, `# null-ok`, the hardcoded-None waiver) each carried this loop."""
+    pattern = re.compile(re.escape(waiver) + r"\b(.*)$")
+    good: set[int] = set()
+    bare: list[tuple[int, str]] = []
+    for i, line in enumerate(text.splitlines(), start=1):
+        m = pattern.search(line)
+        if not m:
+            continue
+        if len(m.group(1).lstrip(_WAIVER_LEAD).strip()) >= min_reason:
+            good.add(i)
+        else:
+            bare.append((i, line.strip()))
+    return good, bare
+
+
+def repo_on_path(root: pathlib.Path, marker: str) -> None:
+    """Put `root` first on `sys.path` when THIS checkout holds `marker` (a root-relative file).
+
+    For a gate that imports its own repo's package (a registry it audits). Conditional on purpose:
+    a must-fire fixture repo holds only SOURCES under its root and relies on the installed package,
+    so an unconditional insert would shadow it with a half tree. Idempotent. v1.14.0: two
+    trade-data gates (lint_llm_surfaces, lint_watched_surfaces) each carried this."""
+    if (root / marker).is_file() and str(root) not in sys.path:
+        sys.path.insert(0, str(root))
 
 
 def count_sites(root: pathlib.Path, scan_dirs: Sequence[str], exempt: Iterable[str],
