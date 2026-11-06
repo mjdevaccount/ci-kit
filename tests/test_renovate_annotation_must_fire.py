@@ -49,5 +49,13 @@ def test_a_prerelease_is_not_read_as_its_base_version() -> None:
     assert not list(_pattern().finditer('# renovate: datasource=github-releases depName=a/b\nV = "1.35.0-rc1"\n'))
 
 
+def test_the_review_gates_claude_code_pin_is_read() -> None:
+    # the reusable review gate pins the CLI as an input `default:`, a key the env/constant tests never show
+    gate = PRESET.parent.parent / ".github" / "workflows" / "review-gate.yml"
+    m = _one(gate.read_text(encoding="utf-8"))
+    assert (m["datasource"], m["depName"]) == ("npm", "@anthropic-ai/claude-code")
+    assert m["currentValue"]
+
+
 def test_the_annotation_must_sit_on_the_line_directly_above() -> None:
     assert not list(_pattern().finditer('# renovate: datasource=github-releases depName=a/b\n\nV = "1.2.3"\n'))
