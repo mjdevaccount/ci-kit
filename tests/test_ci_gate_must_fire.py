@@ -107,3 +107,26 @@ def test_a_self_hosted_aggregate_with_setup_python_passes(tmp_path) -> None:
                          "      - uses: actions/setup-python@v7\n")
     assert "setup-python" in text
     assert ci_gate.main(["--root", str(_repo(tmp_path, text))]) == 0
+
+
+def test_a_json_list_of_allowed_skips_is_read_as_alls_green_reads_it(tmp_path, capsys) -> None:
+    good = FIXED.replace("allowed-skips: validate, python", "allowed-skips: '[\"validate\", \"python\"]'")
+    assert ci_gate.main(["--root", str(_repo(tmp_path / "good", good))]) == 0
+    capsys.readouterr()
+    bad = FIXED.replace("allowed-skips: validate, python", "allowed-skips: '[\"validate\", \"detect\"]'")
+    assert ci_gate.main(["--root", str(_repo(tmp_path / "bad", bad))]) == 1
+    out = capsys.readouterr().out
+    assert "skip-upstream" in out and "skip-unknown" not in out
+
+
+def test_a_one_label_hosted_list_is_hosted(tmp_path) -> None:
+    text = FIXED.replace("runs-on: ubuntu-latest\n    permissions", "runs-on: [ubuntu-latest]\n    permissions")
+    assert "[ubuntu-latest]" in text
+    assert ci_gate.main(["--root", str(_repo(tmp_path, text))]) == 0
+
+
+def test_uncovered_names_the_policy_not_a_false_requirement(tmp_path, capsys) -> None:
+    text = FIXED.replace("needs: [detect, validate, python, gitleaks]", "needs: [detect, validate, python]")
+    assert ci_gate.main(["--root", str(_repo(tmp_path, text))]) == 1
+    out = capsys.readouterr().out
+    assert "protection must require it by name" in out and "nothing requires" not in out

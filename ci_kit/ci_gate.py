@@ -17,7 +17,8 @@ every other job, and [re-actors/alls-green](https://github.com/re-actors/alls-gr
   no-python      it runs on a self-hosted/expression runner with no setup-python first --
                  alls-green runs `python -m ...`; a python3-only image exits 127 (trade-infra, 2026-11-06)
   jobs-input     its `jobs:` input is not `${{ toJSON(needs) }}` -- it judges something else
-  uncovered      a job missing from the aggregate's `needs:` -- a check nothing requires
+  uncovered      a job missing from the aggregate's `needs:` -- the aggregate does not judge it, so
+                 protection must require it by name or it must join `needs:`
   skip-upstream  an allowed skip names a job others `need` -- its skip hides theirs (detect)
   skip-no-if     an allowed skip names a job with no `if:` -- it can only skip by a need failing
   skip-unknown   an allowed skip names no job in the workflow
@@ -30,6 +31,7 @@ Needs PyYAML: install `ci-kit[workflow]` (the action does).
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import re
 import sys
@@ -65,8 +67,25 @@ _HOSTED = re.compile(r"^(ubuntu|windows|macos)-[\w.-]+$")
 
 
 def _hosted(runs_on: Any) -> bool:
-    """A plain GitHub-hosted label (it ships `python`). An expression or a self-hosted label is not."""
+    """A plain GitHub-hosted label (it ships `python`), bare or as a one-item list.
+    An expression, a self-hosted label or a multi-label list is not."""
+    if isinstance(runs_on, list) and len(runs_on) == 1:
+        runs_on = runs_on[0]
     return isinstance(runs_on, str) and bool(_HOSTED.match(runs_on.strip()))
+
+
+def _skips(raw: Any) -> list[str]:
+    """`allowed-skips` as alls-green reads it: a JSON list first, else comma/newline separated."""
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    text = str(raw or "").strip()
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, list):
+        return [str(x).strip() for x in parsed if str(x).strip()]
+    return [s.strip() for s in text.replace("\n", ",").split(",") if s.strip()]
 
 
 def _python_before(job: dict) -> bool:
@@ -104,9 +123,10 @@ def findings_in(jobs: dict[str, dict], origin: str) -> list[str]:
         out.append(f"{origin}: jobs-input -- `{agg}` passes jobs: {with_.get('jobs')!r}, not ${{{{ toJSON(needs) }}}}")
     covered = set(_needs(body))
     for j in sorted(set(jobs) - {agg} - covered):
-        out.append(f"{origin}: uncovered -- `{j}` is not in `{agg}`.needs: a check nothing requires")
+        out.append(f"{origin}: uncovered -- `{j}` is not in `{agg}`.needs: the aggregate does not judge it; "
+                   f"protection must require it by name, or add it to `needs:`")
     upstream = {n for j, b in jobs.items() if j != agg for n in _needs(b)}
-    skips = [s.strip() for s in str(with_.get("allowed-skips", "")).replace("\n", ",").split(",") if s.strip()]
+    skips = _skips(with_.get("allowed-skips", ""))
     for s in skips:
         if s not in jobs:
             out.append(f"{origin}: skip-unknown -- allowed skip `{s}` is no job in this workflow")
@@ -164,15 +184,24 @@ _MUTATIONS = [
     ("skip-upstream", "allowed-skips: test,", "allowed-skips: 'test, detect',"),
     ("skip-no-if", "allowed-skips: test,", "allowed-skips: 'test, lint',"),
     ("skip-unknown", "allowed-skips: test,", "allowed-skips: 'test, tset',"),
+    ("skip-upstream", "allowed-skips: test,", "allowed-skips: '[\"test\", \"detect\"]',"),
 ]
 
 
 def selftest() -> list[str]:
-    import yaml
+    try:
+        import yaml
+    except ImportError:
+        print(f"{GATE}: DID NOT FINISH LOOKING -- PyYAML missing; install ci-kit[workflow]", file=sys.stderr)
+        raise SystemExit(2) from None
 
     fails: list[str] = []
     good = findings_in(yaml.safe_load(_GOOD)["jobs"], "good.yml")
     fails += [f"FALSE POSITIVE on the good workflow: {f}" for f in good]
+    listed = _GOOD.replace("    runs-on: ubuntu-latest\n    steps:\n      - uses: re-actors",
+                           "    runs-on: [ubuntu-latest]\n    steps:\n      - uses: re-actors")
+    fails += [f"FALSE POSITIVE on runs-on: [ubuntu-latest]: {f}"
+              for f in findings_in(yaml.safe_load(listed)["jobs"], "good.yml")]
     for label, old, new in _MUTATIONS:
         if old not in _GOOD:
             fails.append(f"mutation {label}: anchor missing from the fixture")
