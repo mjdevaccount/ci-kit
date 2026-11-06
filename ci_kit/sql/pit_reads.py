@@ -69,13 +69,7 @@ class Config:
 
 def iter_files(cfg: Config) -> list[pathlib.Path]:
     """Tracked .py under `cfg.scan_dirs` (`git ls-files`, never a walk); a dir yielding none exits 2."""
-    rels: list[str] = []
-    for d in cfg.scan_dirs:
-        got = discover.tracked((d,), root=cfg.root)
-        discover.require_scanned(len(got), gate=f"{cfg.gate}[{d}]", dirs=(d,), floor=1)
-        rels.extend(got)
-    skip = {p.resolve() for p in cfg.exclude}
-    return [p for r in rels if (p := cfg.root / r).resolve() not in skip]
+    return discover.tracked_each(cfg.scan_dirs, gate=cfg.gate, root=cfg.root, exclude=cfg.exclude)
 
 
 def _token(site: sqlast.Site, node: exp.Expression) -> str | None:
