@@ -192,6 +192,8 @@ jobs:
         id: decide
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          # cwd is the PR checkout: without this, a PR-added ci_kit/ shadows the fetched gate (-m puts cwd first)
+          PYTHONSAFEPATH: "1"
           GUARD: ${{ steps.tier.outputs.guard }}
           GUARD_FILES: ${{ steps.tier.outputs.guard_files }}
           LABELED: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) }}
@@ -217,6 +219,8 @@ jobs:
         if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == ''
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          # cwd is the PR checkout: without this, a PR-added ci_kit/ shadows the fetched gate (-m puts cwd first)
+          PYTHONSAFEPATH: "1"
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -239,6 +243,8 @@ jobs:
         if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true'
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          # cwd is the PR checkout: without this, a PR-added ci_kit/ shadows the fetched gate (-m puts cwd first)
+          PYTHONSAFEPATH: "1"
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -285,6 +291,8 @@ jobs:
           "$KIT/.venv/bin/python" -m "ci_kit.review.$transport" --model "$MODEL" --schema "$SCHEMA"
         env:
           KIT: ${{ steps.kit.outputs.dir }}
+          # cwd is the PR checkout: without this, a PR-added ci_kit/ shadows the fetched gate (-m puts cwd first)
+          PYTHONSAFEPATH: "1"
           CREDENTIAL: ${{ steps.decide.outputs.credential }}
           # ONLY the chosen credential reaches the step
           CLAUDE_CODE_OAUTH_TOKEN: ${{ steps.decide.outputs.credential == 'oauth' && secrets.claude-code-oauth-token || '' }}
@@ -323,6 +331,8 @@ jobs:
         if: steps.decide.outputs.required == 'true'
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          # cwd is the PR checkout: without this, a PR-added ci_kit/ shadows the fetched gate (-m puts cwd first)
+          PYTHONSAFEPATH: "1"
           REVIEW_JSON: ${{ steps.review.outputs.structured_output }}
           CAUSE: ${{ steps.review.outputs.cause }}
           CRED_NAME: ${{ steps.decide.outputs.credential_name }}
