@@ -122,3 +122,40 @@ def require_scanned_each(by_dir: Mapping[str, int], floors: Mapping[str, int], *
     A dir in `floors` that `by_dir` never counted is ZERO (exit 2), never skipped."""
     for d, floor in floors.items():
         require_scanned(by_dir.get(d, 0), gate=f"{gate}[{d}]", dirs=(d,), floor=floor)
+
+
+def tracked_each(scan_dirs: Iterable[str], *, gate: str, suffix: str = ".py",
+                 root: pathlib.Path | None = None,
+                 exclude: Iterable[pathlib.Path] = ()) -> list[pathlib.Path]:
+    """ABSOLUTE paths of tracked files under `scan_dirs`, and EVERY dir must contribute at least
+    one: a dir that yields none exits 2 naming `gate[dir]`. `exclude` drops paths (compared
+    resolved), e.g. the gate's own file.
+
+    The STRICT variant (v1.14.0). The gate cannot know how many files a directory ought to hold,
+    but one it was told to scan that yielded nothing means it did not finish looking. Four copies
+    of this loop existed (this kit's sql casts / decimal_reads / pit_reads, trade-data
+    lint_pf_scoping) before it lived here."""
+    base = root if root is not None else repo_root()
+    skip = {pathlib.Path(p).resolve() for p in exclude}
+    out: list[pathlib.Path] = []
+    for d in scan_dirs:
+        got = tracked((d,), suffix=suffix, root=base)
+        require_scanned(len(got), gate=f"{gate}[{d}]", dirs=(d,), floor=1)
+        out.extend(p for rel in got if (p := base / rel).resolve() not in skip)
+    return out
+
+
+def tracked_or_empty(scan_dirs: Iterable[str], *, suffix: str = ".py",
+                     root: pathlib.Path | None = None) -> list[pathlib.Path]:
+    """ABSOLUTE paths of tracked files under `scan_dirs`, or [] when NONE of them exists.
+
+    The LENIENT variant (v1.14.0), for a gate that owns its blind message: it checks the empty
+    list itself and exits 2 in its own words (`tracked` would exit 2 in the kit's). A failing
+    `git ls-files` is still exit 2 inside `tracked` -- only "no scan dir at all" is []. Three
+    trade-data gates (lint_null_guards / lint_hardcoded_none / lint_silent_zero) each carried
+    this copy before it lived here."""
+    scan_dirs = list(scan_dirs)
+    base = root if root is not None else repo_root()
+    if not any((base / d).is_dir() for d in scan_dirs):
+        return []
+    return [base / rel for rel in tracked(scan_dirs, suffix=suffix, root=base)]

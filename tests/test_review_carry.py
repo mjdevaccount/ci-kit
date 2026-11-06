@@ -2,7 +2,7 @@
 
 The carry must refuse a changed diff as surely as it carries an unchanged one: a guard only ever
 seen passing may be passing for the wrong reason. Moved from trade-data's
-tests/test_pr_merge_automation.py with the carry itself (v1.14.0).
+tests/test_pr_merge_automation.py with the carry itself (v1.15.0).
 """
 from __future__ import annotations
 
