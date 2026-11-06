@@ -25,7 +25,8 @@ def unsafe_steps(job: dict) -> list[str]:
     for step in job.get("steps", []):
         run = step.get("run", "")
         if "-m ci_kit" in run or '-m "ci_kit' in run:
-            if str((step.get("env") or {}).get("PYTHONSAFEPATH", "")) != "1":
+            env = {**(job.get("env") or {}), **(step.get("env") or {})}   # a step's env overrides the job's
+            if str(env.get("PYTHONSAFEPATH", "")) != "1":
                 out.append(step.get("name") or step.get("id") or run[:40])
     return out
 
@@ -40,10 +41,16 @@ def test_every_ci_kit_step_is_safepath() -> None:
     assert unsafe_steps(job) == []
 
 
-def test_the_predicate_fires_on_a_step_without_it() -> None:
+def test_the_predicate_fires_when_the_job_loses_it() -> None:
+    job = _review_job()
+    del job["env"]["PYTHONSAFEPATH"]
+    assert len(unsafe_steps(job)) >= 5
+
+
+def test_the_predicate_fires_when_a_step_clears_it() -> None:
     job = _review_job()
     victim = next(s for s in job["steps"] if "-m ci_kit.review.tier" in s.get("run", ""))
-    del victim["env"]["PYTHONSAFEPATH"]
+    victim["env"]["PYTHONSAFEPATH"] = ""
     assert unsafe_steps(job) == [victim["name"]]
 
 

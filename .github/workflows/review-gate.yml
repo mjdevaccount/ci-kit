@@ -141,6 +141,11 @@ jobs:
     name: review
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # every `python -m ci_kit...` runs with the PR checkout as cwd, and -m puts the cwd AHEAD of
+      # PYTHONPATH: a PR-added ci_kit/ would replace the gate that grades it. Cleared in Install (the
+      # caller's own build) and in the reviewer's tool runs (tools.VENV_ENV). v1.15.1.
+      PYTHONSAFEPATH: "1"
     permissions:
       contents: read
       pull-requests: write   # the verdict comment
@@ -192,8 +197,6 @@ jobs:
         id: decide
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
-          # cwd is the PR checkout: without this, a PR-added ci_kit/ shadows the fetched gate (-m puts cwd first)
-          PYTHONSAFEPATH: "1"
           GUARD: ${{ steps.tier.outputs.guard }}
           GUARD_FILES: ${{ steps.tier.outputs.guard_files }}
           LABELED: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) }}
@@ -219,8 +222,6 @@ jobs:
         if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == ''
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
-          # cwd is the PR checkout: without this, a PR-added ci_kit/ shadows the fetched gate (-m puts cwd first)
-          PYTHONSAFEPATH: "1"
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -243,8 +244,6 @@ jobs:
         if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true'
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
-          # cwd is the PR checkout: without this, a PR-added ci_kit/ shadows the fetched gate (-m puts cwd first)
-          PYTHONSAFEPATH: "1"
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -265,6 +264,7 @@ jobs:
         env:
           KIT: ${{ steps.kit.outputs.dir }}
           INSTALL: ${{ inputs.install }}
+          PYTHONSAFEPATH: ""   # the caller's project builds and imports as it does locally
         run: |
           set -euo pipefail
           # the gate's own locked deps, in ITS venv: never the caller's
@@ -291,8 +291,6 @@ jobs:
           "$KIT/.venv/bin/python" -m "ci_kit.review.$transport" --model "$MODEL" --schema "$SCHEMA"
         env:
           KIT: ${{ steps.kit.outputs.dir }}
-          # cwd is the PR checkout: without this, a PR-added ci_kit/ shadows the fetched gate (-m puts cwd first)
-          PYTHONSAFEPATH: "1"
           CREDENTIAL: ${{ steps.decide.outputs.credential }}
           # ONLY the chosen credential reaches the step
           CLAUDE_CODE_OAUTH_TOKEN: ${{ steps.decide.outputs.credential == 'oauth' && secrets.claude-code-oauth-token || '' }}
@@ -331,8 +329,6 @@ jobs:
         if: steps.decide.outputs.required == 'true'
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
-          # cwd is the PR checkout: without this, a PR-added ci_kit/ shadows the fetched gate (-m puts cwd first)
-          PYTHONSAFEPATH: "1"
           REVIEW_JSON: ${{ steps.review.outputs.structured_output }}
           CAUSE: ${{ steps.review.outputs.cause }}
           CRED_NAME: ${{ steps.decide.outputs.credential_name }}
