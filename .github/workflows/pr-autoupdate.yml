@@ -83,9 +83,15 @@ permissions:
 jobs:
   update:
     name: update armed PRs
-    # HOSTED ON PURPOSE, no runner input: it holds the token (push to every armed PR), and a
-    # secret-holder never joins a shared self-hosted pool.
-    runs-on: ubuntu-latest
+    # It holds the token (push to every armed PR), so it NEVER joins the shared socket pool
+    # (CI_RUNNER: there a job is root over docker and can read a concurrent job's secrets). It may
+    # run on the caller's SECRET pool -- home-host VM 111, no docker socket in any runner, icc off
+    # (home-host docs/CI-RUNNER.md § The secure pool) -- when the caller sets CI_SECURE_RUNNER, and
+    # then reads its token from the caller's `ci-secure` environment (main-only branch policy): an
+    # environment secret named `token` overrides the one passed in `secrets:`. Without the variable:
+    # hosted, no environment, the passed secret -- exactly as before. vars resolve to the CALLER.
+    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON(vars.CI_SECURE_RUNNER) || 'ubuntu-latest' }}
+    environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
     timeout-minutes: 10
     outputs:
       relock: ${{ steps.update.outputs.relock }}
