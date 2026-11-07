@@ -90,7 +90,10 @@ jobs:
     # then reads its token from the caller's `ci-secure` environment (main-only branch policy): an
     # environment secret named `token` overrides the one passed in `secrets:`. Without the variable:
     # hosted, no environment, the passed secret -- exactly as before. vars resolve to the CALLER.
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON(vars.CI_SECURE_RUNNER) || 'ubuntu-latest' }}
+    # CI_SECURE_RUNNER is an ON/OFF switch, never a label list: the labels are fixed HERE, so a
+    # typo in a repo variable cannot send this token job to a socket runner (home-host review
+    # 2026-11-07, finding 5). Any non-empty value turns it on.
+    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
     environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
     timeout-minutes: 10
     outputs:
