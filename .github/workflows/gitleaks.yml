@@ -42,9 +42,13 @@ on:
         type: string
         default: ""
       image:
-        description: gitleaks docker image for tree/history modes
+        description: gitleaks docker image for tree/history modes (a ref without @sha256 is re-pulled every run)
         type: string
-        default: zricethezav/gitleaks:latest
+        # v8.30.1's multi-arch index digest (docker buildx imagetools inspect, 2026-11-07). Pinned
+        # by DIGEST, not `:latest`: on a shared home runner VM another job can `docker tag` over a
+        # tag in the daemon's store and blind this scan; a digest names the content itself.
+        # Bump by hand (Renovate's annotated-pin manager moves versions, never digests).
+        default: zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
 
 permissions:
   contents: read
@@ -52,9 +56,14 @@ permissions:
 jobs:
   scan:
     name: scan
-    # HOSTED ON PURPOSE, no runner input: it holds a token (action mode) and drives the docker
-    # socket (tree/history), and a secret-holder never joins a shared self-hosted pool.
-    runs-on: ubuntu-latest
+    # tree/history run on the CALLER's home pool when its CI_RUNNER variable is set (vars resolve
+    # to the calling repo), else hosted. They hold no secret: github.token is contents:read and
+    # pull-requests:read, the same grant every home job's checkout already gets, and the scanner
+    # is a digest-pinned image (or a tag re-pulled with --pull=always, below), so a co-tenant job
+    # retagging an image in the VM's shared docker store cannot swap the scanner.
+    # `action` mode stays HOSTED: gitleaks-action is third-party JS that receives the token and,
+    # for an org, a license -- that shape stays off the shared pool (home-host docs/CI-RUNNER.md).
+    runs-on: ${{ inputs.mode != 'action' && vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -88,7 +97,10 @@ jobs:
           [ "$MODE" = history ] && args+=("--log-opts=--full-history --diff-filter=tuxdb HEAD")
           # GIT_CONFIG_* env: the container's root git refuses the runner-owned checkout
           # ("dubious ownership") without safe.directory; env-var config needs no wrapper.
-          docker run --rm -v "$PWD:/repo" \
+          # A tag-only ref (no @sha256) is re-resolved against the registry every run: a local
+          # retag on a shared daemon must not decide which scanner runs. A digest needs no pull.
+          pull=(); [[ "$IMAGE" == *@sha256:* ]] || pull=(--pull=always)
+          docker run --rm "${pull[@]}" -v "$PWD:/repo" \
             -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
             "$IMAGE" "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/gitleaks.log"
           # A clean history run must have LOOKED: gitleaks logs "N commits scanned" (INF, stderr).
