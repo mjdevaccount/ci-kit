@@ -87,9 +87,12 @@ jobs:
     # (CI_RUNNER: there a job is root over docker and can read a concurrent job's secrets). It may
     # run on the caller's SECRET pool -- home-host VM 111, no docker socket in any runner, icc off
     # (home-host docs/CI-RUNNER.md § The secure pool) -- when the caller sets CI_SECURE_RUNNER, and
-    # then reads its token from the caller's `ci-secure` environment (main-only branch policy): an
-    # environment secret named `token` overrides the one passed in `secrets:`. Without the variable:
-    # hosted, no environment, the passed secret -- exactly as before. vars resolve to the CALLER.
+    # then runs in the caller's `ci-secure` environment, whose default-branch-only policy is the
+    # gate: the token job cannot run from any other ref. The token itself is STILL the one passed
+    # in `secrets:` -- an environment secret does NOT override a declared workflow_call secret
+    # (measured 2026-11-07, claude-plugins run 42337000304: env secret set, job deployed to
+    # ci-secure, token empty), so the environment holds no copy. Without the variable: hosted, no
+    # environment, the passed secret -- exactly as before. vars resolve to the CALLER.
     # CI_SECURE_RUNNER is an ON/OFF switch, never a label list: the labels are fixed HERE, so a
     # typo in a repo variable cannot send this token job to a socket runner (home-host review
     # 2026-11-07, finding 5). Any non-empty value turns it on.
