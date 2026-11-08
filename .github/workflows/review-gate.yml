@@ -116,7 +116,7 @@ on:
         description: the subscription transport's pinned Claude Code CLI
         type: string
         # renovate: datasource=npm depName=@anthropic-ai/claude-code
-        default: 2.1.311
+        default: 2.1.318
       kit-ref:
         description: the ci-kit ref whose ci_kit.review grades the PR (a tag, branch or sha)
         type: string
