@@ -19,8 +19,7 @@ on:
     inputs:
       runner:
         description: >-
-          runs-on as a JSON label list ('' = the caller repo's CI_RUNNER variable, else
-          ubuntu-latest). Holds no secret, so it may join a shared pool; see doc-refs.yml.
+          JSON runs-on labels; '' = the caller's lane (doc-refs.yml's runner input says which).
         type: string
         default: ""
       args:
@@ -34,9 +33,7 @@ permissions:
 jobs:
   lint:
     name: lint
-    # LIGHT LANE first (v1.18.0): the caller's CI_RUNNER_LIGHT, a pool booked at a lint's peak
-    # (~768 MB), not at the repo's heaviest job's (trade-data 2560) -- home-host ci/runners.yml.
-    runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || vars.CI_RUNNER_LIGHT && fromJSON(vars.CI_RUNNER_LIGHT) || vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(inputs.runner || vars.CI_RUNNER_LIGHT || vars.CI_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7

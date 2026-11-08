@@ -18,7 +18,8 @@ on:
       runner:
         description: >-
           runs-on as a JSON label list, e.g. '["self-hosted","home"]' ('' = the caller repo's
-          CI_RUNNER variable, else ubuntu-latest). Holds no secret, so it may join a shared pool.
+          CI_RUNNER_LIGHT, else CI_RUNNER, else ubuntu-latest; README § runs-on). Holds no
+          secret, so it may join a shared pool.
         type: string
         default: ""
       args:
@@ -35,9 +36,10 @@ jobs:
     # vars resolves against the CALLER's repo, so a repo with its own runners opts in by its own
     # CI_RUNNER and a repo without them stays hosted -- setting CI_RUNNER where no runner is
     # registered queues forever, so the variable is the switch, never a default here.
-    # LIGHT LANE first (v1.18.0): the caller's CI_RUNNER_LIGHT, a pool booked at a lint's peak
+    # ONE fromJSON over the first non-empty lane ('' is falsy): the input, the caller's
+    # LIGHT LANE (v1.18.0) -- a pool booked at a lint's peak
     # (~768 MB), not at the repo's heaviest job's (trade-data 2560) -- home-host ci/runners.yml.
-    runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || vars.CI_RUNNER_LIGHT && fromJSON(vars.CI_RUNNER_LIGHT) || vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(inputs.runner || vars.CI_RUNNER_LIGHT || vars.CI_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7

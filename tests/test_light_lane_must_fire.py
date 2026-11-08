@@ -15,27 +15,24 @@ import unittest
 
 _WF = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows"
 LINTS = ("doc-refs.yml", "dup-code.yml", "secret-argv.yml", "gitleaks.yml")
-_LIGHT = "vars.CI_RUNNER_LIGHT && fromJSON(vars.CI_RUNNER_LIGHT)"
-_HOME = "vars.CI_RUNNER && fromJSON(vars.CI_RUNNER)"
+_LANES = ("inputs.runner", "vars.CI_RUNNER_LIGHT", "vars.CI_RUNNER", "'\"ubuntu-latest\"'")
 
 
 def problems(text: str) -> list[str]:
-    """Every runs-on in a lint workflow: input (if any) > LIGHT > CI_RUNNER > ubuntu-latest."""
+    """Every runs-on: ONE fromJSON over (input) || LIGHT || CI_RUNNER || hosted, in that order."""
     out = []
     lines = re.findall(r"^\s*runs-on:\s*(.+)$", text, re.M)
     if not lines:
         return ["no runs-on"]
     for expr in lines:
-        if _LIGHT not in expr:
-            out.append(f"no light lane: {expr}")
+        m = re.fullmatch(r"\$\{\{ fromJSON\((.+)\) \}\}", expr.strip())
+        if m is None:
+            out.append(f"not one fromJSON over the lanes: {expr}")
             continue
-        if _HOME not in expr or "'ubuntu-latest'" not in expr:
-            out.append(f"light lane without the CI_RUNNER/hosted fallback: {expr}")
-            continue
-        if expr.index(_LIGHT) > expr.index(_HOME):
-            out.append(f"CI_RUNNER read before the light lane: {expr}")
-        if "inputs.runner" in expr and expr.index("inputs.runner") > expr.index(_LIGHT):
-            out.append(f"the runner input no longer wins: {expr}")
+        got = [x.strip() for x in m.group(1).split("||")]
+        want = [x for x in _LANES if x != "inputs.runner" or "inputs.runner" in got]
+        if got != want:
+            out.append(f"lanes {got} != {want}")
     return out
 
 
@@ -48,9 +45,12 @@ class TestLightLane(unittest.TestCase):
     def test_check_fires_on_each_mutation(self):
         text = (_WF / "doc-refs.yml").read_text(encoding="utf-8")
         mutations = {
-            "light lane dropped": text.replace(_LIGHT + " || ", ""),
-            "order swapped": text.replace(_LIGHT, "__L__").replace(_HOME, _LIGHT).replace("__L__", _HOME),
-            "hosted fallback dropped": text.replace(" || 'ubuntu-latest'", ""),
+            "light lane dropped": text.replace(" || vars.CI_RUNNER_LIGHT", ""),
+            "order swapped": text.replace("vars.CI_RUNNER_LIGHT || vars.CI_RUNNER ||",
+                                          "vars.CI_RUNNER || vars.CI_RUNNER_LIGHT ||"),
+            "hosted fallback dropped": text.replace(""" || '"ubuntu-latest"'""", ""),
+            "input demoted": text.replace("inputs.runner || vars.CI_RUNNER_LIGHT",
+                                          "vars.CI_RUNNER_LIGHT || inputs.runner"),
         }
         for why, bad in mutations.items():
             with self.subTest(why):
