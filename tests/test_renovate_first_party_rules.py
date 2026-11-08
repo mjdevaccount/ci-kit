@@ -15,7 +15,7 @@ import json5
 
 PRESET = pathlib.Path(__file__).resolve().parent.parent / "renovate" / "default.json5"
 HOLDS = ("groupName", "schedule", "minimumReleaseAge")
-REGISTRY_MANAGERS = {"pep621", "pip_requirements", "npm", "nuget"}
+REGISTRY_MANAGERS = {"pep621", "pip_requirements", "pip-compile", "npm", "nuget"}
 
 
 def _rules() -> list[dict]:

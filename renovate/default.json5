@@ -88,6 +88,28 @@
     minimumReleaseAge: null,
   },
 
+  // ---- compiled, hash-locked Python requirements: `requirements.lock` (2026-11-08) ----------
+  // A `uv pip compile --generate-hashes` output is a LOCK, not a hand file. pip_requirements read
+  // trade-infra's infra/research-mcp/requirements.txt as one, bumped `pydantic-core==` in place
+  // KEEPING the old hashes, and appended a duplicate `pydantic_core==` block: the image build
+  // (`pip install --require-hashes`) went red with THESE PACKAGES DO NOT MATCH THE HASHES
+  // (trade-infra#823). The pip-compile manager re-runs the command in the file's own header, so
+  // every pin and hash moves together and transitive refreshes come via lockFileMaintenance.
+  // THE CONVENTION IS THE NAME `requirements.lock`, because a manager cannot match on a header:
+  //   - pip_requirements' default pattern ([\w-]*requirements([-._]\w+)?\.(txt|pip)) never matches
+  //     `.lock`, so it is off these files by construction -- no exclusion rule to forget;
+  //   - pip-compile on a file with NO header logs `WARN pip-compile error` per file, so it cannot
+  //     simply take every requirements.txt (the estate's hand-pinned ones: edge-host ops-api,
+  //     mattpc-llm-stack rebuild, mcp scripts, stock_analysis).
+  // THE HEADER MUST BE ONE RENOVATE PARSES (lib/modules/manager/pip-compile/common.ts): long
+  // options with `=` (`--output-file=requirements.lock`, `--python-version=3.14`), no `-o`, no
+  // `--python-platform` (rejected "not supported (yet)"; use `--universal`). An unparseable header
+  // is a WARN, not an error: the file is skipped and the lock goes stale with every check green.
+  // mcp scripts/renovate_liveness.py reports that WARN as `renovate ERRORED` for that reason.
+  "pip-compile": {
+    managerFilePatterns: ["/(^|/)requirements\\.lock$/"],
+  },
+
   // ---- first-party kit pins Renovate's own managers cannot see (2026-11-01) ----------------
   // ci-kit's ci-pin-drift (pin-drift.yml, a daily cron in each repo) DETECTS a pin older than its
   // kit's newest vX.Y.Z tag; Renovate is the ACTOR that should bump it. Until this block no
@@ -254,7 +276,7 @@
       schedule: ["at any time"],
       minimumReleaseAge: null,
     },
-    { matchManagers: ["pep621", "pip_requirements"], matchUpdateTypes: ["minor", "patch"], groupName: "python (non-major)" },
+    { matchManagers: ["pep621", "pip_requirements", "pip-compile"], matchUpdateTypes: ["minor", "patch"], groupName: "python (non-major)" },
     { matchManagers: ["npm"], matchUpdateTypes: ["minor", "patch"], groupName: "npm (non-major)" },
     { matchManagers: ["nuget"], matchUpdateTypes: ["minor", "patch"], groupName: "nuget (non-major)" },
     { matchManagers: ["dockerfile"], groupName: "dockerfile base images" },
