@@ -3,34 +3,41 @@
 #   jobs:
 #     gitleaks:
 #       name: gitleaks (secret scan)
-#       permissions: { contents: read, pull-requests: read }   # `action` mode lists a PR's commits
+#       permissions: { contents: read }
 #       uses: mjdevaccount/ci-kit/.github/workflows/gitleaks.yml@v1
 #       with: { mode: tree }
 #
 # Reports as "<caller job name> / scan". The modes are NOT merged into one because repos differ
 # on purpose:
-#   tree     docker, WORKING TREE only (--no-git). For a history that carries known-leaked items
+#   tree     WORKING TREE only (--no-git). For a history that carries known-leaked items
 #            pending rotation/purge, where a full-history scan would drown real signal.
-#   history  docker, FULL history OF HEAD'S ANCESTRY, optionally with a custom config and a
+#   history  FULL history OF HEAD'S ANCESTRY, optionally with a custom config and a
 #            .gitleaksignore that baselines a known item by fingerprint, loud on anything new.
 #            HEAD's ancestry, never `--all` (2026-10-31): gitleaks' default log is
 #            `--full-history --all`, and a fetch-depth-0 checkout carries EVERY remote branch, so a
 #            fixture on one open PR branch failed every other PR in the repo (edge-host#545 red on
 #            edge-host#544's bats stub) and the red PR's author could not fix it. A PR run's HEAD is
 #            the merge ref = base + the PR's own commits: exactly what that PR can answer for. The
-#            same lesson as the doc gate's edge-ci#33. A scan that reports ZERO commits is exit 2,
-#            not a pass: a bad rev spec must not go green.
-#   action   gitleaks/gitleaks-action over full history, PR-scoped on pull_request. Needs
-#            pull-requests: read or it 403s WITHOUT SCANNING -- red for "could not look",
-#            indistinguishable from red for "found a secret".
+#            same lesson as the doc gate's edge-ci#33.
+#   range    the scope gitleaks-action had: a PR's own commits, a push's range, every ref on any
+#            other event (dispatch, schedule). `action` is the old name and still accepted.
+# Zero commits scanned is exit 2 in history/range, never a pass: a bad rev spec must not go green.
 # Every mode fails the job on a finding. None of them may be baselined away: rotate the secret.
+#
+# ONE SCANNER (2026-11-08): every mode is ci-kit's `ci-gitleaks`, gitleaks pinned by version AND
+# sha256 through release_bin (cached, retried, the REST asset fallback). Before, tree/history ran a
+# digest-pinned docker image and `action` ran gitleaks/gitleaks-action@v3, which downloaded its
+# tarball from github.com releases/download on every run with no retry: that path 504'd for over
+# an hour and every PR running it went red WITHOUT SCANNING (trade-data #2880-2884). Same gitleaks
+# (8.30.1) as the image was, so findings and fingerprints are unchanged. No docker socket and no
+# third-party JS holding the token, so `range` joins tree/history on the caller's home pool.
 name: gitleaks
 
 on:
   workflow_call:
     inputs:
       mode:
-        description: tree | history | action
+        description: tree | history | range (action = range, the old name)
         type: string
         default: tree
       config:
@@ -38,17 +45,13 @@ on:
         type: string
         default: ""
       ignore-path:
-        description: .gitleaksignore path relative to the repo root, passed explicitly because gitleaks resolves it against the container cwd ('' = none)
+        description: .gitleaksignore path relative to the repo root ('' = none)
         type: string
         default: ""
       image:
-        description: gitleaks docker image for tree/history modes (a ref without @sha256 is re-pulled every run)
+        description: IGNORED since v1.16.0 (no docker; the gitleaks pin is ci_kit/gitleaks.py). Kept so an old caller does not fail on an unknown input
         type: string
-        # v8.30.1's multi-arch index digest (docker buildx imagetools inspect, 2026-11-07). Pinned
-        # by DIGEST, not `:latest`: on a shared home runner VM another job can `docker tag` over a
-        # tag in the daemon's store and blind this scan; a digest names the content itself.
-        # Bump by hand (Renovate's annotated-pin manager moves versions, never digests).
-        default: zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+        default: ""
 
 permissions:
   contents: read
@@ -56,61 +59,45 @@ permissions:
 jobs:
   scan:
     name: scan
-    # tree/history run on the CALLER's home pool when its CI_RUNNER variable is set (vars resolve
-    # to the calling repo), else hosted. They hold no secret: github.token is contents:read and
-    # pull-requests:read, the same grant every home job's checkout already gets, and the scanner
-    # is a digest-pinned image (or a tag re-pulled with --pull=always, below), so a co-tenant job
-    # retagging an image in the VM's shared docker store cannot swap the scanner.
-    # `action` mode stays HOSTED: gitleaks-action is third-party JS that receives the token and,
-    # for an org, a license -- that shape stays off the shared pool (home-host docs/CI-RUNNER.md).
-    runs-on: ${{ inputs.mode != 'action' && vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    # On the CALLER's home pool when its CI_RUNNER variable is set (vars resolve to the calling
+    # repo), else hosted. It holds no secret: github.token is contents:read, the grant every home
+    # job's checkout already gets, and only release_bin's API fallback reads it (ci-kit action.yml).
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
-      pull-requests: read
     steps:
       - name: Refuse an unknown mode
-        if: inputs.mode != 'tree' && inputs.mode != 'history' && inputs.mode != 'action'
-        run: |
-          echo "::error::gitleaks mode '${{ inputs.mode }}' is not tree|history|action: NOTHING WAS SCANNED"
-          exit 2
-      - uses: actions/checkout@v7
-        with:
-          # full history for history/action: a leak buried two commits deep must still fail
-          fetch-depth: ${{ inputs.mode == 'tree' && 1 || 0 }}
-      - name: gitleaks detect (docker, ${{ inputs.mode }})
-        if: inputs.mode == 'tree' || inputs.mode == 'history'
+        id: mode
         env:
           MODE: ${{ inputs.mode }}
+        run: |
+          case "$MODE" in
+            tree|history|range) echo "mode=$MODE" >> "$GITHUB_OUTPUT" ;;
+            action) echo "mode=range" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::gitleaks mode '$MODE' is not tree|history|range: NOTHING WAS SCANNED"; exit 2 ;;
+          esac
+      - uses: actions/checkout@v7
+        with:
+          # full history for history/range: a leak buried two commits deep must still fail
+          fetch-depth: ${{ steps.mode.outputs.mode == 'tree' && 1 || 0 }}
+      - name: Assemble ci-gitleaks args
+        id: args
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
           CONFIG: ${{ inputs.config }}
           IGNORE: ${{ inputs.ignore-path }}
-          IMAGE: ${{ inputs.image }}
         run: |
-          set -euo pipefail
-          args=(detect --source=/repo --no-banner --redact)
-          [ "$MODE" = tree ] && args+=(--no-git)
-          [ -n "$CONFIG" ] && args+=(--config "/repo/$CONFIG")
-          [ -n "$IGNORE" ] && args+=(--gitleaks-ignore-path "/repo/$IGNORE")
-          # history: HEAD's ancestry only (header). gitleaks splits --log-opts on spaces and
-          # replaces its default `--full-history --all --diff-filter=tuxdb` with it wholesale
-          # (sources/git.go, v8.30.1), so the diff filter is restated here.
-          [ "$MODE" = history ] && args+=("--log-opts=--full-history --diff-filter=tuxdb HEAD")
-          # GIT_CONFIG_* env: the container's root git refuses the runner-owned checkout
-          # ("dubious ownership") without safe.directory; env-var config needs no wrapper.
-          # A tag-only ref (no @sha256) is re-resolved against the registry every run: a local
-          # retag on a shared daemon must not decide which scanner runs. A digest needs no pull.
-          pull=(); [[ "$IMAGE" == *@sha256:* ]] || pull=(--pull=always)
-          docker run --rm "${pull[@]}" -v "$PWD:/repo" \
-            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
-            "$IMAGE" "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/gitleaks.log"
-          # A clean history run must have LOOKED: gitleaks logs "N commits scanned" (INF, stderr).
-          # Zero or no such line = the rev spec matched nothing = did not finish looking = exit 2.
-          if [ "$MODE" = history ] && ! grep -qE '[1-9][0-9]* commits scanned' "$RUNNER_TEMP/gitleaks.log"; then
-            echo "::error::gitleaks history scan reported no commits scanned: NOTHING WAS SCANNED"
-            exit 2
-          fi
-      - name: gitleaks (action, full history)
-        if: inputs.mode == 'action'
-        uses: gitleaks/gitleaks-action@v3
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+          # the action word-splits `args` with no quoting, so a path with whitespace is refused here
+          for p in "$CONFIG" "$IGNORE"; do
+            case "$p" in *[[:space:]]*) echo "::error::gitleaks path '$p' contains whitespace: NOTHING WAS SCANNED"; exit 2 ;; esac
+          done
+          a="--mode $MODE"
+          [ -n "$CONFIG" ] && a="$a --config $CONFIG"
+          [ -n "$IGNORE" ] && a="$a --ignore-path $IGNORE"
+          echo "args=$a" >> "$GITHUB_OUTPUT"
+      - name: gitleaks (${{ steps.mode.outputs.mode }})
+        uses: mjdevaccount/ci-kit@v1
+        with:
+          tool: ci-gitleaks
+          args: ${{ steps.args.outputs.args }}
