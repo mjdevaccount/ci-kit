@@ -153,7 +153,8 @@ def _token() -> str:
 
 def _get(url: str, accept: str | None = None, *, auth: bool = False) -> bytes:
     req = urllib.request.Request(url, headers={"Accept": accept} if accept else {})
-    tok = _token() if auth else ""
+    # api.github.com only, whatever URL the release JSON hands back (review 2026-11-08)
+    tok = _token() if auth and url.startswith(GITHUB_API + "/") else ""
     if tok:
         # UNREDIRECTED: urllib copies req.headers onto a redirect but never unredirected_hdrs, so the
         # token reaches api.github.com and never the signed blob host the asset URL redirects to.

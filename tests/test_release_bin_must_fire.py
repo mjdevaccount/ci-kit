@@ -66,6 +66,7 @@ def server(monkeypatch):
                 self.wfile.write(BLOB)
                 return
             state["hits"] += 1
+            state.setdefault("primary_auth", []).append(self.headers.get("Authorization"))
             code = state["codes"].pop(0) if state["codes"] else 200
             self.send_response(code)
             self.end_headers()
@@ -190,6 +191,16 @@ def test_the_api_path_sends_the_token_and_the_blob_host_never_sees_it(server, tm
     assert exe.read_bytes() == EXE
     assert server["api_auth"] == ["Bearer tkn-test", "Bearer tkn-test"]
     assert server["blob_auth"] is None  # an unredirected header: the redirect drops it
+    # the primary download path reaches non-GitHub hosts (ci-tf-seed: the terraform registry)
+    assert server["primary_auth"] == [None]
+
+
+def test_the_token_goes_to_api_github_only(server, tmp_path, monkeypatch) -> None:
+    # an asset URL the release JSON points off the API host gets no token
+    monkeypatch.setenv("CI_KIT_GITHUB_TOKEN", "tkn-test")
+    monkeypatch.setattr(release_bin, "GITHUB_API", "https://api.github.invalid")
+    release_bin._get(server["url"].format(v="1", asset="a"), auth=True)
+    assert server["primary_auth"] == [None]
 
 
 def test_no_token_is_unauthenticated_as_before(server, tmp_path, monkeypatch) -> None:
