@@ -19,6 +19,10 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # the selftests fetch real release binaries; release_bin's API fallback needs the token
+      # (unauthenticated it shares a hosted IP's 60/h and went 403 during the 11-08 outage)
+      CI_KIT_GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -80,6 +84,36 @@ jobs:
         with:
           tool: ci-api-diff
           args: --selftest
+      # The two tools that replaced a releases/download fetch (2026-11-08), run for REAL: the pinned
+      # gitleaks binary through release_bin (sha256 + cache + REST fallback) over this event's own
+      # commits, and a planted key must FIRE (exit 1) -- a scanner only ever seen passing proves
+      # nothing. Then terraform's provider cache seeded from a fixture lock, cold then warm.
+      - name: ci-gitleaks over this event's range (the pinned binary, no docker, no action)
+        uses: ./
+        with:
+          tool: ci-gitleaks
+          args: --mode range
+      - name: ci-gitleaks must fire on a planted key (exit 1), and a zero-commit history is exit 2
+        run: |
+          set -uo pipefail
+          d=$(mktemp -d); git -C "$d" init -q; git -C "$d" config user.email t@t; git -C "$d" config user.name t
+          # a random base32 tail: gitleaks' AWS rule has an entropy floor, so a repeated char is skipped
+          printf 'aws_access_key_id = AKIA%s\n' "$(head -c 10 /dev/urandom | base32)" > "$d/creds"
+          git -C "$d" add creds; git -C "$d" commit -qm leak
+          uvx --quiet --from . ci-gitleaks --mode history --source "$d" && rc=0 || rc=$?
+          [ "$rc" = 1 ] || { echo "::error::planted key gave rc=$rc (want 1)"; exit 1; }
+          e=$(mktemp -d); git -C "$e" init -q
+          uvx --quiet --from . ci-gitleaks --mode history --source "$e" && rc=0 || rc=$?
+          [ "$rc" = 2 ] || { echo "::error::empty history gave rc=$rc (want 2)"; exit 1; }
+      - name: ci-tf-seed cold then warm (fixture lock, the live registry)
+        run: |
+          set -euo pipefail
+          export TF_PLUGIN_CACHE_DIR="$RUNNER_TEMP/tfc"
+          uvx --quiet --from . ci-tf-seed --dir tests/fixtures/tf 2>&1 | tee "$RUNNER_TEMP/cold.log"
+          grep -q 'seeded into' "$RUNNER_TEMP/cold.log" || { echo "::error::cold run seeded nothing"; exit 1; }
+          uvx --quiet --from . ci-tf-seed --dir tests/fixtures/tf 2>&1 | tee "$RUNNER_TEMP/warm.log"
+          grep -q 'from cache' "$RUNNER_TEMP/warm.log" || { echo "::error::warm run did not read the cache"; exit 1; }
+          ls "$TF_PLUGIN_CACHE_DIR"/registry.terraform.io/hashicorp/null/*/linux_amd64/terraform-provider-null_*
       - name: gate-lint selftest (through the action, which installs the workflow extra)
         uses: ./
         with:

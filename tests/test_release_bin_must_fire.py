@@ -40,6 +40,12 @@ def server(monkeypatch):
         def do_GET(self):  # noqa: N802
             if self.path.startswith("/api/"):
                 state["api_hits"] += 1
+                state.setdefault("api_auth", []).append(self.headers.get("Authorization"))
+                if self.path == "/api/asset/1" and state.get("redirect"):
+                    self.send_response(302)
+                    self.send_header("Location", f"{base}/blob")
+                    self.end_headers()
+                    return
                 code = state["api_codes"].pop(0) if state["api_codes"] else 200
                 self.send_response(code)
                 self.end_headers()
@@ -53,7 +59,14 @@ def server(monkeypatch):
                 elif self.headers.get("Accept") == "application/octet-stream":
                     self.wfile.write(BLOB)
                 return
+            if self.path == "/blob":  # the signed-blob host a real asset URL redirects to
+                state["blob_auth"] = self.headers.get("Authorization")
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(BLOB)
+                return
             state["hits"] += 1
+            state.setdefault("primary_auth", []).append(self.headers.get("Authorization"))
             code = state["codes"].pop(0) if state["codes"] else 200
             self.send_response(code)
             self.end_headers()
@@ -167,3 +180,33 @@ def test_an_unwritable_cache_is_blind_exit_2(server, tmp_path, monkeypatch, caps
     with pytest.raises(SystemExit) as e:
         binary(_pin(server["url"]), gate="t")
     assert e.value.code == 2 and "could not write" in capsys.readouterr().err
+
+
+def test_the_api_path_sends_the_token_and_the_blob_host_never_sees_it(server, tmp_path, monkeypatch) -> None:
+    # unauthenticated, the fallback was 403 rate-limited on a shared hosted IP (ci-kit#44, 2026-11-08)
+    monkeypatch.setenv("CI_KIT_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("CI_KIT_GITHUB_TOKEN", "tkn-test")
+    server["codes"], server["redirect"] = [504, 504, 504], True
+    exe = binary(_pin(server["gh_url"]), gate="t")
+    assert exe.read_bytes() == EXE
+    assert server["api_auth"] == ["Bearer tkn-test", "Bearer tkn-test"]
+    assert server["blob_auth"] is None  # an unredirected header: the redirect drops it
+    # the primary download path reaches non-GitHub hosts (ci-tf-seed: the terraform registry)
+    assert server["primary_auth"] == [None]
+
+
+def test_the_token_goes_to_api_github_only(server, tmp_path, monkeypatch) -> None:
+    # an asset URL the release JSON points off the API host gets no token
+    monkeypatch.setenv("CI_KIT_GITHUB_TOKEN", "tkn-test")
+    monkeypatch.setattr(release_bin, "GITHUB_API", "https://api.github.invalid")
+    release_bin._get(server["url"].format(v="1", asset="a"), auth=True)
+    assert server["primary_auth"] == [None]
+
+
+def test_no_token_is_unauthenticated_as_before(server, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CI_KIT_CACHE_DIR", str(tmp_path))
+    for e in release_bin.TOKEN_ENVS:
+        monkeypatch.delenv(e, raising=False)
+    server["codes"] = [504, 504, 504]
+    binary(_pin(server["gh_url"]), gate="t")
+    assert server["api_auth"] == [None, None]

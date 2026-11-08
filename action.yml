@@ -1,19 +1,19 @@
 name: ci-kit
 description: >-
   Run one ci_kit console script (ci-doc-lint, ci-secret-argv-lint, ci-pr-autoupdate, ci-pin-drift,
-  ci-manual-lint, ci-guard-selfproof, ci-env-reads, ci-dup-code, ci-api-diff, ci-gate-lint, or a SQL gate: ci-sql-casts, ci-pit-reads, ci-decimal-reads,
+  ci-manual-lint, ci-guard-selfproof, ci-env-reads, ci-dup-code, ci-api-diff, ci-gitleaks, ci-tf-seed, ci-gate-lint, or a SQL gate: ci-sql-casts, ci-pit-reads, ci-decimal-reads,
   ci-phantom-columns, ci-column-comments)
   against the caller's checkout, installed with uvx from THIS action's own download of ci-kit.
 
 # WHY AN ACTION AND NOT `uvx --from git+https://github.com/<owner>/ci-kit@v1` IN EVERY WORKFLOW.
 # The runner downloads this action at the pinned ref, so installing from `$GITHUB_ACTION_PATH`
 # runs EXACTLY the source the workflow was pinned to: no second ref to drift, no network fetch to
-# fail half-way, no credential. The reusable workflows in .github/workflows call this action; a
+# fail half-way, no credential to install it (release_bin tools get the job token, below). The reusable workflows in .github/workflows call this action; a
 # consumer may also call it directly as a step.
 
 inputs:
   tool:
-    description: console script to run (ci-doc-lint | ci-secret-argv-lint | ci-pr-autoupdate | ci-pin-drift | ci-manual-lint | ci-guard-selfproof | ci-env-reads | ci-dup-code | ci-api-diff | ci-gate-lint | ci-sql-casts | ci-pit-reads | ci-decimal-reads | ci-phantom-columns | ci-column-comments)
+    description: console script to run (ci-doc-lint | ci-secret-argv-lint | ci-pr-autoupdate | ci-pin-drift | ci-manual-lint | ci-guard-selfproof | ci-env-reads | ci-dup-code | ci-api-diff | ci-gitleaks | ci-tf-seed | ci-gate-lint | ci-sql-casts | ci-pit-reads | ci-decimal-reads | ci-phantom-columns | ci-column-comments)
     required: true
   args:
     description: arguments, word-split by the shell
@@ -35,12 +35,16 @@ runs:
       env:
         TOOL: ${{ inputs.tool }}
         ARGS: ${{ inputs.args }}
+        # release_bin's REST fallback, authenticated (60/h per shared hosted IP ran out, 2026-11-08).
+        # The job's own token, whatever `permissions:` the caller gave it; it rides an unredirected
+        # header to api.github.com only. Every checkout on the runner already holds the same token.
+        CI_KIT_GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         # the SQL gates need the `sql` extra (sqlglot), ci-gate-lint the `workflow` extra (pyyaml);
         # every other tool is zero-dependency
         case "$TOOL" in
-          ci-doc-lint|ci-secret-argv-lint|ci-pr-autoupdate|ci-pin-drift|ci-queue-wait|ci-manual-lint|ci-guard-selfproof|ci-env-reads|ci-dup-code|ci-api-diff) from="$GITHUB_ACTION_PATH" ;;
+          ci-doc-lint|ci-secret-argv-lint|ci-pr-autoupdate|ci-pin-drift|ci-queue-wait|ci-manual-lint|ci-guard-selfproof|ci-env-reads|ci-dup-code|ci-api-diff|ci-gitleaks|ci-tf-seed) from="$GITHUB_ACTION_PATH" ;;
           ci-sql-casts|ci-pit-reads|ci-decimal-reads|ci-phantom-columns|ci-column-comments)
             from="ci-kit[sql] @ file://$GITHUB_ACTION_PATH" ;;
           ci-gate-lint) from="ci-kit[workflow] @ file://$GITHUB_ACTION_PATH" ;;
@@ -52,5 +56,7 @@ runs:
         # `--ignore windmill/**/flow.yaml` is handed to the tool as written, never expanded
         # against the checkout into a list of files.
         set -f
+        # the job token reaches only the tools that fetch a release binary (release_bin)
+        case "$TOOL" in ci-dup-code|ci-api-diff|ci-gitleaks|ci-tf-seed) ;; *) unset CI_KIT_GITHUB_TOKEN ;; esac
         # shellcheck disable=SC2086
         uvx --quiet --from "$from" "$TOOL" $ARGS
