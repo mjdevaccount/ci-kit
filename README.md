@@ -40,7 +40,7 @@ nothing has verified nothing.
 | `.github/workflows/doc-refs.yml` | reusable: the doc gate + its selftest, full history (`fetch-depth: 0` is load-bearing; a shallow clone is exit 2, not a blind pass) |
 | `.github/workflows/dup-code.yml` | reusable: the duplicate-code gate + its selftest (no history needed; the caller commits `ci/jscpd-baseline.json`) |
 | `.github/workflows/secret-argv.yml` | reusable: the secret-argv lint + its selftest |
-| `.github/workflows/gitleaks.yml` | reusable: secret scan, `mode: tree / history / action`; tree/history run on the caller's home pool when its `CI_RUNNER` variable is set, with a digest-pinned scanner image (`action` stays hosted); `history` is HEAD's ancestry, never `--all` (a fixture on another open branch must not fail THIS PR), and zero commits scanned is exit 2 |
+| `.github/workflows/gitleaks.yml` | reusable: secret scan, `mode: tree / history / range` (`action` = `range`, the old name); every mode is `ci-gitleaks` (v1.17.0: gitleaks pinned by version + sha256 through release_bin, no docker, no gitleaks-action) and runs on the caller's home pool when its `CI_RUNNER` variable is set; `history` is HEAD's ancestry, never `--all` (a fixture on another open branch must not fail THIS PR), and zero commits scanned is exit 2 |
 | `.github/workflows/pr-autoupdate.yml` | reusable: the armed-PR updater; output `relock`. Runs on the caller's SECURE pool (`[self-hosted, home-secure]`, home-host VM 111, no docker socket) when its `CI_SECURE_RUNNER` variable is set (an on/off switch; labels are fixed here), reading the token from its `ci-secure` environment; hosted otherwise |
 | `.github/workflows/review-gate.yml` | reusable: the pre-merge model review gate. ALWAYS runs, a step decides (a skipped required check reads as passed); fails CLOSED; the policy, prompt, tools and verdict run from ci-kit at `kit-ref` (default `v1`), fetched into `$RUNNER_TEMP` with its own locked venv, so a caller PR can edit only its stanza, not the gate. Inputs: `guard-paths` (required), `label`, `charter`, `install`, `python-version`, `model`, `guard-model`, `not-prose`, `auth-mode`, `claude-code-version`, `kit-ref`. Its header is the caller template: one `review` job plus a `review gate` alls-green aggregate, which is the required check |
 | `.github/workflows/major-tag.yml` | moves each floating `vX` to its highest `vX.Y.Z` on every release tag; also reusable (`workflow_call`) -- the caller declares the triggers and `contents: write` |
@@ -65,7 +65,7 @@ jobs:
       args: --ignore windmill/**/flow.yaml   # optional; plain flags, no quotes
   gitleaks:
     name: gitleaks (secret scan)
-    permissions: { contents: read, pull-requests: read }
+    permissions: { contents: read }
     uses: mjdevaccount/ci-kit/.github/workflows/gitleaks.yml@v1
     with: { mode: tree }
 ```
