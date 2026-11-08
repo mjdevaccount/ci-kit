@@ -156,6 +156,11 @@ pre-commit:
   working directory. Never the tool's own location.
 - `runs-on` for the no-secret workflows is the caller's `CI_RUNNER` repository variable (a JSON
   label list) when set, else `ubuntu-latest`. The secret-holding workflows are hosted on purpose.
+  The four lint workflows (`doc-refs`, `dup-code`, `secret-argv`, `gitleaks`) read
+  `CI_RUNNER_LIGHT` FIRST (v1.18.0): a self-hosted pool admits runners at their pool's peak
+  memory, and a lint booked at the repo's heaviest job's peak held the room a real job needed
+  (home-host 2026-11-08: ~75% of queued jobs were these lints). Set it only once that light
+  pool is live -- a label nothing serves queues forever.
 
 ## Proof discipline
 
