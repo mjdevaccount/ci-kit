@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 
 import pytest
 
@@ -64,6 +65,37 @@ def test_verdict(mode, rc, out, want):
     assert verdict(mode, rc, out)[0] == want
 
 
+@pytest.mark.parametrize(("rc", "out", "matched", "want"), [
+    (0, "INF 0 commits scanned.\n", 1, 0),      # delete/rename-only PR: git sees 1, nothing to find
+    (0, CLEAN, 0, 2),                           # the range matched nothing
+    (LEAK_RC, "WRN leaks found: 1\n", 1, 1),    # a leak still wins
+    (1, "FTL bad revision\n", 3, 2),            # gitleaks failing still is not a pass
+])
+def test_range_verdict_judges_git_count(rc, out, matched, want):
+    assert verdict("range", rc, out, matched)[0] == want
+
+
+def _git(d, *a):
+    subprocess.run(["git", "-C", str(d), *a], check=True, capture_output=True)
+
+
+def test_commits_in_counts_a_delete_only_commit(tmp_path):
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@t")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "f").write_text("x\n")
+    _git(tmp_path, "add", "f")
+    _git(tmp_path, "commit", "-qm", "add")
+    base = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    _git(tmp_path, "rm", "-q", "f")
+    _git(tmp_path, "commit", "-qm", "delete")
+    assert gitleaks.commits_in(str(tmp_path), f"--no-merges --first-parent {base}..HEAD") == 1
+    assert gitleaks.commits_in(str(tmp_path), f"--no-merges --first-parent {base}..{base}") == 0
+    with pytest.raises(SystemExit) as e:  # an unknown rev (an orphaned force-push base) is blind
+        gitleaks.commits_in(str(tmp_path), f"--no-merges --first-parent {'f' * 40}..HEAD")
+    assert e.value.code == 2
+
+
 def test_main_end_to_end_with_stubbed_scanner(tmp_path, monkeypatch):
     ev = tmp_path / "event.json"
     ev.write_text(json.dumps({"pull_request": {"base": {"sha": A}, "head": {"sha": B}}}))
@@ -77,6 +109,7 @@ def test_main_end_to_end_with_stubbed_scanner(tmp_path, monkeypatch):
         return LEAK_RC, "WRN leaks found: 1\n"
 
     monkeypatch.setattr(gitleaks, "_run", fake_run)
+    monkeypatch.setattr(gitleaks, "commits_in", lambda source, opts: 2)
     assert gitleaks.main(["--mode", "range"]) == 1
     assert seen["cmd"][0] == str(pathlib.Path("/bin/gitleaks-stub"))
     assert f"--log-opts=--no-merges --first-parent {A}..{B}" in seen["cmd"]

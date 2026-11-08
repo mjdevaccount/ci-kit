@@ -15,8 +15,11 @@ MODES
   history  HEAD's ancestry, never `--all` (ci-kit gitleaks.yml, 2026-10-31: an open PR branch's
            fixture failed every other PR in the repo).
   tree     the working tree only (--no-git).
-A range or history scan must REPORT commits: "0 commits scanned" (or no such line) means the rev
-spec matched nothing, which is exit 2, never a pass. A range needs the commits in the checkout:
+A scan that looked at nothing is exit 2, never a pass. `range` asks git (`rev-list --count` over
+the same log opts) whether the rev spec matched any commit: gitleaks' own "N commits scanned"
+counts only commits that ADDED text, so a delete/rename/binary-only PR reads 0 there with nothing
+to find (review 2026-11-08). `history` keeps gitleaks' count (0, or no such line, is exit 2:
+its diff filter makes git's count the wrong question). A range needs the commits in the checkout:
 `fetch-depth: 0`. A shallow clone fails gitleaks' git log, which is exit 2, loudly.
 
 EXIT  0 clean · 1 a leak (rotate it; never baseline it away) · 2 did not finish looking.
@@ -37,7 +40,7 @@ GATE = "ci-gitleaks"
 # renovate: datasource=github-releases depName=gitleaks/gitleaks
 GITLEAKS_VERSION = "8.30.1"
 #: sha256 of each release tarball, from the release's own gitleaks_8.30.1_checksums.txt (read through
-#: the REST asset API, 2026-11-08). The same version as gitleaks.yml's digest-pinned image. Windows
+#: the REST asset API, 2026-11-08). The version gitleaks.yml's docker image ran before v1.17.0. Windows
 #: ships a .zip, which release_bin does not unpack, so it has no row (exit 2 there, by name).
 GITLEAKS = release_bin.Pin(
     name="gitleaks", version=GITLEAKS_VERSION, env="CI_KIT_GITLEAKS",
@@ -96,12 +99,22 @@ def scan_args(mode: str, source: str, config: str, ignore: str, log_opts: str | 
     return args
 
 
-def verdict(mode: str, rc: int, output: str) -> tuple[int, str]:
-    """(exit code, message) from gitleaks' rc and its combined output."""
+def verdict(mode: str, rc: int, output: str, matched: int | None = None) -> tuple[int, str]:
+    """(exit code, message) from gitleaks' rc and its combined output.
+
+    `matched` = commits git itself says the range holds (`range` mode). gitleaks counts only a
+    commit that ADDED text, so a delete-only, rename-only or binary-only PR reports "0 commits
+    scanned" with nothing to find (gitleaks 8.30.1 detect/detect.go): judged on that count it
+    went red on legitimate PRs (review 2026-11-08). git's count asks the real question -- did
+    the rev spec match anything -- and 0 there is still exit 2."""
     if rc == LEAK_RC:
         return 1, "LEAK FOUND -- rotate the secret; it may not be baselined away"
     if rc != 0:
         return 2, f"gitleaks exited {rc} without a verdict (a bad rev spec, a shallow clone, a bad config?)"
+    if matched is not None:
+        if matched == 0:
+            return 2, "the range holds no commits (git rev-list): NOTHING WAS SCANNED"
+        return 0, f"no leaks found ({matched} commit(s) in range)"
     if mode != "tree":
         m = SCANNED.search(output)
         if m is None or int(m.group(1)) == 0:
@@ -118,6 +131,19 @@ def _run(cmd: list[str]) -> tuple[int, str]:
         sys.stdout.write(line)
         lines.append(line)
     return proc.wait(), "".join(lines)
+
+
+def commits_in(source: str, log_opts: str | None) -> int:
+    """How many commits git says the range holds; `None` opts = every ref (gitleaks' default)."""
+    spec = log_opts.split() if log_opts else ["--all"]
+    try:
+        out = subprocess.run(["git", "-C", source, "rev-list", "--count", *spec],
+                             capture_output=True, text=True, check=True).stdout
+        return int(out.strip())
+    except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+        detail = getattr(exc, "stderr", "") or exc
+        release_bin.blind(GATE, f"git rev-list could not count the range ({log_opts}): {detail}")
+        raise  # blind() exits 2; never reached
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -137,9 +163,10 @@ def main(argv: list[str] | None = None) -> int:
             release_bin.blind(GATE, f"range mode needs the Actions event payload: {exc}")
         log_opts = range_opts(name, event if isinstance(event, dict) else {})
         print(f"{GATE}: {name} -> log opts {log_opts or '(gitleaks default: every ref)'}", file=sys.stderr)
+    matched = commits_in(a.source, log_opts) if a.mode == "range" else None
     exe = release_bin.binary(GITLEAKS, gate=GATE)
     rc, out = _run([str(exe), *scan_args(a.mode, a.source, a.config, a.ignore_path, log_opts)])
-    code, msg = verdict(a.mode, rc, out)
+    code, msg = verdict(a.mode, rc, out, matched)
     print(f"{GATE}: {msg}" if code != 2 else f"{GATE}: DID NOT FINISH LOOKING -- {msg}", file=sys.stderr)
     return code
 
