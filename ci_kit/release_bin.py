@@ -15,8 +15,17 @@ THE CACHE. `$CI_KIT_CACHE_DIR` (default `~/.cache/ci-kit`) / `<name>-<version>-<
 so a version bump is a new directory, never an overwrite. `$<ENV>` (e.g. `CI_KIT_OASDIFF`) points
 a gate at a binary you already have and skips the fetch.
 
+SHARED CACHE (2026-11-08). The home CI runners point `$CI_KIT_CACHE_DIR` at one directory every
+runner mounts (home-host ci-runner-supervisor.sh), so two jobs can fetch the same pin at once. The
+binary is written to a temp file beside it and `os.replace`d in: a reader sees no binary or the whole
+one, never a half-written file that `exists()` already calls cached.
+
+RETRY. A cold cache fetches from GitHub releases, which answered 504 twice running on edge-host#589
+(2026-11-08). A 5xx, a timeout or a dropped connection is retried `FETCH_ATTEMPTS` times with
+backoff; a 4xx is not (a wrong URL stays wrong). Stdlib only: the kit's core takes no dependency.
+
 EXIT. Every failure to obtain the binary is `<gate>: DID NOT FINISH LOOKING -- ...` and exit 2:
-a gate whose tool could not be fetched has looked at nothing.
+a gate whose tool could not be fetched has looked at nothing. That holds after the retries too.
 """
 
 from __future__ import annotations
@@ -28,9 +37,15 @@ import pathlib
 import platform
 import sys
 import tarfile
+import tempfile
+import time
+import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
+
+FETCH_ATTEMPTS = 3
+FETCH_BACKOFF_S = (5.0, 15.0)  # sleep before attempt 2, attempt 3
 
 
 @dataclass(frozen=True)
@@ -71,13 +86,11 @@ def binary(pin: Pin, *, gate: str) -> pathlib.Path:
     cache = pathlib.Path(os.environ.get("CI_KIT_CACHE_DIR") or pathlib.Path.home() / ".cache" / "ci-kit")
     exe = cache / f"{pin.name}-{pin.version}-{asset}" / (pin.name + (".exe" if plat.startswith("windows") else ""))
     if exe.exists():
+        print(f"{gate}: {pin.name} {pin.version} from cache {exe}", file=sys.stderr)
         return exe
     url = pin.url.format(v=pin.version, asset=asset)
-    try:
-        with urllib.request.urlopen(url, timeout=120) as resp:  # noqa: S310 - pinned https release
-            blob = resp.read()
-    except OSError as exc:
-        blind(gate, f"could not fetch {url}: {exc}")
+    print(f"{gate}: {pin.name} {pin.version} not in cache {cache}; fetching {url}", file=sys.stderr)
+    blob = fetch(url, gate=gate)
     digest = hashlib.sha256(blob).hexdigest()
     want = pin.sha256.get(plat)
     if digest != want:
@@ -89,7 +102,37 @@ def binary(pin: Pin, *, gate: str) -> pathlib.Path:
             blind(gate, f"{url}: no {exe.name} in the tarball")
         fh = tar.extractfile(member)
         assert fh is not None
-        exe.write_bytes(fh.read())
-    if not plat.startswith("windows"):
-        exe.chmod(0o755)
+        data = fh.read()
+    fd, tmp = tempfile.mkstemp(dir=exe.parent, prefix=f".{exe.name}.")
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+        if not plat.startswith("windows"):
+            os.chmod(tmp, 0o755)
+        os.replace(tmp, exe)
+    except BaseException:
+        pathlib.Path(tmp).unlink(missing_ok=True)
+        raise
     return exe
+
+
+def _retryable(exc: OSError) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500
+    return True  # URLError, timeout, reset: the network, not the request
+
+
+def fetch(url: str, *, gate: str) -> bytes:
+    """GET `url`; a 5xx or network error is retried with backoff, then the gate is blind (exit 2)."""
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as resp:  # noqa: S310 - pinned https release
+                return resp.read()
+        except OSError as exc:
+            if attempt == FETCH_ATTEMPTS or not _retryable(exc):
+                blind(gate, f"could not fetch {url}: {exc} (attempt {attempt}/{FETCH_ATTEMPTS})")
+            wait = FETCH_BACKOFF_S[min(attempt, len(FETCH_BACKOFF_S)) - 1]
+            print(f"{gate}: fetch {url} failed ({exc}); retry {attempt + 1}/{FETCH_ATTEMPTS} in {wait:.0f}s",
+                  file=sys.stderr)
+            time.sleep(wait)
+    raise AssertionError("unreachable")
