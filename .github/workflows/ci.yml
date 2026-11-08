@@ -93,7 +93,8 @@ jobs:
         run: |
           set -uo pipefail
           d=$(mktemp -d); git -C "$d" init -q; git -C "$d" config user.email t@t; git -C "$d" config user.name t
-          printf 'aws_access_key_id = AKIA%s\n' "$(printf 'Q%.0s' {1..16})" > "$d/creds"
+          # a random base32 tail: gitleaks' AWS rule has an entropy floor, so a repeated char is skipped
+          printf 'aws_access_key_id = AKIA%s\n' "$(head -c 10 /dev/urandom | base32)" > "$d/creds"
           git -C "$d" add creds; git -C "$d" commit -qm leak
           uvx --quiet --from . ci-gitleaks --mode history --source "$d"; rc=$?
           [ "$rc" = 1 ] || { echo "::error::planted key gave rc=$rc (want 1)"; exit 1; }
