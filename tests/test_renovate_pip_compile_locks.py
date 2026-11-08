@@ -9,6 +9,7 @@ pip_requirements' default also matched would bring the stale-hash edit back.
 """
 from __future__ import annotations
 
+import fnmatch
 import pathlib
 import re
 
@@ -63,9 +64,22 @@ def test_pip_requirements_default_cannot_reach_a_lock() -> None:
     assert default.search("ops-api/requirements.txt"), "pattern copy drifted: it no longer matches a hand file"
 
 
+def _hits(pattern: str, path: str) -> bool:
+    """A Renovate managerFilePatterns entry: `/regex/`, else a minimatch glob (fnmatch is close enough
+    for the `**/name` shapes this preset uses; `*` crossing `/` only makes it stricter here)."""
+    if pattern.startswith("/") and pattern.endswith("/") and len(pattern) > 1:
+        return bool(re.search(pattern[1:-1], path))
+    return fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(path, pattern.removeprefix("**/"))
+
+
 def test_no_rule_points_pip_requirements_at_a_lock() -> None:
-    preset = _preset()
-    extra = preset.get("pip_requirements", {}).get("managerFilePatterns", [])
+    extra = _preset().get("pip_requirements", {}).get("managerFilePatterns", [])
     for p in extra:
-        rx = re.compile(p[1:-1]) if p.startswith("/") else None
-        assert not (rx and any(rx.search(f) for f in LOCKS)), f"pip_requirements extended onto a lock: {p}"
+        assert not any(_hits(p, f) for f in LOCKS), f"pip_requirements extended onto a lock: {p}"
+
+
+def test_pattern_reader_sees_globs_and_regexes() -> None:
+    assert _hits("**/requirements.lock", "infra/research-mcp/requirements.lock")
+    assert _hits("requirements.lock", "requirements.lock")
+    assert _hits("/(^|/)requirements\\.lock$/", "infra/x/requirements.lock")
+    assert not _hits("**/requirements.lock", "infra/x/requirements.txt")
