@@ -96,10 +96,10 @@ jobs:
           # a random base32 tail: gitleaks' AWS rule has an entropy floor, so a repeated char is skipped
           printf 'aws_access_key_id = AKIA%s\n' "$(head -c 10 /dev/urandom | base32)" > "$d/creds"
           git -C "$d" add creds; git -C "$d" commit -qm leak
-          uvx --quiet --from . ci-gitleaks --mode history --source "$d"; rc=$?
+          uvx --quiet --from . ci-gitleaks --mode history --source "$d" && rc=0 || rc=$?
           [ "$rc" = 1 ] || { echo "::error::planted key gave rc=$rc (want 1)"; exit 1; }
           e=$(mktemp -d); git -C "$e" init -q
-          uvx --quiet --from . ci-gitleaks --mode history --source "$e"; rc=$?
+          uvx --quiet --from . ci-gitleaks --mode history --source "$e" && rc=0 || rc=$?
           [ "$rc" = 2 ] || { echo "::error::empty history gave rc=$rc (want 2)"; exit 1; }
       - name: ci-tf-seed cold then warm (fixture lock, the live registry)
         run: |
