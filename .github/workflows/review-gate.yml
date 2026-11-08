@@ -420,7 +420,14 @@ jobs:
     name: record verdict
     needs: review
     if: always() && needs.review.outputs.hash != '' && (needs.review.outputs.result == 'pass' || needs.review.outputs.result == 'block')
-    runs-on: ubuntu-latest
+    # THE SECURE POOL when the caller sets CI_SECURE_RUNNER (2026-11-08): this job holds no
+    # secret, but later runs TRUST the artifact it writes to carry a pass, so it never joins the
+    # shared socket pool, where a concurrent PR job is root over docker and could rewrite it.
+    # The secure pool (home-host VM 111, no docker socket, icc off; home-host docs/CI-RUNNER.md
+    # § The secure pool) is the same class as pr-autoupdate's update job. No environment: there
+    # is no secret for one to gate. Labels fixed HERE (an ON/OFF switch, never a label list, as
+    # in pr-autoupdate.yml). Unset = hosted, as before. vars resolve to the CALLER.
+    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     continue-on-error: true
     permissions: {}
