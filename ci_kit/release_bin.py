@@ -142,8 +142,22 @@ def _retryable(exc: BaseException) -> bool:
     return True  # URLError, timeout, reset, a truncated body: the network, not the request
 
 
-def _get(url: str, accept: str | None = None) -> bytes:
+#: env names read for the API path's token, first set wins. The action passes the job's own
+#: github.token as CI_KIT_GITHUB_TOKEN; GITHUB_TOKEN / GH_TOKEN cover a caller that exports one.
+TOKEN_ENVS = ("CI_KIT_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")
+
+
+def _token() -> str:
+    return next((os.environ[e] for e in TOKEN_ENVS if os.environ.get(e)), "")
+
+
+def _get(url: str, accept: str | None = None, *, auth: bool = False) -> bytes:
     req = urllib.request.Request(url, headers={"Accept": accept} if accept else {})
+    tok = _token() if auth else ""
+    if tok:
+        # UNREDIRECTED: urllib copies req.headers onto a redirect but never unredirected_hdrs, so the
+        # token reaches api.github.com and never the signed blob host the asset URL redirects to.
+        req.add_unredirected_header("Authorization", f"Bearer {tok}")
     with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310 - pinned https release
         return resp.read()
 
@@ -153,14 +167,16 @@ def _via_api(url: str) -> bytes | None:
 
     On 2026-11-08 `github.com/<o>/<r>/releases/download/...` answered 504 in 0.15s, again and again,
     while `api.github.com/repos/<o>/<r>/releases/assets/<id>` served the same 9,773,190 bytes: the
-    two paths fail apart. Unauthenticated on purpose (60/h per IP is plenty for a cold-cache miss,
-    and urllib would forward an Authorization header to the signed blob URL it redirects to). The
-    pinned sha256 still judges whatever comes back."""
+    two paths fail apart. AUTHENTICATED when a token is in the env (`TOKEN_ENVS`): unauthenticated
+    is 60/h per IP, and a hosted runner shares its IP, so during that same outage the fallback
+    answered 403 rate-limited on ci-kit#44's own CI. The token rides an unredirected header (`_get`),
+    so it never reaches the blob host. No token = unauthenticated, as before. The pinned sha256
+    still judges whatever comes back."""
     m = re.fullmatch(re.escape(GITHUB_WEB) + r"/([^/]+)/([^/]+)/releases/download/([^/]+)/([^/]+)", url)
     if m is None:
         return None
     owner, repo, tag, name = m.groups()
-    raw = _get(f"{GITHUB_API}/repos/{owner}/{repo}/releases/tags/{tag}", "application/vnd.github+json")
+    raw = _get(f"{GITHUB_API}/repos/{owner}/{repo}/releases/tags/{tag}", "application/vnd.github+json", auth=True)
     try:  # an unreadable payload is the network's fault here, not a finding: URLError -> exit 2 path
         assets = json.loads(raw)["assets"]
         asset_url = next((a["url"] for a in assets if a.get("name") == name), None)
@@ -168,7 +184,7 @@ def _via_api(url: str) -> bytes | None:
         raise urllib.error.URLError(f"unreadable release metadata for {tag}: {exc!r}") from exc
     if asset_url is None:
         raise urllib.error.URLError(f"release {tag} has no asset {name}")
-    return _get(asset_url, "application/octet-stream")
+    return _get(asset_url, "application/octet-stream", auth=True)
 
 
 def fetch(url: str, *, gate: str) -> bytes:

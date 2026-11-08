@@ -35,6 +35,10 @@ runs:
       env:
         TOOL: ${{ inputs.tool }}
         ARGS: ${{ inputs.args }}
+        # release_bin's REST fallback, authenticated (60/h per shared hosted IP ran out, 2026-11-08).
+        # The job's own token, whatever `permissions:` the caller gave it; it rides an unredirected
+        # header to api.github.com only. Every checkout on the runner already holds the same token.
+        CI_KIT_GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         # the SQL gates need the `sql` extra (sqlglot), ci-gate-lint the `workflow` extra (pyyaml);
