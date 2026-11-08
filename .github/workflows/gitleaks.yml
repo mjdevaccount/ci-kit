@@ -62,7 +62,7 @@ jobs:
     # On the CALLER's home pool when its CI_RUNNER variable is set (vars resolve to the calling
     # repo), else hosted. It holds no secret: github.token is contents:read, the grant every home
     # job's checkout already gets, and only release_bin's API fallback reads it (ci-kit action.yml).
-    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LIGHT || vars.CI_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 10
     permissions:
       contents: read
