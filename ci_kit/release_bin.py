@@ -22,7 +22,9 @@ one, never a half-written file that `exists()` already calls cached.
 
 RETRY. A cold cache fetches from GitHub releases, which answered 504 twice running on edge-host#589
 (2026-11-08). A 5xx, a timeout or a dropped connection is retried `FETCH_ATTEMPTS` times with
-backoff; a 4xx is not (a wrong URL stays wrong). Stdlib only: the kit's core takes no dependency.
+backoff; a 4xx is not (a wrong URL stays wrong). The two GitHub download paths fail APART -- the
+`releases/download` URL 504'd on three jobs and a curl while the REST asset URL served the same bytes -- so each
+failed attempt also tries the API path (`_via_api`). Stdlib only: the kit's core takes no dependency.
 
 EXIT. Every failure to obtain the binary is `<gate>: DID NOT FINISH LOOKING -- ...` and exit 2:
 a gate whose tool could not be fetched has looked at nothing. That holds after the retries too.
@@ -31,10 +33,13 @@ a gate whose tool could not be fetched has looked at nothing. That holds after t
 from __future__ import annotations
 
 import hashlib
+import http.client
 import io
+import json
 import os
 import pathlib
 import platform
+import re
 import sys
 import tarfile
 import tempfile
@@ -46,6 +51,8 @@ from dataclasses import dataclass
 
 FETCH_ATTEMPTS = 3
 FETCH_BACKOFF_S = (5.0, 15.0)  # sleep before attempt 2, attempt 3
+GITHUB_WEB = "https://github.com"
+GITHUB_API = "https://api.github.com"
 
 
 @dataclass(frozen=True)
@@ -116,23 +123,60 @@ def binary(pin: Pin, *, gate: str) -> pathlib.Path:
     return exe
 
 
-def _retryable(exc: OSError) -> bool:
+_FetchError = (OSError, http.client.HTTPException)  # HTTPException: IncompleteRead on a cut body
+
+
+def _retryable(exc: BaseException) -> bool:
     if isinstance(exc, urllib.error.HTTPError):
         return exc.code >= 500
-    return True  # URLError, timeout, reset: the network, not the request
+    return True  # URLError, timeout, reset, a truncated body: the network, not the request
+
+
+def _get(url: str, accept: str | None = None) -> bytes:
+    req = urllib.request.Request(url, headers={"Accept": accept} if accept else {})
+    with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310 - pinned https release
+        return resp.read()
+
+
+def _via_api(url: str) -> bytes | None:
+    """The same asset through the REST API, or None when `url` is not a GitHub release download.
+
+    On 2026-11-08 `github.com/<o>/<r>/releases/download/...` answered 504 in 0.15s, again and again,
+    while `api.github.com/repos/<o>/<r>/releases/assets/<id>` served the same 9,773,190 bytes: the
+    two paths fail apart. Unauthenticated on purpose (60/h per IP is plenty for a cold-cache miss,
+    and urllib would forward an Authorization header to the signed blob URL it redirects to). The
+    pinned sha256 still judges whatever comes back."""
+    m = re.fullmatch(re.escape(GITHUB_WEB) + r"/([^/]+)/([^/]+)/releases/download/([^/]+)/([^/]+)", url)
+    if m is None:
+        return None
+    owner, repo, tag, name = m.groups()
+    meta = json.loads(_get(f"{GITHUB_API}/repos/{owner}/{repo}/releases/tags/{tag}", "application/vnd.github+json"))
+    asset = next((a for a in meta.get("assets", []) if a.get("name") == name), None)
+    if asset is None:
+        raise urllib.error.URLError(f"release {tag} has no asset {name}")
+    return _get(asset["url"], "application/octet-stream")
 
 
 def fetch(url: str, *, gate: str) -> bytes:
-    """GET `url`; a 5xx or network error is retried with backoff, then the gate is blind (exit 2)."""
+    """GET `url`, falling back to the REST API path for a GitHub release; a 5xx or network error is
+    retried with backoff, then the gate is blind (exit 2)."""
     for attempt in range(1, FETCH_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(url, timeout=120) as resp:  # noqa: S310 - pinned https release
-                return resp.read()
-        except OSError as exc:
-            if attempt == FETCH_ATTEMPTS or not _retryable(exc):
-                blind(gate, f"could not fetch {url}: {exc} (attempt {attempt}/{FETCH_ATTEMPTS})")
-            wait = FETCH_BACKOFF_S[min(attempt, len(FETCH_BACKOFF_S)) - 1]
-            print(f"{gate}: fetch {url} failed ({exc}); retry {attempt + 1}/{FETCH_ATTEMPTS} in {wait:.0f}s",
-                  file=sys.stderr)
-            time.sleep(wait)
+            return _get(url)
+        except _FetchError as exc:
+            err: BaseException = exc
+        if _retryable(err):
+            try:
+                blob = _via_api(url)
+                if blob is not None:
+                    print(f"{gate}: {url} failed ({err}); fetched the same asset through the API", file=sys.stderr)
+                    return blob
+            except _FetchError as api_exc:
+                err = api_exc
+        if attempt == FETCH_ATTEMPTS or not _retryable(err):
+            blind(gate, f"could not fetch {url}: {err} (attempt {attempt}/{FETCH_ATTEMPTS})")
+        wait = FETCH_BACKOFF_S[min(attempt, len(FETCH_BACKOFF_S)) - 1]
+        print(f"{gate}: fetch {url} failed ({err}); retry {attempt + 1}/{FETCH_ATTEMPTS} in {wait:.0f}s",
+              file=sys.stderr)
+        time.sleep(wait)
     raise AssertionError("unreachable")
