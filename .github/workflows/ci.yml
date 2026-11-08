@@ -19,6 +19,10 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # the selftests fetch real release binaries; release_bin's API fallback needs the token
+      # (unauthenticated it shares a hosted IP's 60/h and went 403 during the 11-08 outage)
+      CI_KIT_GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
         with:
