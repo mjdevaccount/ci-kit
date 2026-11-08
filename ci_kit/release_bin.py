@@ -102,7 +102,6 @@ def binary(pin: Pin, *, gate: str) -> pathlib.Path:
     want = pin.sha256.get(plat)
     if digest != want:
         blind(gate, f"{url}: sha256 {digest} != pinned {want} (a version bump moves every hash in the same edit)")
-    exe.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
         member = next((m for m in tar.getmembers() if m.name.rsplit("/", 1)[-1] == exe.name), None)
         if member is None:
@@ -110,17 +109,28 @@ def binary(pin: Pin, *, gate: str) -> pathlib.Path:
         fh = tar.extractfile(member)
         assert fh is not None
         data = fh.read()
-    fd, tmp = tempfile.mkstemp(dir=exe.parent, prefix=f".{exe.name}.")
+    _install(exe, data, gate=gate, executable=not plat.startswith("windows"))
+    return exe
+
+
+def _install(exe: pathlib.Path, data: bytes, *, gate: str, executable: bool) -> None:
+    """Write `data` to `exe` atomically. A failed write is blind (exit 2), never a traceback (exit 1):
+    in a shared cache a full disk, a wipe mid-fetch or (Windows) a peer running the binary we are
+    replacing is likelier than in a private one. If a peer already landed the binary, use theirs."""
+    tmp: str | None = None
     try:
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=exe.parent, prefix=f".{exe.name}.")
         with os.fdopen(fd, "wb") as out:
             out.write(data)
-        if not plat.startswith("windows"):
+        if executable:
             os.chmod(tmp, 0o755)
         os.replace(tmp, exe)
-    except BaseException:
-        pathlib.Path(tmp).unlink(missing_ok=True)
-        raise
-    return exe
+    except OSError as exc:
+        if tmp is not None:
+            pathlib.Path(tmp).unlink(missing_ok=True)
+        if not exe.exists():
+            blind(gate, f"could not write {exe}: {exc}")
 
 
 _FetchError = (OSError, http.client.HTTPException)  # HTTPException: IncompleteRead on a cut body
@@ -150,11 +160,15 @@ def _via_api(url: str) -> bytes | None:
     if m is None:
         return None
     owner, repo, tag, name = m.groups()
-    meta = json.loads(_get(f"{GITHUB_API}/repos/{owner}/{repo}/releases/tags/{tag}", "application/vnd.github+json"))
-    asset = next((a for a in meta.get("assets", []) if a.get("name") == name), None)
-    if asset is None:
+    raw = _get(f"{GITHUB_API}/repos/{owner}/{repo}/releases/tags/{tag}", "application/vnd.github+json")
+    try:  # an unreadable payload is the network's fault here, not a finding: URLError -> exit 2 path
+        assets = json.loads(raw)["assets"]
+        asset_url = next((a["url"] for a in assets if a.get("name") == name), None)
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise urllib.error.URLError(f"unreadable release metadata for {tag}: {exc!r}") from exc
+    if asset_url is None:
         raise urllib.error.URLError(f"release {tag} has no asset {name}")
-    return _get(asset["url"], "application/octet-stream")
+    return _get(asset_url, "application/octet-stream")
 
 
 def fetch(url: str, *, gate: str) -> bytes:
@@ -165,6 +179,9 @@ def fetch(url: str, *, gate: str) -> bytes:
             return _get(url)
         except _FetchError as exc:
             err: BaseException = exc
+        # The PRIMARY error decides whether to go on: an API 4xx (rate limit) after a download 5xx
+        # must not stop the download's own retries (review 2026-11-08). Both errors are reported.
+        why = f"{err}"
         if _retryable(err):
             try:
                 blob = _via_api(url)
@@ -172,11 +189,11 @@ def fetch(url: str, *, gate: str) -> bytes:
                     print(f"{gate}: {url} failed ({err}); fetched the same asset through the API", file=sys.stderr)
                     return blob
             except _FetchError as api_exc:
-                err = api_exc
+                why = f"{err}; API path: {api_exc}"
         if attempt == FETCH_ATTEMPTS or not _retryable(err):
-            blind(gate, f"could not fetch {url}: {err} (attempt {attempt}/{FETCH_ATTEMPTS})")
+            blind(gate, f"could not fetch {url}: {why} (attempt {attempt}/{FETCH_ATTEMPTS})")
         wait = FETCH_BACKOFF_S[min(attempt, len(FETCH_BACKOFF_S)) - 1]
-        print(f"{gate}: fetch {url} failed ({err}); retry {attempt + 1}/{FETCH_ATTEMPTS} in {wait:.0f}s",
+        print(f"{gate}: fetch {url} failed ({why}); retry {attempt + 1}/{FETCH_ATTEMPTS} in {wait:.0f}s",
               file=sys.stderr)
         time.sleep(wait)
     raise AssertionError("unreachable")

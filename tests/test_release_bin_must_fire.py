@@ -45,7 +45,9 @@ def server(monkeypatch):
                 self.end_headers()
                 if code != 200:
                     return
-                if "/releases/tags/" in self.path:
+                if "/releases/tags/" in self.path and state.get("api_garbage"):
+                    self.wfile.write(b"<html>not json</html>")
+                elif "/releases/tags/" in self.path:
                     name = f"{canonical_platform()}.tar.gz"
                     self.wfile.write(json.dumps({"assets": [{"name": name, "url": f"{base}/api/asset/1"}]}).encode())
                 elif self.headers.get("Accept") == "application/octet-stream":
@@ -137,3 +139,31 @@ def test_a_404_download_does_not_try_the_api(server, tmp_path, monkeypatch) -> N
     with pytest.raises(SystemExit):
         binary(_pin(server["gh_url"]), gate="t")
     assert server["hits"] == 1 and server["api_hits"] == 0
+
+
+def test_an_api_4xx_does_not_stop_the_download_retry(server, tmp_path, monkeypatch, capsys) -> None:
+    # review 2026-11-08: a rate-limited (403) API path after a download 504 ended at attempt 1/3
+    monkeypatch.setenv("CI_KIT_CACHE_DIR", str(tmp_path))
+    server["codes"] = [504]
+    server["api_codes"] = [403]
+    exe = binary(_pin(server["gh_url"]), gate="t")
+    assert exe.read_bytes() == EXE and server["hits"] == 2
+    assert "API path: HTTP Error 403" in capsys.readouterr().err
+
+
+def test_unreadable_api_metadata_is_blind_not_a_traceback(server, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CI_KIT_CACHE_DIR", str(tmp_path))
+    server["codes"] = [504, 504, 504]
+    server["api_garbage"] = True
+    with pytest.raises(SystemExit) as e:
+        binary(_pin(server["gh_url"]), gate="t")
+    assert e.value.code == 2 and server["hits"] == 3
+
+
+def test_an_unwritable_cache_is_blind_exit_2(server, tmp_path, monkeypatch, capsys) -> None:
+    blocker = tmp_path / "cache"
+    blocker.write_text("a file where the cache dir should be")
+    monkeypatch.setenv("CI_KIT_CACHE_DIR", str(blocker))
+    with pytest.raises(SystemExit) as e:
+        binary(_pin(server["url"]), gate="t")
+    assert e.value.code == 2 and "could not write" in capsys.readouterr().err
