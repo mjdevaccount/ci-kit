@@ -32,6 +32,19 @@ def placement_faults(jobs: dict) -> list[str]:
     return out
 
 
+def toolchain_faults(job: dict) -> list[str]:
+    """A step that runs npm/npx/node before any actions/setup-node step: the hosted image ships
+    node, the sealed pool's image does not (its first sealed run went BLIND on exit 127)."""
+    out, have_node = [], False
+    for i, step in enumerate(job.get("steps", [])):
+        if str(step.get("uses", "")).startswith("actions/setup-node@"):
+            have_node = True
+        words = str(step.get("run", "")).replace("&&", " ").replace(";", " ").split()
+        if not have_node and {"npm", "npx", "node"} & set(words):
+            out.append(f"review step {i} ({step.get('name', '?')}): node tooling before setup-node")
+    return out
+
+
 def _jobs() -> dict:
     return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
 
@@ -71,3 +84,21 @@ def test_fires_when_review_joins_the_socket_pool() -> None:
     jobs = _jobs()
     jobs["review"]["runs-on"] = "${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}"
     assert placement_faults(jobs)
+
+
+def test_the_shipped_review_job_sets_up_node_before_npm() -> None:
+    assert toolchain_faults(_jobs()["review"]) == []
+
+
+def test_fires_when_setup_node_is_dropped() -> None:
+    job = _jobs()["review"]
+    job["steps"] = [s for s in job["steps"] if not str(s.get("uses", "")).startswith("actions/setup-node@")]
+    assert toolchain_faults(job)
+
+
+def test_fires_when_npm_moves_above_setup_node() -> None:
+    job = _jobs()["review"]
+    steps = job["steps"]
+    i = next(n for n, s in enumerate(steps) if "npm install" in str(s.get("run", "")))
+    steps.insert(0, steps.pop(i))
+    assert toolchain_faults(job)
