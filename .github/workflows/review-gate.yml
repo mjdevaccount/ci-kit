@@ -277,6 +277,13 @@ jobs:
           # the gate's own locked deps, in ITS venv: never the caller's
           uv sync --project "$KIT" --frozen --no-dev --extra review
           eval "$INSTALL"
+      # node is not on every pool: the sealed VM image carries none (`npm: command not found`, every
+      # review BLIND from 1.22.1). The CLI's runtime is installed here, never assumed.
+      - uses: actions/setup-node@v7
+        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true' && steps.decide.outputs.credential == 'oauth'
+        continue-on-error: true
+        with:
+          node-version: 26
       - name: Install Claude Code
         # the subscription transport's CLI, pinned. A failed install must still reach Review, which
         # names it as the BLIND's cause (claude not found) instead of skipping the verdict.
