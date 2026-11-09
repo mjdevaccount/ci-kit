@@ -93,7 +93,7 @@ jobs:
         with:
           tool: ci-gitleaks
           args: --mode range
-      - name: ci-gitleaks must fire on a planted key (exit 1), and a zero-commit history is exit 2
+      - name: ci-gitleaks must fire on a planted key (exit 1), a zero-commit history is exit 2, a baseline 0/2
         run: |
           set -uo pipefail
           d=$(mktemp -d); git -C "$d" init -q; git -C "$d" config user.email t@t; git -C "$d" config user.name t
@@ -105,6 +105,15 @@ jobs:
           e=$(mktemp -d); git -C "$e" init -q
           uvx --quiet --from . ci-gitleaks --mode history --source "$e" && rc=0 || rc=$?
           [ "$rc" = 2 ] || { echo "::error::empty history gave rc=$rc (want 2)"; exit 1; }
+          # the baseline, with the REAL binary (2026-11-09): <source>/.gitleaksignore is loaded with no
+          # --ignore-path, so a repo-relative fingerprint baselines the planted key (0) and a /repo/ one
+          # in the same unnamed file is refused before scanning (2)
+          printf 'creds:aws-access-token:1\n' > "$d/.gitleaksignore"
+          uvx --quiet --from . ci-gitleaks --mode history --source "$d" && rc=0 || rc=$?
+          [ "$rc" = 0 ] || { echo "::error::baselined planted key gave rc=$rc (want 0)"; exit 1; }
+          printf '/repo/creds:aws-access-token:1\n' >> "$d/.gitleaksignore"
+          uvx --quiet --from . ci-gitleaks --mode history --source "$d" && rc=0 || rc=$?
+          [ "$rc" = 2 ] || { echo "::error::dead /repo/ baseline gave rc=$rc (want 2)"; exit 1; }
       - name: ci-tf-seed cold then warm (fixture lock, the live registry)
         run: |
           set -euo pipefail

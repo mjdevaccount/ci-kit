@@ -23,12 +23,18 @@ its diff filter makes git's count the wrong question). A range needs the commits
 `fetch-depth: 0`. A shallow clone fails gitleaks' git log, which is exit 2, loudly.
 
 A BASELINE ENTRY THAT CAN NEVER MATCH IS exit 2, before any scan (2026-11-09). gitleaks matches a
-.gitleaksignore fingerprint by exact string, and a finding's file path is relative to the repo (git
-modes) or to --source (tree). The old edge-ci scan ran in docker with the repo mounted at /repo,
-so its fingerprints read `/repo/tools/...`; under ci-gitleaks no finding ever carries that path, the
-entry silently stopped baselining anything, and TradingEdge.Scraper#156 went red on an item the
-file said was handled. An absolute path that the scan cannot produce is refused, by name, and so is
-an --ignore-path that does not exist: a baseline nobody reads is the same dead guard.
+.gitleaksignore fingerprint by exact string. A finding's file path is repo-relative in the git modes;
+in tree mode it is the walked path, --source joined on, so relative to the working directory unless
+--source is absolute. The old edge-ci scan ran in docker with the repo mounted at /repo, so its
+fingerprints read `/repo/tools/...`; under ci-gitleaks no finding ever carries that path, the entry
+silently stopped baselining anything, and TradingEdge.Scraper#156 went red on an item the file said
+was handled. Every file gitleaks 8.30.1 LOADS is judged (cmd/root.go:300-321), not only the one named:
+`--gitleaks-ignore-path` (default `.`) as a file, or the .gitleaksignore inside it as a folder, AND
+`<source>/.gitleaksignore` always -- so a caller that passes no --ignore-path is still checked. Dead:
+an absolute path the scan cannot produce, a path still holding a backslash after gitleaks' own
+rewrite, a line field that is not digits (a trailing `# comment` is read as part of it), a
+fingerprint behind a UTF-8 BOM (gitleaks keeps the BOM in the string). A NAMED --ignore-path that
+yields no file is refused too: a baseline nobody reads is the same dead guard.
 
 EXIT  0 clean · 1 a leak (rotate it; never baseline it away) · 2 did not finish looking.
 """
@@ -132,47 +138,89 @@ def verdict(mode: str, rc: int, output: str, matched: int | None = None) -> tupl
 
 
 _SHA = re.compile(r"[0-9a-f]{40}")
+_LINE = re.compile(r"[0-9]+")
+BOM = "\ufeff"
+IGNORE_FILE = ".gitleaksignore"
 
 
 def dead_entries(text: str, mode: str, source: str) -> list[str]:
     """The .gitleaksignore entries no finding of this scan can ever match (module doc).
 
-    A fingerprint is `[commit:]file:rule:line`. Its file is absolute only when the scan reports
-    absolute paths, which is tree mode over an absolute --source -- and then it must sit under it.
-    Git modes report repo-relative paths whatever --source is."""
+    Parsed the way gitleaks 8.30.1 detect.AddGitleaksIgnore does: lines are TrimSpace'd (which keeps
+    a BOM), `#` lines skipped, and a 3-field (`file:rule:line`) or 4-field (`commit:file:rule:line`)
+    entry has its file's backslashes rewritten to `/`. A finding's fingerprint always ends in a
+    decimal line and carries forward-slash paths on every OS."""
     out = []
     # gitleaks writes forward-slash paths on every OS, so the root is judged as a POSIX path.
     root = posixpath.normpath(source) if mode == "tree" and source.startswith("/") else None
     for raw in text.splitlines():
         entry = raw.strip()
+        if entry.startswith(BOM):
+            rest = entry[len(BOM):].strip()
+            if not rest or rest.startswith("#"):
+                continue  # gitleaks stores this as a junk entry that matches nothing: inert, not dead
+            out.append(f"{entry!r}: starts with a UTF-8 BOM, which gitleaks keeps in the fingerprint -- "
+                       "it can never match (save the file without a BOM)")
+            continue
         if not entry or entry.startswith("#"):
             continue
         parts = entry.split(":")
         if len(parts) < 3:
             out.append(f"{entry!r}: not a fingerprint ([commit:]file:rule:line)")
             continue
+        if not _LINE.fullmatch(parts[-1]):
+            out.append(f"{entry!r}: line field {parts[-1]!r} is not a number -- it can never match "
+                       "(a trailing comment is read as part of the fingerprint: put it on its own line)")
+            continue
         start = 1 if len(parts) >= 4 and _SHA.fullmatch(parts[0]) else 0
         path = ":".join(parts[start:-2])
-        absolute = path.startswith("/") or bool(re.match(r"[A-Za-z]:[\\/]", path))
+        if len(parts) in (3, 4):
+            path = path.replace("\\", "/")  # gitleaks' own normalisation, only for these two shapes
+        if "\\" in path:
+            out.append(f"{entry!r}: file {path!r} holds a backslash, and findings carry '/' paths -- "
+                       "it can never match")
+            continue
+        absolute = path.startswith("/") or bool(re.match(r"[A-Za-z]:/", path))
         if absolute and (root is None or not (path == root or path.startswith(root.rstrip("/") + "/"))):
             out.append(f"{entry!r}: file {path!r} is absolute, and this scan reports paths relative to "
                        "the repo -- it can never match (a leading /repo/ is the old docker scan's mount: drop it)")
     return out
 
 
+def loaded_baselines(ignore_path: str, source: str) -> list[str]:
+    """The .gitleaksignore files gitleaks 8.30.1 will load (cmd/root.go:300-321), deduplicated.
+
+    `--gitleaks-ignore-path` defaults to `.` (root.go:90): a file there is read, a folder's own
+    .gitleaksignore is read, and `<source>/.gitleaksignore` is read whatever was passed. A NAMED
+    path that yields no file is refused (exit 2); the defaults may be absent."""
+    named = ignore_path or "."
+    arms = [named, os.path.join(named, IGNORE_FILE)]
+    found = [p for p in arms if os.path.isfile(p)]
+    if ignore_path and not found:
+        release_bin.blind(GATE, f"--ignore-path {ignore_path!r} is neither a file nor a folder holding "
+                                f"{IGNORE_FILE}: a baseline nobody reads")
+    found.append(os.path.join(source, IGNORE_FILE))
+    out, seen = [], set()
+    for p in found:
+        real = os.path.realpath(p)
+        if real not in seen and os.path.isfile(p):
+            seen.add(real)
+            out.append(p)
+    return out
+
+
 def check_ignore(path: str, mode: str, source: str) -> None:
-    """Refuse (exit 2) an --ignore-path that is missing, unreadable, or holds a dead entry."""
-    if not path:
-        return
-    try:
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
-    except (OSError, UnicodeDecodeError) as exc:
-        release_bin.blind(GATE, f"--ignore-path {path!r} cannot be read ({exc}): a baseline nobody reads")
-    dead = dead_entries(text, mode, source)
-    if dead:
-        release_bin.blind(GATE, f"{path}: {len(dead)} baseline entr{'y' if len(dead) == 1 else 'ies'} "
-                                "can never match -- fix the file:\n  " + "\n  ".join(dead))
+    """Refuse (exit 2) a baseline gitleaks would load that is unreadable or holds a dead entry."""
+    for f in loaded_baselines(path, source):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            release_bin.blind(GATE, f"baseline {f!r} cannot be read ({exc}): a baseline nobody reads")
+        dead = dead_entries(text, mode, source)
+        if dead:
+            release_bin.blind(GATE, f"{f}: {len(dead)} baseline entr{'y' if len(dead) == 1 else 'ies'} "
+                                    "can never match -- fix the file:\n  " + "\n  ".join(dead))
 
 
 def _run(cmd: list[str]) -> tuple[int, str]:
@@ -204,7 +252,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mode", choices=("range", "history", "tree"), required=True)
     ap.add_argument("--source", default=".")
     ap.add_argument("--config", default="", help="gitleaks config path ('' = the built-in ruleset)")
-    ap.add_argument("--ignore-path", default="", help=".gitleaksignore path ('' = none)")
+    ap.add_argument("--ignore-path", default="",
+                    help=".gitleaksignore file or folder ('' = gitleaks' default ./.gitleaksignore); "
+                         "<source>/.gitleaksignore is always read too")
     a = ap.parse_args(argv)
     check_ignore(a.ignore_path, a.mode, a.source)
     log_opts = None
