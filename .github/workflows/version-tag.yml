@@ -1,0 +1,91 @@
+# version-tag -- every version bump on the default branch gets its tag, every tag its release.
+#
+# WHY (2026-11-09). A version-first repo (the release PR moves `version` in pyproject.toml) still
+# needed a hand-pushed vX.Y.Z tag after the merge; llm-ports 1.19.0 merged and was never tagged,
+# and nothing went red. `ci-version-tag` (ci_kit/version_tag.py) tags each untagged bump at its
+# bump commit, dispatches the caller's release workflow on it, and heals a tag whose release never
+# ran. A repo that tags FIRST and bumps after (ci-kit itself) does not call this.
+#
+# THE CALLER declares the triggers -- push to its default branch (the normal path), a daily cron
+# (the outside witness that heals a failed run; mcp/scripts/ci-schedule-audit.py REGISTRY watches
+# the cron) and workflow_dispatch -- plus `permissions: contents: write, actions: write`, and calls
+# `mjdevaccount/ci-kit/.github/workflows/version-tag.yml@v1`. Template:
+#
+#   on:
+#     push: { branches: [main] }
+#     schedule: [{ cron: '41 7 * * *' }]
+#     workflow_dispatch: { inputs: { dry_run: { type: boolean, default: false } } }
+#   permissions: {}
+#   jobs:
+#     tag:
+#       permissions: { contents: write, actions: write }
+#       uses: mjdevaccount/ci-kit/.github/workflows/version-tag.yml@v1
+#       with: { release-workflow: release.yml, github-release: true, pypi: <project>,
+#               dry-run: ${{ inputs.dry_run || false }} }
+#
+# THE CALLER'S RELEASE WORKFLOW must take a run on a TAG ref as the release whatever the event
+# (`github.ref_type == 'tag'`, never `github.event_name == 'push'`): a tag this job creates with
+# the job token fires no push workflow, so the release arrives as workflow_dispatch on the tag.
+# Writes happen only on the default branch; anywhere else the tool runs dry.
+name: version-tag
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: >-
+          runs-on as a JSON label list ('' = the caller repo's CI_RUNNER_LIGHT, else CI_RUNNER,
+          else ubuntu-latest). A public repo with no runners of its own stays hosted.
+        type: string
+        default: ""
+      release-workflow:
+        description: workflow file dispatched on a new or unreleased tag ('' = tag only)
+        type: string
+        default: ""
+      github-release:
+        description: a tag counts as released only with a GitHub release
+        type: boolean
+        default: false
+      pypi:
+        description: a tag counts as released only with this project's files on PyPI ('' = no check)
+        type: string
+        default: ""
+      since:
+        description: ignore versions below this one (history from before the repo tagged)
+        type: string
+        default: ""
+      dry-run:
+        description: print the plan, write nothing
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: version-tag-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: tag
+    runs-on: ${{ fromJSON(inputs.runner || vars.CI_RUNNER_LIGHT || vars.CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0           # the whole first-parent history: every bump, every local tag
+          persist-credentials: false
+      - name: tag every version bump, release every tag
+        uses: mjdevaccount/ci-kit@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          tool: ci-version-tag
+          args: >-
+            ${{ inputs.release-workflow && format('--release-workflow {0}', inputs.release-workflow) || '' }}
+            ${{ inputs.github-release && '--github-release' || '' }}
+            ${{ inputs.pypi && format('--pypi {0}', inputs.pypi) || '' }}
+            ${{ inputs.since && format('--since {0}', inputs.since) || '' }}
+            ${{ inputs.dry-run && '--dry-run' || '' }}
