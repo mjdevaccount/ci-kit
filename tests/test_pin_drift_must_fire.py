@@ -4,21 +4,37 @@ The remote is a REAL git repo with real tags (`git ls-remote` against a path), n
 """
 from __future__ import annotations
 
+import os
+import subprocess
+import time
 from pathlib import Path
 
 from conftest import git, run_tool, write
 
 from ci_kit import pin_drift
 
+OLD = 1_600_000_000  # 2020-09-13: every fixture tag is long past any grace unless a test says otherwise
+
+
+def _dated(repo: Path, when: int, *args: str) -> None:
+    """git with committer (and so tagger) date `when` -- a lightweight tag's age is its commit's."""
+    env = {**os.environ, "GIT_COMMITTER_DATE": f"{when} +0000", "GIT_AUTHOR_DATE": f"{when} +0000"}
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, env=env)
+
 
 def _remote(new_repo, *tags: str) -> Path:
     r = new_repo("ci-kit")
     write(r / "README.md", "x\n")
     git(r, "add", "-A")
-    git(r, "commit", "-q", "-m", "init")
+    _dated(r, OLD, "commit", "-q", "-m", "init")
     for t in tags:
         git(r, "tag", t)
     return r
+
+
+def _release(repo: Path, tag: str, age_h: float) -> None:
+    """An ANNOTATED release tag made `age_h` hours ago (its tagger date is the release date)."""
+    _dated(repo, int(time.time() - age_h * 3600), "tag", "-a", tag, "-m", tag)
 
 
 def _consumer(tmp_path: Path, text: str, name: str = "uv.lock") -> Path:
@@ -173,3 +189,80 @@ def test_a_prerelease_index_pin_alone_is_no_pin_exit_2(new_repo, tmp_path: Path)
     rc = _consumer(tmp_path, 'dependencies = ["ci-kit==1.1.0rc1"]\n', "pyproject.toml")
     r = run_tool("pin_drift", tmp_path, "--file", str(rc), "--remote", str(rem))
     assert r.returncode == 2, r.stdout + r.stderr
+
+
+# ---- grace: a lag on a release younger than --grace-hours is PENDING (0), older is STALE (1) ----
+
+def test_lag_on_a_fresh_release_is_pending_exit_0(new_repo, tmp_path: Path) -> None:
+    rem = _remote(new_repo, "v1.1.0")
+    _release(rem, "v1.2.0", age_h=2)            # Renovate has not got to it yet
+    lock = _consumer(tmp_path, LOCK)
+    r = run_tool("pin_drift", tmp_path, "--file", str(lock), "--remote", str(rem))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "PENDING - 1 pin(s) behind ci-kit v1.2.0" in r.stdout and f"{lock}:1: v1.1.0 (v1.2.0 released" in r.stdout
+    assert "OK -" not in r.stdout                # pending is said, never reported as clean
+
+
+def test_lag_past_the_grace_still_fires(new_repo, tmp_path: Path) -> None:
+    # the class this guard exists for: a bump nobody landed. Annotated tag, real tagger date.
+    rem = _remote(new_repo, "v1.1.0")
+    _release(rem, "v1.2.0", age_h=30)
+    lock = _consumer(tmp_path, LOCK)
+    r = run_tool("pin_drift", tmp_path, "--file", str(lock), "--remote", str(rem))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "behind ci-kit v1.2.0" in r.stdout and "PENDING" not in r.stdout
+
+
+def test_grace_reads_the_oldest_missing_release_not_the_newest(new_repo, tmp_path: Path) -> None:
+    # two releases behind: v1.2.0 is 3 days old, v1.3.0 an hour -- a fresh newest tag must not
+    # hide a stale pin (a kit that releases daily would otherwise never fire).
+    rem = _remote(new_repo, "v1.1.0")
+    _release(rem, "v1.2.0", age_h=72)
+    _release(rem, "v1.3.0", age_h=1)
+    old = _consumer(tmp_path, LOCK)                                   # v1.1.0 -> misses v1.2.0: stale
+    near = _consumer(tmp_path, "ci-kit@v1.2.0\n", name="ci.yml")     # misses only v1.3.0: pending
+    r = run_tool("pin_drift", tmp_path, "--file", str(old), "--file", str(near), "--remote", str(rem))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"{old}:1: v1.1.0" in r.stdout and f"{near}:1: v1.2.0 (v1.3.0 released" in r.stdout
+
+
+def test_grace_zero_is_strict(new_repo, tmp_path: Path) -> None:
+    rem = _remote(new_repo, "v1.1.0")
+    _release(rem, "v1.2.0", age_h=1)
+    lock = _consumer(tmp_path, LOCK)
+    r = run_tool("pin_drift", tmp_path, "--file", str(lock), "--remote", str(rem), "--grace-hours", "0")
+    assert r.returncode == 1 and "behind ci-kit v1.2.0" in r.stdout
+
+
+def test_a_phantom_pin_is_never_graced(new_repo, tmp_path: Path) -> None:
+    rem = _remote(new_repo, "v1.1.0")
+    _release(rem, "v1.2.0", age_h=1)
+    f = _consumer(tmp_path, "ci-kit@v1.1.5\n", name="ci.yml")
+    r = run_tool("pin_drift", tmp_path, "--file", str(f), "--remote", str(rem))
+    assert r.returncode == 1 and "name no ci-kit release tag" in r.stdout
+
+
+def test_unreadable_release_date_gets_no_grace(new_repo, tmp_path: Path, monkeypatch, capsys) -> None:
+    # unknown is not "young": a date the fetch cannot read must leave the lag red
+    rem = _remote(new_repo, "v1.1.0")
+    _release(rem, "v1.2.0", age_h=1)
+    lock = _consumer(tmp_path, LOCK)
+    monkeypatch.setattr(pin_drift, "tag_dates", lambda remote, tags: {})
+    rc = pin_drift.main(["--file", str(lock), "--remote", str(rem)])
+    out = capsys.readouterr().out
+    assert rc == 1 and "behind ci-kit v1.2.0" in out and "PENDING" not in out
+
+
+def test_tag_dates_reads_annotated_and_lightweight(new_repo) -> None:
+    rem = _remote(new_repo, "v1.0.0")                 # lightweight: its commit's date, OLD
+    _release(rem, "v1.1.0", age_h=5)                  # annotated: its tagger date
+    d = pin_drift.tag_dates(str(rem), ["v1.0.0", "v1.1.0"])
+    assert d["v1.0.0"] == OLD
+    assert abs((time.time() - d["v1.1.0"]) / 3600 - 5) < 0.1
+
+
+def test_negative_grace_is_exit_2(new_repo, tmp_path: Path) -> None:
+    rem = _remote(new_repo, "v1.1.0")
+    r = run_tool("pin_drift", tmp_path, "--file", str(_consumer(tmp_path, LOCK)), "--remote", str(rem),
+                 "--grace-hours", "-1")
+    assert r.returncode == 2

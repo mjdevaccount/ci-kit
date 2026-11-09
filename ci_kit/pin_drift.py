@@ -20,9 +20,23 @@ and a SHA says nothing comparable. Neither is a range (`>=1.1.0`) or a pre-relea
 The newest release is the highest `vX.Y.Z` tag on `--remote` (`git ls-remote --tags`), so a
 runner reads it with the same credential that installs the package.
 
-EXIT. 0 every pin is the newest tag - 1 a pin lags, or names no release tag (each printed with file:line) -
-2 could not look: a file missing, NO pin found in any file (a check that found nothing to compare
-has verified nothing), the remote unreachable, or no semver tag on it.
+GRACE (`--grace-hours`, default 24; 2026-11-09). A pin is STALE only once the FIRST release past
+it is older than the grace; until then it is PENDING: printed, exit 0. Renovate bumps a kit pin
+"at any time" (renovate/default.json5 "first-party kits"), but hosted Renovate runs on its own
+cadence and the bump PR then waits in the CI queue, so a daily cron read the lag the day after
+every kit release (trade-quant pin-drift red 11-08 and 11-09, each a fresh tag Renovate had not
+reached yet) -- red that cleared itself is noise that teaches a reader to skip the red. Moving
+the cron after Renovate cannot fix that: Renovate's run time is not ours. The age is the
+release's (an annotated tag's tagger date, a lightweight tag's commit date), read by a blobless
+depth-1 fetch of just those tags with the credential `git ls-remote` uses. The grace measures the
+OLDEST release the pin is missing, so a pin two releases behind fires on the older one even
+while the newest is hours old; a release date it cannot read gets NO grace (unknown is not
+"young"); a pin naming no release is never graced. `--grace-hours 0` is the old strict check.
+
+EXIT. 0 every pin is the newest tag, or lags only within the grace - 1 a pin is stale, or names
+no release tag (each printed with file:line) - 2 could not look: a file missing, NO pin found in
+any file (a check that found nothing to compare has verified nothing), the remote unreachable,
+or no semver tag on it.
 """
 
 from __future__ import annotations
@@ -32,6 +46,8 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
+import time
 
 TAG = re.compile(r"refs/tags/(v\d+\.\d+\.\d+)$")
 
@@ -100,13 +116,55 @@ def release_tags(remote: str) -> list[str]:
     return tags
 
 
+def tag_dates(remote: str, tags: list[str]) -> dict[str, int]:
+    """Unix creation time of each of `tags` on `remote` (annotated: tagger date; lightweight: the
+    commit's), from a blobless depth-1 fetch of only those tags into a throwaway repo. A tag it
+    cannot read is simply absent: the caller gives it no grace."""
+    if not tags:
+        return {}
+    with tempfile.TemporaryDirectory(prefix="ci-pin-drift-") as d:
+        def g(*args: str, timeout: int = 30) -> subprocess.CompletedProcess:
+            return subprocess.run(["git", "-C", d, *args], capture_output=True, check=False,
+                                  timeout=timeout)
+        try:
+            g("init", "-q", "--bare")
+            r = g("fetch", "-q", "--no-tags", "--depth=1", "--filter=blob:none", remote,
+                  *[f"+refs/tags/{t}:refs/tags/{t}" for t in tags], timeout=120)
+            if r.returncode != 0:
+                detail = r.stderr.decode("utf-8", errors="replace").strip().splitlines()
+                print(f"ci-pin-drift: could not fetch release dates from {remote} "
+                      f"({detail[-1] if detail else 'no output'}) -- no grace applied", file=sys.stderr)
+                return {}
+            out = g("for-each-ref", "--format=%(refname:short) %(creatordate:unix)", "refs/tags")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"ci-pin-drift: could not read release dates: {exc} -- no grace applied", file=sys.stderr)
+            return {}
+    dates: dict[str, int] = {}
+    for ln in out.stdout.decode("utf-8", errors="replace").splitlines():
+        tag, _, ts = ln.strip().partition(" ")
+        if tag in tags and ts.isdigit():
+            dates[tag] = int(ts)
+    return dates
+
+
+def first_after(pin: str, tags: list[str]) -> str:
+    """The oldest release newer than `pin`: the first one this pin is missing."""
+    return min((t for t in tags if _ver(t) > _ver(pin)), key=_ver)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ci-pin-drift", description=__doc__.splitlines()[0])
     ap.add_argument("--file", action="append", required=True,
                     help="file to scan for <name>@vX.Y.Z pins (repeatable)")
     ap.add_argument("--remote", required=True, help="the kit's git remote (its tags are the releases)")
     ap.add_argument("--name", default="", help="the kit's name in a pin (default: from --remote)")
+    ap.add_argument("--grace-hours", type=float, default=24.0,
+                    help="a lag whose first missing release is younger than this is PENDING, "
+                         "not a finding (default 24; 0 = strict)")
     a = ap.parse_args(argv)
+    if a.grace_hours < 0:
+        print("ci-pin-drift: --grace-hours must be >= 0", file=sys.stderr)
+        return 2
     name = a.name or name_of(a.remote)
     if not name:
         print(f"ci-pin-drift: cannot derive a kit name from {a.remote!r}; pass --name", file=sys.stderr)
@@ -135,6 +193,20 @@ def main(argv: list[str] | None = None) -> int:
     # finding too: nothing installs from a workflow comment or a doc, so nothing else would fail.
     phantom = [(f, ln, tag) for f, ln, tag in found if tag not in tags]
     lag = [(f, ln, tag) for f, ln, tag in found if tag in tags and _ver(tag) < _ver(newest)]
+    pending: list[tuple[str, int, str, str, float]] = []
+    if lag and a.grace_hours > 0:
+        missing = {first_after(tag, tags) for _, _, tag in lag}
+        dates, now = tag_dates(a.remote, sorted(missing, key=_ver)), time.time()
+        young = {t: (now - dates[t]) / 3600 for t in missing
+                 if t in dates and now - dates[t] < a.grace_hours * 3600}
+        pending = [(f, ln, tag, first_after(tag, tags), young[first_after(tag, tags)])
+                   for f, ln, tag in lag if first_after(tag, tags) in young]
+        lag = [(f, ln, tag) for f, ln, tag in lag if first_after(tag, tags) not in young]
+    if pending:
+        print(f"ci-pin-drift: PENDING - {len(pending)} pin(s) behind {name} {newest}, within the "
+              f"{a.grace_hours:g}h grace (the bump is Renovate's; red if still behind after it):")
+        for f, ln, tag, nxt, age in pending:
+            print(f"  {f}:{ln}: {tag} ({nxt} released {age:.1f}h ago)")
     if phantom:
         print(f"ci-pin-drift: {len(phantom)} pin(s) name no {name} release tag (newest is {newest}):")
         for f, ln, tag in phantom:
@@ -146,7 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         print("  bump the pin (and the lockfile) -- a kit fix that never reaches this repo is not a fix here")
     if phantom or lag:
         return 1
-    print(f"ci-pin-drift: OK - {len(found)} pin(s), all at the newest {name} tag {newest}")
+    if not pending:
+        print(f"ci-pin-drift: OK - {len(found)} pin(s), all at the newest {name} tag {newest}")
     return 0
 
 
