@@ -8,9 +8,10 @@ it, so nothing could say when it started or whether a fix held. This is the numb
 nightly job can run: exit 1 when the p90 (or p95) is over the limit.
 
 PR SCOPE (2026-11-09). The 11-08 jam was PR runs on the home runner pool -- 48 jobs queued, 4.4 PR
-runs per merge -- and main-push-only measuring could not see it. `--event pull_request --branch ''`
-measures PR runs; that is hundreds of runs a day, so the run list is PAGED up to `--max-runs`,
-newest first. Past the cap the number is a sample of the NEWEST runs and the line says so.
+runs per merge -- and main-push-only measuring could not see it. `--event pull_request --branch=`
+(empty = every branch; through the action a quoted `''` stays literal) measures PR runs; that is
+hundreds of runs a day, so the run list is PAGED up to `--max-runs`, newest first. Past the cap the
+number is a sample of the NEWEST runs and the line says so.
 
 CENSORED WAITS (2026-11-09, reviewer 580 F1). A job cancelled while still QUEUED (a superseded PR
 run) never got a runner: GitHub stamps its started_at = its created_at and leaves runner_name
@@ -110,13 +111,19 @@ def list_runs(repo: str, workflow: str, branch: str, event: str, hours: float,
     since = (dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     q = f"per_page=100&created=>={since}" + (f"&branch={branch}" if branch else "") + (f"&event={event}" if event else "")
     out: list[dict] = []
+    seen: set[int] = set()
     page = 1
     total = 0
     while len(out) <= max_runs:
         body = _api(f"repos/{repo}/actions/workflows/{workflow}/runs?{q}&status=completed&page={page}")
         runs = body["workflow_runs"]
         total = max(total, int(body.get("total_count") or 0))
-        out += [r for r in runs if r.get("status") == "completed"]
+        # Offset paging over a list that grows at its head: a run completing between two reads
+        # shifts the next page down one, and the page boundary's run comes back (reviewer 582 F3).
+        for r in runs:
+            if r.get("status") == "completed" and r["id"] not in seen:
+                seen.add(r["id"])
+                out.append(r)
         if len(runs) < 100:
             break
         page += 1
@@ -126,8 +133,8 @@ def list_runs(repo: str, workflow: str, branch: str, event: str, hours: float,
 
 
 def measure(repo: str, workflow: str, branch: str, event: str, hours: float,
-            max_runs: int = 300, unit: str = "run") -> tuple[list[Wait], int, bool]:
-    """-> (waits, runs with nothing to measure, truncated). unit 'job' = one entry per job."""
+            max_runs: int = 300, unit: str = "run") -> tuple[list[Wait], int, bool, int]:
+    """-> (waits, runs with nothing to measure, truncated, runs read). unit 'job' = one entry per job."""
     out: list[Wait] = []
     empty = 0
     runs, truncated = list_runs(repo, workflow, branch, event, hours, max_runs)
@@ -138,15 +145,15 @@ def measure(repo: str, workflow: str, branch: str, event: str, hours: float,
         got = [g for g in got if g[1] >= 0]
         empty += not got
         out += got
-    return out, empty, truncated
+    return out, empty, truncated, len(runs)
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ci-queue-wait", description=__doc__.split("\n", 1)[0])
     ap.add_argument("--repo", required=True)
     ap.add_argument("--workflow", required=True, help="workflow file name, e.g. ci.yml")
-    ap.add_argument("--branch", default="main", help="'' = every branch")
-    ap.add_argument("--event", default="push", help="'' = every event")
+    ap.add_argument("--branch", default="main", help="empty (--branch=) = every branch")
+    ap.add_argument("--event", default="push", help="empty (--event=) = every event")
     ap.add_argument("--hours", type=float, default=24)
     ap.add_argument("--max-p90", type=float, help="seconds; a p90 over this exits 1")
     ap.add_argument("--max-p95", type=float, help="seconds; a p95 over this exits 1")
@@ -160,8 +167,10 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("give --max-p90 and/or --max-p95")
     scope = f"{a.repo} {a.workflow} branch={a.branch or '*'} event={a.event or '*'} last {a.hours:g}h per {a.unit}"
     try:
-        waits, empty, truncated = measure(a.repo, a.workflow, a.branch, a.event, a.hours, a.max_runs, a.unit)
-    except (RuntimeError, KeyError, ValueError, subprocess.SubprocessError) as e:
+        waits, empty, truncated, read = measure(a.repo, a.workflow, a.branch, a.event, a.hours, a.max_runs, a.unit)
+    except (RuntimeError, KeyError, ValueError, TypeError, OSError, subprocess.SubprocessError) as e:
+        # OSError: no gh on PATH; TypeError: a response of an unexpected shape. Either is "did not
+        # look", never an over-the-limit 1 (reviewer 582 F5).
         print(f"ci-queue-wait: DID NOT FINISH: {scope}: {e}")
         return 2
     if not waits or len(waits) < a.min_runs:
@@ -172,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     worst = max(waits, key=lambda t: t[1])
     limits = {k: v for k, v in (("p90", a.max_p90), ("p95", a.max_p95)) if v is not None}
     got = {"p90": p90(vals), "p95": pct(vals, 0.95)}
-    capped = f" (newest {a.max_runs} runs of more: a sample)" if truncated else ""
+    capped = f" (newest {read} runs of more: a sample)" if truncated else ""
     line = (f"{scope}: {len(vals)} {a.unit}(s){capped}, {sum(c for *_, c in waits)} ended still queued "
             f"(censored), {empty} run(s) with nothing to measure; queue wait p50 "
             f"{sorted(vals)[len(vals) // 2]:.0f}s p90 {got['p90']:.0f}s p95 {got['p95']:.0f}s "

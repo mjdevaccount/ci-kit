@@ -97,7 +97,8 @@ def test_a_limit_is_required() -> None:
 def test_runs_are_paged_and_truncation_is_a_fact(monkeypatch: pytest.MonkeyPatch) -> None:
     """A PR-scope window holds hundreds of runs; one page of 100 was all the old reader saw."""
     pages = {1: 100, 2: 100, 3: 40}
-    monkeypatch.setattr(qw, "_api", lambda p: {"workflow_runs": [{**RUN, "id": i} for i in range(pages.get(_page(p), 0))]})
+    monkeypatch.setattr(qw, "_api", lambda p: {"workflow_runs": [{**RUN, "id": _page(p) * 1000 + i}
+                                                          for i in range(pages.get(_page(p), 0))]})
     runs, cut = qw.list_runs("o/r", "ci.yml", "", "", 24, 1000)
     assert (len(runs), cut) == (240, False)
     runs, cut = qw.list_runs("o/r", "ci.yml", "", "", 24, 150)
@@ -113,7 +114,7 @@ def test_a_jam_of_runs_cancelled_while_queued_fires(monkeypatch: pytest.MonkeyPa
     jam = {i: [_ghost(1500)] for i in range(9)} | {9: _jobs(_at(5))}
     monkeypatch.setattr(qw, "_api", _fake(jam))
     assert _main("--max-p90", "180", "--branch", "", "--event", "pull_request") == 1
-    waits, empty, cut = qw.measure("o/r", "ci.yml", "", "", 24)
+    waits, empty, cut, _ = qw.measure("o/r", "ci.yml", "", "", 24)
     assert (sorted(w for _, w, _ in waits), sum(c for *_, c in waits), empty, cut) == ([5] + [1500] * 9, 9, 0, False)
 
 
@@ -129,7 +130,7 @@ def test_job_unit_fires_on_the_pool_behind_through_main(monkeypatch: pytest.Monk
     monkeypatch.setattr(qw, "_api", _fake(runs))
     assert _main("--max-p90", "180") == 0                    # per run: the first job, 5s
     assert _main("--max-p90", "180", "--unit", "job") == 1   # per job: the hour is seen
-    waits, _, _ = qw.measure("o/r", "ci.yml", "", "", 24, unit="job")
+    waits, _, _, _ = qw.measure("o/r", "ci.yml", "", "", 24, unit="job")
     assert sorted(w for _, w, _ in waits) == [5] * 10 + [3600] * 10
 
 
@@ -151,8 +152,10 @@ def test_partial_rerun_ignores_carried_over_jobs() -> None:
 def test_the_api_1000_cap_is_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reviewer 581 N2: the filtered runs API serves 1000 results; total_count says there were more."""
     def api(p: str) -> dict:
+        # the live API (reviewer 582 F1): total_count 1354 on pages 1-10, then 0 with no runs --
+        # a reader that took the LAST page's total_count would call the window complete
         n = 100 if _page(p) <= 10 else 0
-        return {"total_count": 1400, "workflow_runs": [{**RUN, "id": i} for i in range(n)]}
+        return {"total_count": 1400 if n else 0, "workflow_runs": [{**RUN, "id": _page(p) * 1000 + i} for i in range(n)]}
     monkeypatch.setattr(qw, "_api", api)
     runs, cut = qw.list_runs("o/r", "ci.yml", "", "", 24, 5000)
     assert (len(runs), cut) == (1000, True)
@@ -162,3 +165,19 @@ def test_job_unit_sees_the_pool_behind() -> None:
     jobs = _jobs(_at(16), _at(3600))
     assert qw.wait_s(RUN, jobs) == (16, False)
     assert sorted(qw.job_waits(jobs)) == [(16, False), (3600, False)]
+
+
+def test_a_run_repeated_across_pages_counts_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reviewer 582 F3: a run completing between page reads shifts the list; the boundary run repeats."""
+    pages = {1: list(range(100)), 2: [99, *range(100, 140)]}
+    monkeypatch.setattr(qw, "_api", lambda p: {"workflow_runs": [{**RUN, "id": i} for i in pages.get(_page(p), [])]})
+    runs, _ = qw.list_runs("o/r", "ci.yml", "", "", 24, 1000)
+    assert len(runs) == 140 and len({r["id"] for r in runs}) == 140
+
+
+def test_no_gh_is_did_not_finish(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reviewer 582 F5: gh missing raised OSError, which exited 1 ("over the limit"), not 2."""
+    def boom(p: str) -> dict:
+        raise FileNotFoundError("gh")
+    monkeypatch.setattr(qw, "_api", boom)
+    assert qw.main(["--repo", "o/r", "--workflow", "ci.yml", "--max-p95", "60"]) == 2
