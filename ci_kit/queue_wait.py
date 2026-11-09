@@ -70,11 +70,15 @@ def _anchor(run: dict) -> dt.datetime:
 def wait_s(run: dict, jobs: list[dict]) -> tuple[float, bool] | None:
     """-> (seconds this run attempt waited for its first runner, censored); None if it has no job
     that ran or waited (no jobs, or all skipped). Pure."""
-    starts = [_ts(j["started_at"]) for j in jobs if _ran(j)]
+    # A partial re-run carries the earlier attempt's finished jobs over with their OLD timestamps
+    # (reviewer 581 N1: trade-ui 42469246881 attempt 2 scored -1407s and was dropped). Only a job
+    # this attempt ran -- started at or after the attempt's start -- is a pick-up.
+    t0 = _anchor(run)
+    starts = [t for t in (_ts(j["started_at"]) for j in jobs if _ran(j)) if t >= t0]
     if starts:
-        return (min(starts) - _anchor(run)).total_seconds(), False
-    ends = [_ts(j["completed_at"]) for j in jobs if _queued_out(j)]
-    return ((max(ends) - _anchor(run)).total_seconds(), True) if ends else None
+        return (min(starts) - t0).total_seconds(), False
+    ends = [t for t in (_ts(j["completed_at"]) for j in jobs if _queued_out(j)) if t >= t0]
+    return ((max(ends) - t0).total_seconds(), True) if ends else None
 
 
 def job_waits(jobs: list[dict]) -> list[tuple[float, bool]]:
@@ -107,13 +111,18 @@ def list_runs(repo: str, workflow: str, branch: str, event: str, hours: float,
     q = f"per_page=100&created=>={since}" + (f"&branch={branch}" if branch else "") + (f"&event={event}" if event else "")
     out: list[dict] = []
     page = 1
+    total = 0
     while len(out) <= max_runs:
-        runs = _api(f"repos/{repo}/actions/workflows/{workflow}/runs?{q}&status=completed&page={page}")["workflow_runs"]
+        body = _api(f"repos/{repo}/actions/workflows/{workflow}/runs?{q}&status=completed&page={page}")
+        runs = body["workflow_runs"]
+        total = max(total, int(body.get("total_count") or 0))
         out += [r for r in runs if r.get("status") == "completed"]
         if len(runs) < 100:
             break
         page += 1
-    return out[:max_runs], len(out) > max_runs
+    # The filtered runs API stops serving at 1000 results (reviewer 581 N2): a short page there is
+    # the API's cap, not the window's end, and total_count says how many the window really held.
+    return out[:max_runs], len(out) > max_runs or total > len(out)
 
 
 def measure(repo: str, workflow: str, branch: str, event: str, hours: float,

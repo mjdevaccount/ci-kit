@@ -139,6 +139,25 @@ def test_cancelled_while_queued_is_not_a_start() -> None:
     assert qw.job_waits([_ghost(25 * 60), {"conclusion": "skipped", "started_at": T0}]) == [(1500, True)]
 
 
+def test_partial_rerun_ignores_carried_over_jobs() -> None:
+    """Reviewer 581 N1: attempt 2 re-runs only the failed job; the passed jobs come back with
+    attempt 1's timestamps, before the attempt started. Scoring them gave a negative wait."""
+    rerun = {**RUN, "run_started_at": _at(3600)}
+    carried = _jobs(_at(30), _at(40))
+    assert qw.wait_s(rerun, [*carried, *_jobs(_at(3700))]) == (100, False)
+    assert qw.wait_s(rerun, carried) is None   # nothing this attempt ran: not a 0s or negative wait
+
+
+def test_the_api_1000_cap_is_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reviewer 581 N2: the filtered runs API serves 1000 results; total_count says there were more."""
+    def api(p: str) -> dict:
+        n = 100 if _page(p) <= 10 else 0
+        return {"total_count": 1400, "workflow_runs": [{**RUN, "id": i} for i in range(n)]}
+    monkeypatch.setattr(qw, "_api", api)
+    runs, cut = qw.list_runs("o/r", "ci.yml", "", "", 24, 5000)
+    assert (len(runs), cut) == (1000, True)
+
+
 def test_job_unit_sees_the_pool_behind() -> None:
     jobs = _jobs(_at(16), _at(3600))
     assert qw.wait_s(RUN, jobs) == (16, False)
