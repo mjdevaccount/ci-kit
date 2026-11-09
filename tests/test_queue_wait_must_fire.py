@@ -6,32 +6,58 @@ import pytest
 import ci_kit.queue_wait as qw
 
 RUN = {"id": 1, "created_at": "2026-10-24T00:00:00Z", "status": "completed"}
+T0 = RUN["created_at"]
+
+
+def _at(s: float) -> str:
+    return f"2026-10-24T{int(s) // 3600:02d}:{int(s) % 3600 // 60:02d}:{int(s) % 60:02d}Z"
 
 
 def _jobs(*starts: str, skipped: str = "") -> list[dict]:
-    js = [{"started_at": s, "conclusion": "success", "runner_name": "home-1",
-           "created_at": RUN["created_at"]} for s in starts]
+    js = [{"started_at": s, "conclusion": "success", "runner_name": "home-1", "created_at": T0} for s in starts]
     return js + ([{"started_at": skipped, "conclusion": "skipped"}] if skipped else [])
 
 
-def test_wait_is_the_first_real_job_start() -> None:
-    assert qw.wait_s(RUN, _jobs("2026-10-24T00:04:00Z", "2026-10-24T00:01:30Z")) == 90
-    # a skipped job's (instant) start is not a runner picking the run up
-    assert qw.wait_s(RUN, _jobs("2026-10-24T00:02:00Z", skipped="2026-10-24T00:00:01Z")) == 120
-    assert qw.wait_s(RUN, []) is None
+def _ghost(queued_s: float) -> dict:
+    """A job cancelled while QUEUED: GitHub stamps started_at = created_at, no runner."""
+    return {"started_at": T0, "created_at": T0, "completed_at": _at(queued_s),
+            "conclusion": "cancelled", "runner_name": ""}
 
 
-def _fake(waits: list[float], fail: bool = False):
+def _page(path: str) -> int:
+    return int(path.rsplit("&page=", 1)[1])
+
+
+def _fake(jobs_for: dict[int, list[dict]], fail: bool = False):
+    """runs 0..n-1 on page 1 only; each run's jobs from `jobs_for`."""
     def api(path: str) -> dict:
         if fail:
             raise RuntimeError("HTTP 401")
         if path.endswith("/jobs?per_page=100"):
-            rid = int(path.split("/runs/")[1].split("/")[0])
-            return {"jobs": _jobs(f"2026-10-24T00:{int(waits[rid]) // 60:02d}:{int(waits[rid]) % 60:02d}Z")}
-        if "page=1" not in path:
-            return {"workflow_runs": []}
-        return {"workflow_runs": [{**RUN, "id": i} for i in range(len(waits))]}
+            return {"jobs": jobs_for[int(path.split("/runs/")[1].split("/")[0])]}
+        n = len(jobs_for) if _page(path) == 1 else 0
+        return {"workflow_runs": [{**RUN, "id": i} for i in range(n)]}
     return api
+
+
+def _waits(waits: list[float]) -> dict[int, list[dict]]:
+    return {i: _jobs(_at(w)) for i, w in enumerate(waits)}
+
+
+def _main(*extra: str) -> int:
+    return qw.main(["--repo", "o/r", "--workflow", "ci.yml", *extra])
+
+
+def test_wait_is_the_first_real_job_start() -> None:
+    assert qw.wait_s(RUN, _jobs(_at(240), _at(90))) == (90, False)
+    # a skipped job's (instant) start is not a runner picking the run up
+    assert qw.wait_s(RUN, _jobs(_at(120), skipped=_at(1))) == (120, False)
+    assert qw.wait_s(RUN, []) is None
+
+
+def test_rerun_waits_from_the_attempt_not_the_first_creation() -> None:
+    rerun = {**RUN, "run_started_at": _at(7200)}
+    assert qw.wait_s(rerun, _jobs(_at(7230))) == (30, False)
 
 
 @pytest.mark.parametrize(("waits", "limit", "rc"), [
@@ -39,15 +65,16 @@ def _fake(waits: list[float], fail: bool = False):
     ([10, 20, 30, 40, 50, 60, 70, 80, 400, 500], 300, 1),
 ])
 def test_p90_gate(monkeypatch: pytest.MonkeyPatch, waits, limit, rc) -> None:
-    monkeypatch.setattr(qw, "_api", _fake(waits))
-    assert qw.main(["--repo", "o/r", "--workflow", "ci.yml", "--max-p90", str(limit)]) == rc
+    monkeypatch.setattr(qw, "_api", _fake(_waits(waits)))
+    assert _main("--max-p90", str(limit)) == rc
 
 
 def test_blind_is_2(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(qw, "_api", _fake([], fail=True))
-    assert qw.main(["--repo", "o/r", "--workflow", "ci.yml", "--max-p90", "300"]) == 2
-    monkeypatch.setattr(qw, "_api", _fake([]))   # nothing to measure is not "within the limit"
-    assert qw.main(["--repo", "o/r", "--workflow", "ci.yml", "--max-p90", "300"]) == 2
+    monkeypatch.setattr(qw, "_api", _fake({}, fail=True))
+    assert _main("--max-p90", "300") == 2
+    monkeypatch.setattr(qw, "_api", _fake({}))   # nothing to measure is not "within the limit"
+    assert _main("--max-p90", "300") == 2
+    assert _main("--max-p90", "300", "--min-runs", "0") == 2   # not a max() traceback read as rc 1
 
 
 @pytest.mark.parametrize(("waits", "rc"), [
@@ -55,8 +82,11 @@ def test_blind_is_2(monkeypatch: pytest.MonkeyPatch) -> None:
     ([10] * 90 + [900] * 10, 1),   # the same p90 run would pass a 900s p90 limit; p95 sees the tail
 ])
 def test_p95_gate(monkeypatch: pytest.MonkeyPatch, waits, rc) -> None:
-    monkeypatch.setattr(qw, "_api", _fake(waits))
-    assert qw.main(["--repo", "o/r", "--workflow", "ci.yml", "--max-p95", "300"]) == rc
+    calls: list[str] = []
+    api = _fake(_waits(waits))
+    monkeypatch.setattr(qw, "_api", lambda p: calls.append(p) or api(p))
+    assert _main("--max-p95", "300") == rc
+    assert sum("/jobs?" in c for c in calls) == 100   # 100 runs measured once each, not a page re-read
 
 
 def test_a_limit_is_required() -> None:
@@ -64,36 +94,52 @@ def test_a_limit_is_required() -> None:
         qw.main(["--repo", "o/r", "--workflow", "ci.yml"])
 
 
-def test_runs_are_paged(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runs_are_paged_and_truncation_is_a_fact(monkeypatch: pytest.MonkeyPatch) -> None:
     """A PR-scope window holds hundreds of runs; one page of 100 was all the old reader saw."""
     pages = {1: 100, 2: 100, 3: 40}
+    monkeypatch.setattr(qw, "_api", lambda p: {"workflow_runs": [{**RUN, "id": i} for i in range(pages.get(_page(p), 0))]})
+    runs, cut = qw.list_runs("o/r", "ci.yml", "", "", 24, 1000)
+    assert (len(runs), cut) == (240, False)
+    runs, cut = qw.list_runs("o/r", "ci.yml", "", "", 24, 150)
+    assert (len(runs), cut) == (150, True)
+    runs, cut = qw.list_runs("o/r", "ci.yml", "", "", 24, 240)   # exactly the window: not truncated
+    assert (len(runs), cut) == (240, False)
+    runs, cut = qw.list_runs("o/r", "ci.yml", "", "", 24, 200)   # a full page at the cap: one more read decides
+    assert (len(runs), cut) == (200, True)
 
-    def api(path: str) -> dict:
-        n = pages.get(int(path.rsplit("page=", 1)[1]), 0)
-        return {"workflow_runs": [{**RUN, "id": i} for i in range(n)]}
-    monkeypatch.setattr(qw, "_api", api)
-    assert len(qw.list_runs("o/r", "ci.yml", "", "", 24, 1000)) == 240
-    assert len(qw.list_runs("o/r", "ci.yml", "", "", 24, 150)) == 150
+
+def test_a_jam_of_runs_cancelled_while_queued_fires(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reviewer 580 F1: 9 runs cancelled after 25 min queued + 1 that started in 5s exited 0."""
+    jam = {i: [_ghost(1500)] for i in range(9)} | {9: _jobs(_at(5))}
+    monkeypatch.setattr(qw, "_api", _fake(jam))
+    assert _main("--max-p90", "180", "--branch", "", "--event", "pull_request") == 1
+    waits, empty, cut = qw.measure("o/r", "ci.yml", "", "", 24)
+    assert (sorted(w for _, w, _ in waits), sum(c for *_, c in waits), empty, cut) == ([5] + [1500] * 9, 9, 0, False)
 
 
-def test_never_started_is_counted_not_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    def api(path: str) -> dict:
-        if path.endswith("/jobs?per_page=100"):
-            rid = int(path.split("/runs/")[1].split("/")[0])
-            return {"jobs": [] if rid else _jobs("2026-10-24T00:10:00Z")}
-        return {"workflow_runs": [{**RUN, "id": i} for i in range(3)] if "page=1" in path else []}
-    monkeypatch.setattr(qw, "_api", api)
-    assert qw.measure("o/r", "ci.yml", "", "", 24) == ([(0, 600.0)], 2)
+def test_a_quick_supersede_cancel_is_harmless(monkeypatch: pytest.MonkeyPatch) -> None:
+    runs = {i: [_ghost(20)] for i in range(5)} | {i: _jobs(_at(10)) for i in range(5, 10)}
+    monkeypatch.setattr(qw, "_api", _fake(runs))
+    assert _main("--max-p90", "180") == 0
+
+
+def test_job_unit_fires_on_the_pool_behind_through_main(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every run's lint starts in 5s; its unit job waits an hour then is cancelled still queued."""
+    runs = {i: [*_jobs(_at(5)), _ghost(3600)] for i in range(10)}
+    monkeypatch.setattr(qw, "_api", _fake(runs))
+    assert _main("--max-p90", "180") == 0                    # per run: the first job, 5s
+    assert _main("--max-p90", "180", "--unit", "job") == 1   # per job: the hour is seen
+    waits, _, _ = qw.measure("o/r", "ci.yml", "", "", 24, unit="job")
+    assert sorted(w for _, w, _ in waits) == [5] * 10 + [3600] * 10
 
 
 def test_cancelled_while_queued_is_not_a_start() -> None:
-    """GitHub stamps started_at = created_at on a job cancelled before any runner took it."""
-    ghost = {"started_at": RUN["created_at"], "conclusion": "cancelled", "runner_name": ""}
-    assert qw.wait_s(RUN, [ghost, *_jobs("2026-10-24T00:11:00Z")]) == 660
-    assert qw.wait_s(RUN, [ghost]) is None
+    assert qw.wait_s(RUN, [_ghost(25 * 60), *_jobs(_at(660))]) == (660, False)
+    assert qw.wait_s(RUN, [_ghost(25 * 60)]) == (1500, True)
+    assert qw.job_waits([_ghost(25 * 60), {"conclusion": "skipped", "started_at": T0}]) == [(1500, True)]
 
 
 def test_job_unit_sees_the_pool_behind() -> None:
-    jobs = _jobs("2026-10-24T00:00:16Z", "2026-10-24T01:00:00Z")
-    assert qw.wait_s(RUN, jobs) == 16
-    assert sorted(qw.job_waits(jobs)) == [16, 3600]
+    jobs = _jobs(_at(16), _at(3600))
+    assert qw.wait_s(RUN, jobs) == (16, False)
+    assert sorted(qw.job_waits(jobs)) == [(16, False), (3600, False)]
