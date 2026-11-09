@@ -199,7 +199,7 @@ def test_lag_on_a_fresh_release_is_pending_exit_0(new_repo, tmp_path: Path) -> N
     lock = _consumer(tmp_path, LOCK)
     r = run_tool("pin_drift", tmp_path, "--file", str(lock), "--remote", str(rem))
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "PENDING - 1 pin(s) behind ci-kit v1.2.0" in r.stdout and f"{lock}:1: v1.1.0 (v1.2.0 released" in r.stdout
+    assert "PENDING - 1 pin(s) behind ci-kit v1.2.0" in r.stdout and f"{lock}:1: v1.1.0 (oldest missing release 2.0h ago)" in r.stdout
     assert "OK -" not in r.stdout                # pending is said, never reported as clean
 
 
@@ -223,7 +223,7 @@ def test_grace_reads_the_oldest_missing_release_not_the_newest(new_repo, tmp_pat
     near = _consumer(tmp_path, "ci-kit@v1.2.0\n", name="ci.yml")     # misses only v1.3.0: pending
     r = run_tool("pin_drift", tmp_path, "--file", str(old), "--file", str(near), "--remote", str(rem))
     assert r.returncode == 1, r.stdout + r.stderr
-    assert f"{old}:1: v1.1.0" in r.stdout and f"{near}:1: v1.2.0 (v1.3.0 released" in r.stdout
+    assert f"{old}:1: v1.1.0" in r.stdout and f"{near}:1: v1.2.0 (oldest missing release 1.0h ago)" in r.stdout
 
 
 def test_grace_zero_is_strict(new_repo, tmp_path: Path) -> None:
@@ -266,3 +266,50 @@ def test_negative_grace_is_exit_2(new_repo, tmp_path: Path) -> None:
     r = run_tool("pin_drift", tmp_path, "--file", str(_consumer(tmp_path, LOCK)), "--remote", str(rem),
                  "--grace-hours", "-1")
     assert r.returncode == 2
+
+
+def test_a_late_low_version_does_not_hide_a_stale_pin(new_repo, tmp_path: Path) -> None:
+    # reviewer 591 F1: version order != date order (llm-ports v1.19.0 is dated AFTER v1.20.0).
+    # Pin v1.2.0 misses v1.3.0 (5 days old) and a backport v1.2.1 (1 hour): stale by DATE.
+    rem = _remote(new_repo, "v1.2.0")
+    _release(rem, "v1.3.0", age_h=120)
+    _release(rem, "v1.2.1", age_h=1)
+    f = _consumer(tmp_path, "ci-kit@v1.2.0\n", name="ci.yml")
+    r = run_tool("pin_drift", tmp_path, "--file", str(f), "--remote", str(rem))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "PENDING" not in r.stdout and f"{f}:1: v1.2.0" in r.stdout
+
+
+def test_a_remade_tag_does_not_reset_the_grace_of_an_older_one(new_repo, tmp_path: Path) -> None:
+    # a tag deleted and re-made today must not make a pin that misses an OLD release look fresh
+    rem = _remote(new_repo, "v1.1.0")
+    _release(rem, "v1.2.0", age_h=120)
+    _release(rem, "v1.3.0", age_h=100)
+    git(rem, "tag", "-d", "v1.2.0")
+    _release(rem, "v1.2.0", age_h=0.1)       # re-made: its own date resets...
+    lock = _consumer(tmp_path, LOCK)          # ...but v1.3.0 is still 100h old
+    r = run_tool("pin_drift", tmp_path, "--file", str(lock), "--remote", str(rem))
+    assert r.returncode == 1 and "PENDING" not in r.stdout, r.stdout + r.stderr
+
+
+def test_a_future_dated_release_gets_no_grace(new_repo, tmp_path: Path) -> None:
+    # reviewer 591 F2: a negative age is a clock we cannot trust, not a young release
+    rem = _remote(new_repo, "v1.1.0")
+    _release(rem, "v1.2.0", age_h=-720)
+    lock = _consumer(tmp_path, LOCK)
+    r = run_tool("pin_drift", tmp_path, "--file", str(lock), "--remote", str(rem))
+    assert r.returncode == 1 and "PENDING" not in r.stdout, r.stdout + r.stderr
+
+
+def test_tag_dates_on_an_unfetchable_remote_is_empty(tmp_path: Path, capsys) -> None:
+    # the REAL fetch-failure branch, not a stub: no dates -> the caller grants no grace
+    assert pin_drift.tag_dates(str(tmp_path / "no-such-remote"), ["v1.0.0"]) == {}
+    assert "no grace applied" in capsys.readouterr().err
+
+
+def test_pending_age_is_the_oldest_missing_release() -> None:
+    tags, now = ["v1.0.0", "v1.1.0", "v1.2.0"], 1_000_000.0
+    dates = {"v1.1.0": int(now - 3 * 3600), "v1.2.0": int(now - 5 * 3600)}   # out of order
+    assert pin_drift.pending_age_h("v1.0.0", tags, dates, 24, now) == 5
+    assert pin_drift.pending_age_h("v1.0.0", tags, dates, 4, now) is None      # v1.2.0 past grace
+    assert pin_drift.pending_age_h("v1.0.0", tags, {"v1.2.0": dates["v1.2.0"]}, 24, now) is None
