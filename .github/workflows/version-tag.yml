@@ -4,7 +4,7 @@
 # needed a hand-pushed vX.Y.Z tag after the merge; llm-ports 1.19.0 merged and was never tagged,
 # and nothing went red. `ci-version-tag` (ci_kit/version_tag.py) tags each untagged bump at its
 # bump commit, dispatches the caller's release workflow on it, and heals a tag whose release never
-# ran. A repo that tags FIRST and bumps after (ci-kit itself) does not call this.
+# ran. ci-kit calls it on itself too (tag-version.yml, release-workflow major-tag.yml).
 #
 # THE CALLER declares the triggers -- push to its default branch (the normal path), a daily cron
 # (the outside witness that heals a failed run; mcp/scripts/ci-schedule-audit.py REGISTRY watches
