@@ -159,7 +159,9 @@ pre-commit:
 - The tree a gate reads is `--root`, else `CI_KIT_ROOT`, else the git toplevel holding the
   working directory. Never the tool's own location.
 - `runs-on` for the no-secret workflows is the caller's `CI_RUNNER` repository variable (a JSON
-  label list) when set, else `ubuntu-latest`. The secret-holding workflows are hosted on purpose.
+  label list) when set, else `ubuntu-latest`. Secret-holding jobs run hosted unless the caller
+  turns on their fixed-label switch: secure (`CI_SECURE_RUNNER`) for pr-autoupdate, ci-green and
+  record verdict; sealed (`CI_SEALED_RUNNER`) for review. Never the shared `CI_RUNNER` pool.
   The four lint workflows (`doc-refs`, `dup-code`, `secret-argv`, `gitleaks`) read
   `CI_RUNNER_LIGHT` FIRST (v1.18.0): a self-hosted pool admits runners at their pool's peak
   memory, and a lint booked at the repo's heaviest job's peak held the room a real job needed
