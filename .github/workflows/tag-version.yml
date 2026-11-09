@@ -1,0 +1,41 @@
+# Tag every version bump merged to main -- ci-kit runs its own ci-version-tag.
+#
+# WHY (2026-11-09). ci-kit is version-first (the release PR moves `version` in pyproject.toml since
+# v1.20.0), yet its tags were still cut by hand: v1.21.0 merged as 3c74c82 and sat untagged until a
+# session pushed the tag, so every consumer's ci-pin-drift stayed red and Renovate had nothing to
+# bump. llm-ports got this caller in llm-ports#72; this is the same stanza for the kit itself.
+#
+# A tag made with the job token fires no `push` run, so major-tag.yml (which moves v1) would never
+# see it. `release-workflow: major-tag.yml` makes the new tag's "release" a dispatch of major-tag on
+# that tag -- v1 follows within the same run. ci-kit publishes no GitHub release and nothing to an
+# index, so a tag alone counts as released (no --github-release / --pypi).
+#
+# The daily run is the outside witness (an untagged bump left by a failed push run gets tagged);
+# mcp/scripts/ci-schedule-audit.py REGISTRY watches that it keeps happening.
+name: tag-version
+
+on:
+  push:
+    branches: [main]
+    paths: [pyproject.toml]
+  schedule:
+    - cron: "43 7 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: print the plan, tag and dispatch nothing
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  tag:
+    name: tag
+    permissions:
+      contents: write # create the tag ref
+      actions: write # dispatch major-tag.yml on it
+    uses: ./.github/workflows/version-tag.yml
+    with:
+      release-workflow: major-tag.yml
+      dry-run: ${{ inputs.dry_run || false }}
