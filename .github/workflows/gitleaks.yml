@@ -45,7 +45,7 @@ on:
         type: string
         default: ""
       ignore-path:
-        description: .gitleaksignore path relative to the repo root ('' = none)
+        description: "an extra .gitleaksignore (file, or a folder holding one) relative to the repo root. '' does NOT mean no baseline: gitleaks always loads ./.gitleaksignore and <source>/.gitleaksignore when present, and ci-gitleaks judges every file it loads -- a dead entry (absolute /repo/ path, malformed fingerprint) or a missing path given here is exit 2"
         type: string
         default: ""
       image:

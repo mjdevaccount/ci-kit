@@ -127,3 +127,142 @@ def test_range_without_event_payload_is_blind(monkeypatch):
 def test_pin_covers_linux_both_arches():
     assert {"linux-x64", "linux-arm64"} <= set(gitleaks.GITLEAKS.sha256)
     assert set(gitleaks.GITLEAKS.sha256) == set(gitleaks.GITLEAKS.assets)
+
+
+# 2026-11-09: a baseline entry the scan can never produce is refused (TradingEdge.Scraper#156).
+SCRAPER = "/repo/tools/cookie-capture-extension/manifest.json:generic-api-key:6"
+LIVE = "tools/cookie-capture-extension/manifest.json:generic-api-key:6"
+
+
+@pytest.mark.parametrize("mode", ["range", "history", "tree"])
+def test_old_docker_mount_prefix_is_dead(mode):
+    for entry in (SCRAPER, f"{A}:{SCRAPER}"):
+        dead = gitleaks.dead_entries(f"# old scan\n\n{entry}\n", mode, ".")
+        assert len(dead) == 1 and "/repo/" in dead[0], (mode, entry, dead)
+
+
+@pytest.mark.parametrize("mode", ["range", "history", "tree"])
+def test_repo_relative_entries_are_live(mode):
+    text = f"# baseline\n{LIVE}\n{A}:{LIVE}\n{A}:docs/a:b.md:curl-auth-user:200\n"
+    assert gitleaks.dead_entries(text, mode, ".") == []
+
+
+def test_absolute_entry_lives_only_under_an_absolute_tree_source():
+    assert gitleaks.dead_entries(SCRAPER, "tree", "/repo") == []           # finance-ops' own docker shape
+    assert gitleaks.dead_entries("/repository/x:r:1", "tree", "/repo")     # a sibling prefix is not under it
+    assert gitleaks.dead_entries(SCRAPER, "history", "/repo")              # git modes report repo-relative paths
+    assert gitleaks.dead_entries("C:/repo/x:r:1", "range", ".")            # a Windows absolute path too
+
+
+def test_malformed_entry_is_dead():
+    assert gitleaks.dead_entries("just-a-word\n", "range", ".")
+
+
+def _main_with_ignore(tmp_path, monkeypatch, body):
+    ign = tmp_path / ".gitleaksignore"
+    if body is not None:
+        ign.write_text(body)
+    monkeypatch.setenv("CI_KIT_GITLEAKS", "/bin/gitleaks-stub")
+    ran = []
+    monkeypatch.setattr(gitleaks, "_run", lambda cmd: (ran.append(cmd), (0, "INF no leaks found\n"))[1])
+    return ran, ["--mode", "tree", "--ignore-path", str(ign)]
+
+
+@pytest.mark.parametrize("body", [f"{SCRAPER}\n", None])   # a dead entry; a missing file
+def test_main_refuses_a_dead_baseline_before_scanning(tmp_path, monkeypatch, body):
+    ran, argv = _main_with_ignore(tmp_path, monkeypatch, body)
+    with pytest.raises(SystemExit) as e:
+        gitleaks.main(argv)
+    assert e.value.code == 2 and not ran                       # refused, and gitleaks never ran
+
+
+def test_main_scans_with_a_live_baseline(tmp_path, monkeypatch):
+    ran, argv = _main_with_ignore(tmp_path, monkeypatch, f"{LIVE}\n")
+    assert gitleaks.main(argv) == 0 and ran
+
+
+# Reviewer 572 (2026-11-09): every file gitleaks LOADS is judged, and four more dead shapes.
+def test_trailing_comment_and_bad_line_field_are_dead():
+    assert gitleaks.dead_entries(f"{LIVE} # rotated 11-08\n", "range", ".")
+    assert gitleaks.dead_entries("a.md:rule:two\n", "range", ".")
+    assert gitleaks.dead_entries(f"{LIVE}\n", "range", ".") == []
+
+
+def test_backslash_paths_follow_gitleaks_rewrite():
+    # gitleaks rewrites \ to / for 3/4-field entries: a relative one stays live, an absolute one dies
+    assert gitleaks.dead_entries("tools\\cookie\\manifest.json:generic-api-key:6\n", "range", ".") == []
+    assert gitleaks.dead_entries(f"{A}:tools\\x.json:generic-api-key:6\n", "range", ".") == []
+    assert gitleaks.dead_entries("\\repo\\tools\\x.json:generic-api-key:6\n", "range", ".")
+    assert gitleaks.dead_entries("C:\\repo\\x.json:generic-api-key:6\n", "range", ".")
+    # a 5-field entry is not rewritten, so a backslash left in it can never match a '/' path
+    assert gitleaks.dead_entries(f"{A}:docs\\a:b.md:curl-auth-user:200\n", "range", ".")
+
+
+def test_bom_kills_a_fingerprint_but_not_a_comment():
+    assert gitleaks.dead_entries(f"\ufeff# baseline\n{LIVE}\n", "range", ".") == []
+    assert gitleaks.dead_entries("\ufeff\n", "range", ".") == []
+    assert gitleaks.dead_entries(f"\ufeff{LIVE}\n", "range", ".")
+
+
+def _stub_scan(monkeypatch):
+    monkeypatch.setenv("CI_KIT_GITLEAKS", "/bin/gitleaks-stub")
+    ran = []
+    monkeypatch.setattr(gitleaks, "_run", lambda cmd: (ran.append(cmd), (0, "INF no leaks found\n"))[1])
+    return ran
+
+
+@pytest.mark.parametrize("where", ["cwd", "source"])
+def test_unnamed_default_baselines_are_judged(tmp_path, monkeypatch, where):
+    """No --ignore-path (trade-infra's caller): gitleaks still loads ./ and <source>/.gitleaksignore."""
+    src, cwd = tmp_path / "src", tmp_path / "cwd"
+    src.mkdir()
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    (cwd if where == "cwd" else src).joinpath(".gitleaksignore").write_text(f"{SCRAPER}\n", encoding="utf-8")
+    ran = _stub_scan(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        gitleaks.main(["--mode", "tree", "--source", str(src)])
+    assert e.value.code == 2 and not ran
+    (cwd if where == "cwd" else src).joinpath(".gitleaksignore").write_text(f"{LIVE}\n", encoding="utf-8")
+    assert gitleaks.main(["--mode", "tree", "--source", str(src)]) == 0 and ran
+
+
+def test_no_baseline_anywhere_is_fine(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ran = _stub_scan(monkeypatch)
+    assert gitleaks.main(["--mode", "tree", "--source", "."]) == 0 and ran
+
+
+def test_a_folder_ignore_path_reads_the_file_inside(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    d = tmp_path / "cfg"
+    d.mkdir()
+    ran = _stub_scan(monkeypatch)
+    with pytest.raises(SystemExit) as e:                    # a named folder holding no baseline
+        gitleaks.main(["--mode", "tree", "--ignore-path", str(d)])
+    assert e.value.code == 2 and not ran
+    (d / ".gitleaksignore").write_text(f"{SCRAPER}\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as e:                    # its dead entry is judged
+        gitleaks.main(["--mode", "tree", "--ignore-path", str(d)])
+    assert e.value.code == 2 and not ran
+    (d / ".gitleaksignore").write_text(f"{LIVE}\n", encoding="utf-8")
+    assert gitleaks.main(["--mode", "tree", "--ignore-path", str(d)]) == 0 and ran
+
+
+def test_named_file_and_source_default_are_both_judged(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / "src"
+    src.mkdir()
+    named = tmp_path / "base.ignore"
+    named.write_text(f"{LIVE}\n", encoding="utf-8")
+    (src / ".gitleaksignore").write_text(f"{SCRAPER}\n", encoding="utf-8")
+    ran = _stub_scan(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        gitleaks.main(["--mode", "tree", "--source", str(src), "--ignore-path", str(named)])
+    assert e.value.code == 2 and not ran
+
+
+def test_same_file_twice_is_read_once(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".gitleaksignore").write_text(f"{LIVE}\n", encoding="utf-8")
+    assert len(gitleaks.loaded_baselines("", ".")) == 1      # ./ and <source>=. are one file
