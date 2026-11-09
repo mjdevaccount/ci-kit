@@ -139,7 +139,14 @@ on:
 jobs:
   review:
     name: review
-    runs-on: ubuntu-latest
+    # THE SEALED POOL when the caller sets CI_SEALED_RUNNER, hosted otherwise (the kill switch).
+    # This job holds the Claude credential AND runs the PR's own tests, so it may run only where a
+    # job is alone with its machine: home-host VM 112, one job per boot, rolled back to a clean
+    # snapshot before every start, no other job on the box and the LAN walled off (home-host
+    # docs/CI-RUNNER-CONFIG-PLAN.md § Sealed pool). NEVER the secure pool (VM 111 runs several jobs
+    # side by side) nor the socket pool. Labels fixed HERE (an ON/OFF switch, never a label list).
+    # The pool's per-job ceiling is 45 min, the same as timeout-minutes below. vars resolve to the CALLER.
+    runs-on: ${{ vars.CI_SEALED_RUNNER && fromJSON('["self-hosted","home-sealed"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       # every `python -m ci_kit...` runs with the PR checkout as cwd, and -m puts the cwd AHEAD of
