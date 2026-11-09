@@ -22,6 +22,14 @@ to find (review 2026-11-08). `history` keeps gitleaks' count (0, or no such line
 its diff filter makes git's count the wrong question). A range needs the commits in the checkout:
 `fetch-depth: 0`. A shallow clone fails gitleaks' git log, which is exit 2, loudly.
 
+A BASELINE ENTRY THAT CAN NEVER MATCH IS exit 2, before any scan (2026-11-09). gitleaks matches a
+.gitleaksignore fingerprint by exact string, and a finding's file path is relative to the repo (git
+modes) or to --source (tree). The old edge-ci scan ran in docker with the repo mounted at /repo,
+so its fingerprints read `/repo/tools/...`; under ci-gitleaks no finding ever carries that path, the
+entry silently stopped baselining anything, and TradingEdge.Scraper#156 went red on an item the
+file said was handled. An absolute path that the scan cannot produce is refused, by name, and so is
+an --ignore-path that does not exist: a baseline nobody reads is the same dead guard.
+
 EXIT  0 clean · 1 a leak (rotate it; never baseline it away) · 2 did not finish looking.
 """
 
@@ -30,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -122,6 +131,50 @@ def verdict(mode: str, rc: int, output: str, matched: int | None = None) -> tupl
     return 0, "no leaks found"
 
 
+_SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def dead_entries(text: str, mode: str, source: str) -> list[str]:
+    """The .gitleaksignore entries no finding of this scan can ever match (module doc).
+
+    A fingerprint is `[commit:]file:rule:line`. Its file is absolute only when the scan reports
+    absolute paths, which is tree mode over an absolute --source -- and then it must sit under it.
+    Git modes report repo-relative paths whatever --source is."""
+    out = []
+    # gitleaks writes forward-slash paths on every OS, so the root is judged as a POSIX path.
+    root = posixpath.normpath(source) if mode == "tree" and source.startswith("/") else None
+    for raw in text.splitlines():
+        entry = raw.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        parts = entry.split(":")
+        if len(parts) < 3:
+            out.append(f"{entry!r}: not a fingerprint ([commit:]file:rule:line)")
+            continue
+        start = 1 if len(parts) >= 4 and _SHA.fullmatch(parts[0]) else 0
+        path = ":".join(parts[start:-2])
+        absolute = path.startswith("/") or bool(re.match(r"[A-Za-z]:[\\/]", path))
+        if absolute and (root is None or not (path == root or path.startswith(root.rstrip("/") + "/"))):
+            out.append(f"{entry!r}: file {path!r} is absolute, and this scan reports paths relative to "
+                       "the repo -- it can never match (a leading /repo/ is the old docker scan's mount: drop it)")
+    return out
+
+
+def check_ignore(path: str, mode: str, source: str) -> None:
+    """Refuse (exit 2) an --ignore-path that is missing, unreadable, or holds a dead entry."""
+    if not path:
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        release_bin.blind(GATE, f"--ignore-path {path!r} cannot be read ({exc}): a baseline nobody reads")
+    dead = dead_entries(text, mode, source)
+    if dead:
+        release_bin.blind(GATE, f"{path}: {len(dead)} baseline entr{'y' if len(dead) == 1 else 'ies'} "
+                                "can never match -- fix the file:\n  " + "\n  ".join(dead))
+
+
 def _run(cmd: list[str]) -> tuple[int, str]:
     """Run gitleaks, echoing its output live and returning it for the verdict."""
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -153,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", default="", help="gitleaks config path ('' = the built-in ruleset)")
     ap.add_argument("--ignore-path", default="", help=".gitleaksignore path ('' = none)")
     a = ap.parse_args(argv)
+    check_ignore(a.ignore_path, a.mode, a.source)
     log_opts = None
     if a.mode == "range":
         name = os.environ.get("GITHUB_EVENT_NAME", "")

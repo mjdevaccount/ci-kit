@@ -127,3 +127,55 @@ def test_range_without_event_payload_is_blind(monkeypatch):
 def test_pin_covers_linux_both_arches():
     assert {"linux-x64", "linux-arm64"} <= set(gitleaks.GITLEAKS.sha256)
     assert set(gitleaks.GITLEAKS.sha256) == set(gitleaks.GITLEAKS.assets)
+
+
+# 2026-11-09: a baseline entry the scan can never produce is refused (TradingEdge.Scraper#156).
+SCRAPER = "/repo/tools/cookie-capture-extension/manifest.json:generic-api-key:6"
+LIVE = "tools/cookie-capture-extension/manifest.json:generic-api-key:6"
+
+
+@pytest.mark.parametrize("mode", ["range", "history", "tree"])
+def test_old_docker_mount_prefix_is_dead(mode):
+    for entry in (SCRAPER, f"{A}:{SCRAPER}"):
+        dead = gitleaks.dead_entries(f"# old scan\n\n{entry}\n", mode, ".")
+        assert len(dead) == 1 and "/repo/" in dead[0], (mode, entry, dead)
+
+
+@pytest.mark.parametrize("mode", ["range", "history", "tree"])
+def test_repo_relative_entries_are_live(mode):
+    text = f"# baseline\n{LIVE}\n{A}:{LIVE}\n{A}:docs/a:b.md:curl-auth-user:200\n"
+    assert gitleaks.dead_entries(text, mode, ".") == []
+
+
+def test_absolute_entry_lives_only_under_an_absolute_tree_source():
+    assert gitleaks.dead_entries(SCRAPER, "tree", "/repo") == []           # finance-ops' own docker shape
+    assert gitleaks.dead_entries("/repository/x:r:1", "tree", "/repo")     # a sibling prefix is not under it
+    assert gitleaks.dead_entries(SCRAPER, "history", "/repo")              # git modes report repo-relative paths
+    assert gitleaks.dead_entries("C:/repo/x:r:1", "range", ".")            # a Windows absolute path too
+
+
+def test_malformed_entry_is_dead():
+    assert gitleaks.dead_entries("just-a-word\n", "range", ".")
+
+
+def _main_with_ignore(tmp_path, monkeypatch, body):
+    ign = tmp_path / ".gitleaksignore"
+    if body is not None:
+        ign.write_text(body)
+    monkeypatch.setenv("CI_KIT_GITLEAKS", "/bin/gitleaks-stub")
+    ran = []
+    monkeypatch.setattr(gitleaks, "_run", lambda cmd: (ran.append(cmd), (0, "INF no leaks found\n"))[1])
+    return ran, ["--mode", "tree", "--ignore-path", str(ign)]
+
+
+@pytest.mark.parametrize("body", [f"{SCRAPER}\n", None])   # a dead entry; a missing file
+def test_main_refuses_a_dead_baseline_before_scanning(tmp_path, monkeypatch, body):
+    ran, argv = _main_with_ignore(tmp_path, monkeypatch, body)
+    with pytest.raises(SystemExit) as e:
+        gitleaks.main(argv)
+    assert e.value.code == 2 and not ran                       # refused, and gitleaks never ran
+
+
+def test_main_scans_with_a_live_baseline(tmp_path, monkeypatch):
+    ran, argv = _main_with_ignore(tmp_path, monkeypatch, f"{LIVE}\n")
+    assert gitleaks.main(argv) == 0 and ran
