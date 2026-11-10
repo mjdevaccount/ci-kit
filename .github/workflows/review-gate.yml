@@ -279,10 +279,14 @@ jobs:
           eval "$INSTALL"
       # node for the CLI below: the hosted image ships it, the SEALED pool's does not (2026-11-09:
       # `npm: command not found`, exit 127, the gate BLIND on its first sealed run)
+      # A failed setup-node must still reach Review (as a failed install does): Review names the
+      # BLIND's cause. No package-manager cache: the caller's lockfile is not this CLI's.
       - uses: actions/setup-node@v7
         if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true' && steps.decide.outputs.credential == 'oauth'
+        continue-on-error: true
         with:
           node-version: 26
+          package-manager-cache: false
       - name: Install Claude Code
         # the subscription transport's CLI, pinned. A failed install must still reach Review, which
         # names it as the BLIND's cause (claude not found) instead of skipping the verdict.

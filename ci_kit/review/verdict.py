@@ -97,8 +97,10 @@ def decide(raw: str | None, reasons: str) -> Verdict:
             data, err = None, "output does not match the schema"
     if data is None:
         return Verdict("blind", "review gate BLIND: the reviewer did not finish looking",
-                       head + f"**BLIND** -- {err}. This is a red check, not a pass; re-run the "
-                              "job, or add the missing credential if the log names one.\n")
+                       head + f"**BLIND** -- {err}. This is a red check, not a pass; push a fresh "
+                              "commit (a re-run of failed jobs keeps the gate's OLD workflow ref, so "
+                              "a ci-kit fix never reaches it), or add the missing credential if the "
+                              "log names one.\n")
 
     findings = data["findings"]
     confirmed_blocking = [f for f in findings
