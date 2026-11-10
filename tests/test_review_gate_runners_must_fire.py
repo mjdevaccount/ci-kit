@@ -126,3 +126,10 @@ def test_the_shipped_setup_node_cannot_end_the_job() -> None:
     step = _jobs()["review"]["steps"][_setup_node_index(_jobs()["review"]["steps"])]
     assert step.get("continue-on-error") is True
     assert step["with"].get("package-manager-cache") is False
+
+
+def test_node_is_set_up_before_the_callers_install() -> None:
+    # a caller's `install: npm ci` runs via eval: no static check can see it, so node comes first
+    steps = _jobs()["review"]["steps"]
+    install = next(n for n, s in enumerate(steps) if s.get("name") == "Install")
+    assert _setup_node_index(steps) < install

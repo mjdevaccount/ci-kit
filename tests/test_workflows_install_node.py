@@ -14,7 +14,7 @@ WORKFLOWS = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workfl
 
 
 def _workflows() -> dict[str, dict]:
-    files = sorted(WORKFLOWS.glob("*.yml"))
+    files = sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")])
     assert files, "no workflows found: the check would pass blind"
     return {f.name: yaml.safe_load(f.read_text(encoding="utf-8")) for f in files}
 
