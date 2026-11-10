@@ -13,6 +13,7 @@ from __future__ import annotations
 import pathlib
 
 import yaml
+from _workflow_node import is_setup_node, node_faults
 
 WORKFLOW = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "review-gate.yml"
 SECURE = "${{ vars.CI_SECURE_RUNNER && fromJSON('[\"self-hosted\",\"home-secure\"]') || 'ubuntu-latest' }}"
@@ -33,15 +34,16 @@ def placement_faults(jobs: dict) -> list[str]:
 
 
 def toolchain_faults(job: dict) -> list[str]:
-    """A step that runs npm/npx/node before any actions/setup-node step: the hosted image ships
-    node, the sealed pool's image does not (its first sealed run went BLIND on exit 127)."""
-    out, have_node = [], False
-    for i, step in enumerate(job.get("steps", [])):
-        if str(step.get("uses", "")).startswith("actions/setup-node@"):
-            have_node = True
-        words = str(step.get("run", "")).replace("&&", " ").replace(";", " ").split()
-        if not have_node and {"npm", "npx", "node"} & set(words):
-            out.append(f"review step {i} ({step.get('name', '?')}): node tooling before setup-node")
+    """The review job's node setup: no node tooling before setup-node (the class check, applied
+    here to the job that moved to the sealed pool), and setup-node gated exactly as the step after
+    it -- otherwise node is absent exactly when the install runs, or set up for nothing."""
+    out = [f"review {f}" for f in node_faults({"jobs": {"": job}})]
+    steps = job.get("steps", [])
+    for i, step in enumerate(steps):
+        if is_setup_node(step):
+            nxt = steps[i + 1] if i + 1 < len(steps) else {}
+            if step.get("if") != nxt.get("if"):
+                out.append(f"review step {i}: setup-node `if` differs from the next step's")
     return out
 
 
@@ -102,3 +104,32 @@ def test_fires_when_npm_moves_above_setup_node() -> None:
     i = next(n for n, s in enumerate(steps) if "npm install" in str(s.get("run", "")))
     steps.insert(0, steps.pop(i))
     assert toolchain_faults(job)
+
+
+def _setup_node_index(steps: list) -> int:
+    return next(n for n, s in enumerate(steps) if is_setup_node(s))
+
+
+def test_fires_when_setup_node_is_gated_unlike_the_install() -> None:
+    job = _jobs()["review"]
+    job["steps"][_setup_node_index(job["steps"])]["if"] = "steps.decide.outputs.required == 'true'"
+    assert toolchain_faults(job)
+
+
+def test_fires_when_setup_node_loses_its_gate() -> None:
+    job = _jobs()["review"]
+    del job["steps"][_setup_node_index(job["steps"])]["if"]
+    assert toolchain_faults(job)
+
+
+def test_the_shipped_setup_node_cannot_end_the_job() -> None:
+    step = _jobs()["review"]["steps"][_setup_node_index(_jobs()["review"]["steps"])]
+    assert step.get("continue-on-error") is True
+    assert step["with"].get("package-manager-cache") is False
+
+
+def test_node_is_set_up_before_the_callers_install() -> None:
+    # a caller's `install: npm ci` runs via eval: no static check can see it, so node comes first
+    steps = _jobs()["review"]["steps"]
+    install = next(n for n, s in enumerate(steps) if s.get("name") == "Install")
+    assert _setup_node_index(steps) < install

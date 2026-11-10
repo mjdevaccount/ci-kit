@@ -100,3 +100,11 @@ def test_main_with_no_review_json_is_blind(tmp_path, monkeypatch) -> None:
 def test_printed_schema_is_the_parsers_schema(capsys) -> None:
     assert main(["--print-schema"]) == 0
     assert json.loads(capsys.readouterr().out) == SCHEMA
+
+
+def test_blind_advice_is_a_fresh_commit_never_a_rerun() -> None:
+    # a re-run of failed jobs keeps the reusable workflow's OLD ref (td#2948, 2026-11-09: the rerun
+    # resolved review-gate.yml@v1 to the pre-setup-node SHA and went BLIND again on exit 127)
+    body = decide(None, "x").body
+    assert "push a fresh commit" in body
+    assert "re-run the job" not in body
