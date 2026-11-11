@@ -222,11 +222,11 @@ def test_the_gate_is_blind_when_the_timeline_cannot_be_read(repo: Repo, monkeypa
     monkeypatch.setattr(gate.github, "runs_at", lambda *a: [])
 
     def no_timeline(*a):
-        raise ValueError("#1: GitHub returned no base-change timeline")
+        raise gate.github.Unreadable("#1: GitHub returned no base-change count (filteredCount)")
     monkeypatch.setattr(gate.github, "retargeted_at", no_timeline)
     monkeypatch.chdir(repo.work)
     result, _, problems = gate.judge("o/r", "o/r", repo.main, tip, "review-gate.yml", number=9, base_ref="main")
-    assert result == "blind" and "no base-change timeline" in problems[0]
+    assert result == "blind" and "no base-change count" in problems[0]
 
 
 def test_a_rider_whose_context_an_earlier_rider_moved_is_skipped_must_fire(repo: Repo) -> None:

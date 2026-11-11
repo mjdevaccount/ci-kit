@@ -148,42 +148,50 @@ def _release(o: Opts, p: Pass, m: int, rode: list[tuple[int, str, str]], why: st
         label(o, p, n, remove=RIDING)
 
 
-def recheck(o: Opts, n: int, h: str) -> tuple[str, str]:
-    """('', '') when rider #n may still land at `h`, else ('release' | 'eject', why) (LANDING, above).
-    A moved head is RELEASED, not ejected: the new head is simply not what rode, and a new head is
-    what re-admits a PR anyway (round 2, finding 4). Raises when GitHub cannot answer."""
+def recheck(o: Opts, n: int, h: str) -> tuple[str, str, str]:
+    """('', '', '') when rider #n may still land at `h`, else ('release' | 'eject', why, tag) (LANDING,
+    above). A moved head is RELEASED (`moved`), not ejected: the new head is simply not what rode, and a
+    new head is what re-admits a PR anyway (round 2, finding 4). A timeline GitHub will not answer
+    releases THIS rider (`blind`), never the pass (round 3). Other GitHub failures raise."""
     pr = github.pull(o.repo, n)
     cur = str((pr.get("head") or {}).get("sha") or "")
     title = str(pr.get("title") or "").lower()
     names = {str(lb.get("name")) for lb in pr.get("labels") or []}
     if pr.get("state") != "open":
-        return "eject", f"it is {pr.get('state')}"
+        return "eject", f"it is {pr.get('state')}", ""
     if pr.get("draft"):
-        return "eject", "it was turned back into a draft"
+        return "eject", "it was turned back into a draft", ""
     if not pr.get("auto_merge"):
-        return "eject", "its auto-merge was disarmed"
+        return "eject", "its auto-merge was disarmed", ""
     if OPT_OUT in names or OPT_OUT in title:
-        return "eject", f"it opted out (`{OPT_OUT}`)"
+        return "eject", f"it opted out (`{OPT_OUT}`)", ""
     if cur != h:
-        return "release", f"its head moved to {cur[:12]} after it boarded at {h[:12]}"
+        return "release", f"its head moved to {cur[:12]} after it boarded at {h[:12]}", "moved"
     if o.review_workflow:
-        ok, why, _ = github.review_passed(o.repo, o.review_workflow, n, h, o.base, pr)
+        try:
+            ok, why, _ = github.review_passed(o.repo, o.review_workflow, n, h, o.base, pr)
+        except github.Unreadable as e:
+            return "release", f"its review could not be re-checked (BLIND): {e}", "blind"
         if not ok:
-            return "eject", f"its review no longer passes at {h[:12]}: {why}"
-    return "", ""
+            return "eject", f"its review no longer passes at {h[:12]}: {why}", ""
+    return "", "", ""
 
 
 def land(o: Opts, p: Pass, train: dict, rode: list[tuple[int, str, str]]) -> tuple[bool, set[int], frozenset[int]]:
     m, head = int(train["number"]), str(train["headRefOid"])
     bad = [(n, h, *got) for n, h, _ in rode if (got := recheck(o, n, h))[0]]
     if bad:
-        for n, h, act, why in bad:
+        for n, h, act, why, tag in bad:
             if act == "eject":
                 eject(o, p, n, h, f"at land time merge train #{m} re-checked it and {why}")
-            else:
-                comment(o, p, n, f"Released from merge train #{m} at land time: {why}. Its new head rides a later "
-                                 f"train once its checks pass.\n{policy.RELEASED.format(train=m, head=h, why='moved')}")
-                label(o, p, n, remove=RIDING)
+                continue
+            if tag == "blind":
+                p.error(f"#{n}: released from train #{m} at land time -- {why}")
+            nxt = "Its new head rides a later train once its checks pass." if tag == "moved" else \
+                "It rides a later train once GitHub answers."
+            comment(o, p, n, f"Released from merge train #{m} at land time: {why}. {nxt}\n"
+                             f"{policy.RELEASED.format(train=m, head=h, why=tag)}")
+            label(o, p, n, remove=RIDING)
         out = {n for n, *_ in bad}
         for n, _, _ in rode:
             if n not in out:
@@ -191,10 +199,11 @@ def land(o: Opts, p: Pass, train: dict, rode: list[tuple[int, str, str]]) -> tup
                                  f"{', '.join(f'#{x}' for x in sorted(out))} failed the land-time re-check. "
                                  "This PR rides the next train.")
                 label(o, p, n, remove=RIDING)
-        comment(o, p, m, "Closed at land time: " + "; ".join(f"#{n} {why}" for n, _, _, why in bad))
+        comment(o, p, m, "Closed at land time: " + "; ".join(f"#{n} {why}" for n, _, _, why, _ in bad))
         close(o, p, m, delete_branch=True)
         p.say(f"train #{m}: green, but {len(bad)} rider(s) failed the land-time re-check, recomposing: "
-              + "; ".join(f"#{n} {act}ed ({why})" for n, _, act, why in bad))
+              + "; ".join(f"#{n} {act}d ({why})" if act.endswith("e") else f"#{n} {act}ed ({why})"
+                         for n, _, act, why, _ in bad))
         return False, set(), frozenset(out)
     numbers = {n for n, _, _ in rode}
     if o.dry_run:
@@ -278,7 +287,11 @@ def board(o: Opts, p: Pass, d: Path, cands: list[dict]) -> list[tgit.Rider]:
             continue
         at = ""
         if o.review_workflow:
-            ok, why, at = github.review_passed(o.repo, o.review_workflow, n, h, o.base, pr)
+            try:
+                ok, why, at = github.review_passed(o.repo, o.review_workflow, n, h, o.base, pr)
+            except github.Unreadable as e:  # this rider is BLIND, the rest still ride (round 3, finding 4)
+                p.error(f"#{n}: not riding, BLIND -- {e}")
+                continue
             if not ok:
                 p.say(f"#{n}: not riding -- {why}")
                 continue

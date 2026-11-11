@@ -18,6 +18,8 @@ from ci_kit import pr_autoupdate
 from ci_kit.merge_train import EJECTED, LANDED, NEEDS_UPDATE, RIDING, TRAIN_LABEL, cli, github
 from ci_kit.merge_train import git as tgit
 
+REC = Path(__file__).parent / "fixtures" / "github"
+
 REQ = ("unit tests", "review gate")
 NOW = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 GREEN = [{"__typename": "CheckRun", "name": n, "status": "COMPLETED", "conclusion": "SUCCESS"} for n in REQ]
@@ -63,9 +65,15 @@ class FakeGH:
 
     def _answer(self, a: tuple, stdin: str | None):  # noqa: PLR0911, PLR0912
         if a[:2] == ("api", "graphql") and any("BASE_REF_CHANGED_EVENT" in x for x in a):
+            # RECORDED GitHub answers (tests/fixtures/github), never a hand-written shape (round 3)
             when = self.prs[int(next(x for x in a if x.startswith("pr="))[3:])]["retargeted"]
-            return json.dumps({"data": {"repository": {"pullRequest": {"timelineItems": {
-                "totalCount": 1 if when else 0, "nodes": [{"createdAt": when}] if when else []}}}}})
+            if when == "BLIND":
+                return 1, ""
+            got = json.loads((REC / f"timeline_{'home-host_199_retargeted' if when else 'trade-data_2990_never'}.json")
+                             .read_text(encoding="utf-8"))
+            for node in got["data"]["repository"]["pullRequest"]["timelineItems"]["nodes"]:
+                node["createdAt"] = when
+            return json.dumps(got)
         if a[:2] == ("api", "graphql"):
             return self._gql()
         if a[:2] == ("api", "user"):
@@ -305,6 +313,31 @@ def test_a_rider_that_no_longer_wants_to_land_is_ejected_at_land_time_must_fire(
     # round 2, finding 4: a moved head is RELEASED (a new head re-admits it), never ejected
     assert RIDING not in fake.prs[5]["labels"] and "head moved" in fake.comments[5][-1]
     assert "why=moved" in fake.comments[5][-1]
+
+
+def test_one_riders_unreadable_timeline_skips_that_rider_not_the_pass_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    # round 3, finding 4: GitHub will not answer #2's timeline -> #2 is BLIND and named; #1 #3 still ride
+    repo, fake = world
+    _riders(repo, fake, 3)
+    fake.prs[2]["retargeted"] = "BLIND"
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 1, p.summary
+    assert fake.prs[100]["title"] == "merge train: #1 #3" and RIDING not in fake.prs[2]["labels"]
+    assert any(s.startswith("ERROR: #2: not riding, BLIND") for s in p.summary)
+
+
+def test_a_rider_blind_at_land_time_is_released_not_ejected_and_nothing_lands_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    repo, fake = world
+    _riders(repo, fake, 2)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    _green(fake)
+    fake.prs[2]["retargeted"] = "BLIND"
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 1, p.summary
+    assert not fake.wrote("merge") and fake.prs[100]["state"] == "closed"
+    assert EJECTED not in fake.prs[2]["labels"] and RIDING not in fake.prs[2]["labels"]
+    assert "why=blind" in fake.comments[2][-1] and "BLIND" in fake.comments[2][-1]
+    assert EJECTED not in fake.prs[1]["labels"]
 
 
 def test_a_rider_skipped_for_moved_context_is_labelled_for_its_own_update_must_fire(world: tuple[Repo, FakeGH]) -> None:

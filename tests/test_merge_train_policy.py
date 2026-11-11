@@ -1,6 +1,10 @@
 """The merge train's pure decisions, and "did the review gate pass at this exact head"."""
 from __future__ import annotations
 
+import json
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from ci_kit.merge_train import EJECTED, OPT_OUT, RIDING, github, policy
@@ -130,18 +134,58 @@ def _timeline(monkeypatch, answer) -> list:
     return calls
 
 
-def test_retargeted_at_reads_the_timeline_and_refuses_what_it_cannot_read(monkeypatch) -> None:
-    def tl(total, nodes):
-        return {"data": {"repository": {"pullRequest": {"timelineItems": {"totalCount": total, "nodes": nodes}}}}}
-    calls = _timeline(monkeypatch, tl(0, []))
+REC = Path(__file__).parent / "fixtures" / "github"
+
+
+def recorded(name: str) -> dict:
+    """A REAL GitHub answer to github.RETARGETS, captured with `gh api graphql` (round 3: hand-written
+    shapes hid this bug twice -- totalCount ignores the itemTypes filter)."""
+    return json.loads((REC / f"timeline_{name}.json").read_text(encoding="utf-8"))
+
+
+NEVER = ("trade-data_2990_never", "trade-data_2991_never", "ci-kit_69_never")
+RETARGETED = {"home-host_199_retargeted": "2026-11-08T18:40:20Z", "uv_23126_retargeted": "2026-11-09T10:42:27Z"}
+
+
+def test_recorded_timelines_decide_on_the_filtered_count_never_the_total_must_fire() -> None:
+    for name in NEVER:  # totalCount 3 / 9 / 6, filteredCount 0: never retargeted
+        got = recorded(name)
+        assert got["data"]["repository"]["pullRequest"]["timelineItems"]["totalCount"] > 0
+        assert github.last_retarget(got, 1) == "", name
+    for name, when in RETARGETED.items():
+        assert github.last_retarget(recorded(name), 1) == when, name
+
+
+def test_a_timeline_answer_that_does_not_say_is_unreadable_must_fire() -> None:
+    def tl(name: str, **items) -> dict:
+        got = recorded(name)
+        ti = got["data"]["repository"]["pullRequest"]["timelineItems"]
+        for k, v in items.items():
+            if v is None:
+                ti.pop(k)
+            else:
+                ti[k] = v
+        return got
+    bad = [None, {"data": None}, {"errors": [{"message": "Resource not accessible by integration"}], "data": None},
+           tl("trade-data_2990_never", filteredCount=None),           # no filtered count: never guess from total
+           tl("home-host_199_retargeted", nodes=[]),                   # counted, not named
+           tl("home-host_199_retargeted", nodes=[{"__typename": "BaseRefChangedEvent"}]),         # no time
+           tl("home-host_199_retargeted", nodes=[{"__typename": "ReferencedEvent", "createdAt": "2026-11-08T18:40:20Z"}]),
+           tl("trade-data_2990_never", nodes=recorded("home-host_199_retargeted")["data"]["repository"]
+              ["pullRequest"]["timelineItems"]["nodes"])]            # counts none, lists one
+    for got in bad:
+        with pytest.raises(github.Unreadable):
+            github.last_retarget(got, 7)
+
+
+def test_retargeted_at_asks_the_filtered_count_and_wraps_a_refusal(monkeypatch) -> None:
+    calls = _timeline(monkeypatch, recorded("trade-data_2990_never"))
     assert github.retargeted_at("o/r", 7) == ""
-    assert "BASE_REF_CHANGED_EVENT" in calls[0][3] and "pr=7" in calls[0]
-    _timeline(monkeypatch, tl(2, [{"createdAt": "2026-11-11T00:05:00Z"}]))
-    assert github.retargeted_at("o/r", 7) == "2026-11-11T00:05:00Z"
-    for bad in ({"data": None}, None, tl(1, []), tl(1, [{}])):
-        _timeline(monkeypatch, bad)
-        with pytest.raises(ValueError):
-            github.retargeted_at("o/r", 7)
+    q = calls[0][3]
+    assert "BASE_REF_CHANGED_EVENT" in q and "filteredCount" in q and "totalCount" not in q and "pr=7" in calls[0]
+    _timeline(monkeypatch, subprocess.CalledProcessError(1, ["gh"], "", "HTTP 403"))
+    with pytest.raises(github.Unreadable):
+        github.retargeted_at("o/r", 7)
 
 
 def test_review_passed_refuses_a_closed_forked_or_retargeted_pr(monkeypatch) -> None:

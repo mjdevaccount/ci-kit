@@ -192,7 +192,7 @@ jobs:
       PYTHONSAFEPATH: "1"
     permissions:
       contents: read
-      pull-requests: write   # the verdict comment
+      pull-requests: write   # the verdict comment; also the train path's base-change timeline read (GraphQL)
       actions: read          # find + download the last passing run's verdict artifact (carry)
     outputs:
       # frozen at each step's end; the `record` job reads them on a runner the PR's code never ran on

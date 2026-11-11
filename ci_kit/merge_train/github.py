@@ -15,7 +15,8 @@ retargeted to main (`edited` is not a gate trigger, so no new run) would read as
 main and land `feat`'s unreviewed content. The PR's timeline records each base change when it
 HAPPENS (`BaseRefChangedEvent.createdAt`, GraphQL): a run created after the last one reviewed the
 current base. A PR never retargeted has none. A timeline GitHub will not answer RAISES -- the gate
-reports BLIND, the train's pass does not finish -- never a pass, and never an ejection.
+reports BLIND, the train skips THAT rider (or releases it `why=blind` at land) and names it as a
+run error -- never a pass, and never an ejection. `filteredCount` decides, never `totalCount`.
 
 REFUSED, never guessed: a run whose `pull_requests` is EMPTY (GitHub leaves it empty in some
 answers; matching it by head branch name instead would accept another PR's run on a reused
@@ -68,23 +69,48 @@ def runs_at(repo: str, workflow: str, head: str) -> list[dict]:
     return list((got or {}).get("workflow_runs") or []) if isinstance(got, dict) else []
 
 
+# `filteredCount`, NEVER `totalCount`: GitHub's totalCount IGNORES the itemTypes filter (live,
+# 11-11: trade-data#2990 totalCount 3 / filteredCount 0 / no nodes; home-host#199 32 / 1 / one
+# BaseRefChangedEvent). Deciding on totalCount read every PR with any timeline as "retargeted with
+# no time" and no train ever formed (ci-kit#70 round 3). Recorded answers: tests/fixtures/github/.
 RETARGETS = """query($o:String!,$n:String!,$pr:Int!){repository(owner:$o,name:$n){pullRequest(number:$pr){
- timelineItems(itemTypes:[BASE_REF_CHANGED_EVENT],last:1){totalCount nodes{... on BaseRefChangedEvent{createdAt}}}}}}"""
+ timelineItems(itemTypes:[BASE_REF_CHANGED_EVENT],last:1){filteredCount nodes{__typename ... on BaseRefChangedEvent{createdAt}}}}}}"""
+BASE_CHANGE = "BaseRefChangedEvent"
+
+
+class Unreadable(ValueError):
+    """One PR's base-change timeline GitHub would not answer. The train skips THAT rider (board) or
+    releases it `why=blind` (land) and names it as a run error; the gate reports BLIND. Never a pass."""
+
+
+def last_retarget(answer: object, number: int) -> str:
+    """PURE: when the PR's base last changed ('' = never) from the RETARGETS answer. Decides on
+    `filteredCount` and the typed node only; RAISES on any answer that does not say both."""
+    pr = ((((answer or {}) if isinstance(answer, dict) else {}).get("data") or {}).get("repository") or {}).get("pullRequest")
+    items = pr.get("timelineItems") if isinstance(pr, dict) else None
+    n = items.get("filteredCount") if isinstance(items, dict) else None
+    if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+        raise Unreadable(f"#{number}: GitHub returned no base-change count (filteredCount)")
+    nodes = [x for x in items.get("nodes") or [] if isinstance(x, dict)]
+    if n == 0:
+        if nodes:
+            raise Unreadable(f"#{number}: the timeline counts no base change but lists {len(nodes)}")
+        return ""
+    last = nodes[-1] if nodes else {}
+    if last.get("__typename") != BASE_CHANGE or _ts(last.get("createdAt")) is None:
+        raise Unreadable(f"#{number}: the timeline counts {n} base change(s) but names none with a time")
+    return str(last["createdAt"])
 
 
 def retargeted_at(repo: str, number: int) -> str:
     """When PR #number's base branch last changed ('' = never). RAISES when GitHub cannot say."""
     owner, name = repo.split("/", 1)
-    got = gh_json("api", "graphql", "-f", f"query={RETARGETS}", "-f", f"o={owner}", "-f", f"n={name}",
-                  "-F", f"pr={number}")
-    pr = ((((got or {}) if isinstance(got, dict) else {}).get("data") or {}).get("repository") or {}).get("pullRequest")
-    items = pr.get("timelineItems") if isinstance(pr, dict) else None
-    if not isinstance(items, dict):
-        raise ValueError(f"#{number}: GitHub returned no base-change timeline")
-    nodes = [x for x in items.get("nodes") or [] if isinstance(x, dict)]
-    if items.get("totalCount") and not (nodes and _ts(nodes[-1].get("createdAt"))):
-        raise ValueError(f"#{number}: the base-change timeline names a change with no time")
-    return str(nodes[-1]["createdAt"]) if items.get("totalCount") else ""
+    try:
+        got = gh_json("api", "graphql", "-f", f"query={RETARGETS}", "-f", f"o={owner}", "-f", f"n={name}",
+                      "-F", f"pr={number}")
+    except (subprocess.CalledProcessError, ValueError) as e:  # gh refused, or not JSON
+        raise Unreadable(f"#{number}: GitHub would not answer its base-change timeline: {e}") from e
+    return last_retarget(got, number)
 
 
 def verdict(runs: list[dict], number: int, head: str, retargeted: str = "") -> tuple[bool, str, str]:
