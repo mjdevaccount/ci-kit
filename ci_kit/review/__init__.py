@@ -14,6 +14,8 @@ ONE gate and no PR can edit the policy that grades it.
   claude      `subscription` transport: the Claude Code CLI headless (CLAUDE_CODE_OAUTH_TOKEN)
   mcp_server  `tools` as a stdio MCP server for the CLI
   verdict     the structured output -> pass / block / BLIND, and the PR comment body
+  train       a merge-train PR (head `train/*`): every commit is one constituent's exact squash at a
+              head whose own review-gate run passed -> pass with no model call, else block / BLIND
 
 Only `agent`, `claude` and `mcp_server` need the `review` extra; the rest are stdlib.
 """

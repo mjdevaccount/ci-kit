@@ -1,0 +1,139 @@
+# merge-train -- test N armed PRs ONCE on one tree, land them as N commits (ci-merge-train).
+#
+#   on:
+#     schedule: [{ cron: "7,27,47 * * * *" }]       # the pass that finds work nobody signalled
+#     workflow_dispatch:
+#     pull_request_target:                           # the BASE branch's copy of this file runs
+#       types: [labeled, closed]                     # `merge-train` label = run now; a train closing = finalize
+#     workflow_run:                                  # a train's checks finishing = judge it now
+#       workflows: [CI, review-gate]              # EVERY workflow that posts a required check
+#       types: [completed]
+#   concurrency: { group: merge-train, cancel-in-progress: false }
+#   permissions: { contents: read, pull-requests: read, checks: read, statuses: read, actions: read }
+#   jobs:
+#     train:
+#       if: >-   # a skipped job takes no runner: only the events that can change a train get one
+#         github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+#         || (github.event_name == 'pull_request_target' && github.event.action == 'labeled'
+#             && github.event.label.name == 'merge-train')
+#         || (github.event_name == 'pull_request_target' && github.event.action == 'closed'
+#             && startsWith(github.event.pull_request.head.ref, 'train/'))
+#         || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'cancelled'
+#             && startsWith(github.event.workflow_run.head_branch, 'train/'))
+#       uses: mjdevaccount/ci-kit/.github/workflows/merge-train.yml@v1
+#       with:
+#         required-checks: "lint + doc checks,unit tests,review gate,image-pr-build"
+#       secrets:
+#         token: ${{ secrets.PR_UPDATE_TOKEN }}   # the same PAT pr-autoupdate holds
+#
+# WHY (trade-data operator, 2026-11-11): "when we get like 8 prs queued up ... merge them into a
+# common branch and let CI run against that. Keep the commit history per PR at least." The design,
+# the trailers and the bisect: ci_kit/merge_train/__init__.py and policy.py; one pass:
+# ci_kit/merge_train/cli.py. GitHub's merge queue needs an organisation; the hosted ones are paid.
+#
+# WHAT A CALLER MUST ALSO HAVE: rebase merges ALLOWED on the base branch (the train lands by
+# rebase so main keeps one commit per PR); the review gate at a ci-kit with the train path
+# (v1.25.0+), or every train is red at its review gate; pr-autoupdate at v1.25.0+ (it skips
+# riding PRs and holds updates while a train is open). A train never force-pushes and never
+# bypasses protection: it is NOT armed; this pass merges it (rebase, --match-head-commit) only
+# when its required checks are green AND every rider re-verifies at land time (open, armed, not a
+# draft, no autoland-off, head unchanged, review still passing on this base), and GitHub still
+# enforces protection on that merge. This pass only ever acts on a train PR it composed (the
+# composition record in the PR body, checked against this workflow's own run).
+#
+# THE TOKEN MUST NOT BE GITHUB_TOKEN: a push or PR made with it fires no workflow, so the train's
+# checks would never start. Unconfigured is RED. The PAT needs contents, pull requests and
+# workflows RW (a train carrying a workflow edit is refused without workflows), actions read.
+#
+# pull_request_target, NOT pull_request: the job checks NOTHING out and runs no PR code (git
+# reads PR heads as data in a temp repo), and the BASE branch's copy of the caller decides what
+# runs with the token -- a PR cannot edit its own trigger into a token exfiltration.
+#
+# TELEMETRY: every pass writes its summary (the run is the append-only record) and every train is
+# a PR whose body and comments name what rode, what was skipped and how it ended. A pass that
+# failed something is a RED run (exit 1; 2 = could not look): a stuck train, a retry on
+# machinery, a rider held for repeated stuck or machinery releases, a green train GitHub would not merge,
+# a `train/` PR this workflow did not compose. From OUTSIDE, mcp scripts/train_watch.py (via
+# pr_reconcile.py) names a RIDER in trains at one head for hours (its `rode` markers, across
+# trains), a train merged and never finalized, a constituent closed as landed whose commit is not
+# on main, and a stray `in-train` label; mcp scripts/ci-schedule-audit.py watches the cron.
+name: merge-train
+
+on:
+  workflow_call:
+    inputs:
+      base:
+        description: the branch trains land on
+        type: string
+        default: main
+      required-checks:
+        description: comma-separated required check names (branch protection's contexts; '' = every check)
+        type: string
+        default: ""
+      max-batch:
+        description: at most this many PRs per train, oldest-armed first
+        type: number
+        default: 8
+      min-batch:
+        description: a train runs only with at least this many ready PRs (>= 2; one PR is auto-merge's)
+        type: number
+        default: 2
+      stale-minutes:
+        description: a train whose checks are still pending after this long is closed and recomposed
+        type: number
+        default: 90
+      review-workflow:
+        description: the caller's review-gate workflow file; a PR rides only if it passed at its head ('' = no pre-check)
+        type: string
+        default: review-gate.yml
+      dry-run:
+        description: decide and report, push and change nothing
+        type: boolean
+        default: false
+    secrets:
+      token:
+        description: fine-grained PAT with contents, pull requests and workflows RW, actions read, on the caller repo
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  statuses: read
+  actions: read
+
+jobs:
+  train:
+    name: merge train
+    # It holds the token (push, open, merge, close), so never the shared socket pool: the caller's
+    # SECURE pool when CI_SECURE_RUNNER is set (labels fixed here, an on/off switch, in its
+    # ci-secure environment), hosted otherwise -- pr-autoupdate's update job, same class.
+    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.token }}
+      CI_KIT_READ_TOKEN: ${{ github.token }}
+      # check names carry spaces ("unit tests"), and the action word-splits `args`: an env var
+      CI_KIT_REQUIRED_CHECKS: ${{ inputs.required-checks }}
+      # an env var, not a flag: '' (no pre-check) cannot be passed through the word-split args
+      CI_KIT_REVIEW_WORKFLOW: ${{ inputs.review-workflow }}
+    steps:
+      - name: Refuse to run unconfigured
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::secret 'token' is empty for $GITHUB_REPOSITORY: no merge train runs. Map a fine-grained token (contents, pull requests, workflows: read+write; actions: read) onto 'token'."
+            exit 1
+          fi
+      - name: One pass
+        uses: mjdevaccount/ci-kit@v1
+        with:
+          tool: ci-merge-train
+          args: >-
+            --repo ${{ github.repository }}
+            --base ${{ inputs.base }}
+            --max-batch ${{ inputs.max-batch }}
+            --min-batch ${{ inputs.min-batch }}
+            --stale-minutes ${{ inputs.stale-minutes }}
+            --run-id ${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ inputs.dry-run && '--dry-run' || '' }}

@@ -52,6 +52,15 @@
 # above is what branch protection lists -- it keeps a pre-existing check name, and `record`
 # (continue-on-error) can never turn it red.
 #
+# A MERGE TRAIN IS NOT RE-REVIEWED, AND NOT WAVED THROUGH (v1.25.0). A PR whose head branch is
+# `train/*` (ci-merge-train, merge-train.yml) skips the tier and the model: ci_kit.review.train
+# proves every commit on it is ONE constituent's squash -- its tree recomputed byte-for-byte from
+# the PR's head named in the commit's trailers -- AND that the constituent's own review-gate run
+# PASSED at exactly that head. Anything else (a stray byte, an unbound commit, an unreviewed or
+# moved head, a merge commit, a fork) is block; a verifier that could not finish is BLIND. Both
+# are red. The `train/` prefix is the key in both directions: a hand-made `train/` branch is
+# verified, never reviewed, and so cannot pass unless it IS a train.
+#
 # FAILS CLOSED. In the tier with no credential (UNARMED), a fork head, a reviewer that crashed,
 # timed out or wrote no parseable verdict = BLIND = RED, with the cause in the PR comment.
 #
@@ -138,6 +147,12 @@ on:
           git insteadOf is a PREFIX match: `o/r` also routes `o/r-extra` (red, never silent).
         type: string
         default: ""
+      train-workflow:
+        description: >-
+          the caller's merge-train workflow file: a `train/` PR passes only if its composition
+          record names a run of THIS workflow that opened it (ci_kit/merge_train/github.composed)
+        type: string
+        default: merge-train.yml
     secrets:
       git-ssh-key:
         description: >-
@@ -177,11 +192,11 @@ jobs:
       PYTHONSAFEPATH: "1"
     permissions:
       contents: read
-      pull-requests: write   # the verdict comment
+      pull-requests: write   # the verdict comment; also the train path's base-change timeline read (GraphQL)
       actions: read          # find + download the last passing run's verdict artifact (carry)
     outputs:
       # frozen at each step's end; the `record` job reads them on a runner the PR's code never ran on
-      result: ${{ steps.verdict.outputs.result }}
+      result: ${{ steps.verdict.outputs.result || steps.train.outputs.result }}
       hash: ${{ steps.carry.outputs.hash }}
       origin: ${{ steps.carry.outputs.origin }}
     steps:
@@ -206,9 +221,39 @@ jobs:
           echo "label=ci-kit $ref (${version:-?}, ${sha:0:7})" >> "$GITHUB_OUTPUT"
           echo "Gate: ci-kit $ref (${version:-?}, ${sha:0:7})" >> "$GITHUB_STEP_SUMMARY"
 
+      # THE MERGE TRAIN (v1.25.0, ci_kit/review/train.py). A PR whose head branch is `train/...`
+      # is a train ci-merge-train composed: one commit per already-reviewed PR. It is VERIFIED --
+      # its composition record names a run of the caller's merge-train workflow that opened it;
+      # every commit byte-equal to its PR's reviewed head applied onto the commit before it, with
+      # the context the review read; that PR's gate passed at that head AGAINST THIS BASE (a run
+      # created after the PR's last base change, from its timeline) -- and never sent to the
+      # model; anything else on a `train/` branch is red. The branch prefix alone keys it, so a hand PR cannot dodge review
+      # by naming its branch (it fails here) and a train cannot reach the model. is_train is set
+      # BEFORE python runs: a crash leaves the step failed and the Gate below reads no result,
+      # which is BLIND -- red either way.
+      - name: Merge train
+        id: train
+        if: startsWith(github.event.pull_request.head.ref, 'train/')
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          TRAIN_WORKFLOW: ${{ inputs.train-workflow }}
+          GATE: ${{ steps.kit.outputs.label }}
+        run: |
+          set -euo pipefail
+          echo "is_train=true" >> "$GITHUB_OUTPUT"
+          python3 -m ci_kit.review.train --body-out body.md
+
       # dorny reads a filter FILE (no ':' or newline in the input), so the caller's list keeps its
       # own YAML; an empty list is a YAML null, which dorny refuses -> red, never a silent no-guard
       - name: Guard paths
+        if: steps.train.outputs.is_train != 'true'
         env:
           GUARD_PATHS: ${{ inputs.guard-paths }}
         run: |
@@ -218,12 +263,14 @@ jobs:
           cat "$RUNNER_TEMP/review-gate-filters.yml"
       - uses: dorny/paths-filter@v4
         id: tier
+        if: steps.train.outputs.is_train != 'true'
         with:
           list-files: shell
           filters: ${{ runner.temp }}/review-gate-filters.yml
 
       - name: Decide
         id: decide
+        if: steps.train.outputs.is_train != 'true'
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
           GUARD: ${{ steps.tier.outputs.guard }}
@@ -441,7 +488,7 @@ jobs:
           cat body.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment on the PR
-        if: steps.decide.outputs.required == 'true' && !cancelled()
+        if: (steps.decide.outputs.required == 'true' || steps.train.outputs.is_train == 'true') && !cancelled()
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
@@ -460,10 +507,10 @@ jobs:
       - name: Push a block to ntfy
         # A blocked PR with no live session sits silently until someone looks; this is the push.
         # Priority 3: a PR is never a reason to wake the operator.
-        if: steps.decide.outputs.required == 'true' && steps.verdict.outputs.result != 'pass' && steps.decide.outputs.unarmed != 'true' && !cancelled()
+        if: (steps.decide.outputs.required == 'true' || steps.train.outputs.is_train == 'true') && (steps.verdict.outputs.result || steps.train.outputs.result) != 'pass' && steps.decide.outputs.unarmed != 'true' && !cancelled()
         env:
           NTFY_URL: ${{ secrets.ntfy-url }}
-          TITLE: ${{ steps.verdict.outputs.title || 'review gate did not produce a verdict' }}
+          TITLE: ${{ steps.verdict.outputs.title || steps.train.outputs.title || 'review gate did not produce a verdict' }}
           URL: ${{ github.event.pull_request.html_url }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.event.repository.name }}
@@ -477,9 +524,9 @@ jobs:
             || echo "::warning::ntfy push failed"
 
       - name: Gate
-        if: steps.decide.outputs.required == 'true' && !cancelled()
+        if: (steps.decide.outputs.required == 'true' || steps.train.outputs.is_train == 'true') && !cancelled()
         env:
-          RESULT: ${{ steps.verdict.outputs.result }}
+          RESULT: ${{ steps.verdict.outputs.result || steps.train.outputs.result }}
         run: |
           case "$RESULT" in
             pass) echo "review gate: pass" ;;

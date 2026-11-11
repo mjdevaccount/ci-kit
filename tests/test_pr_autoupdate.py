@@ -221,3 +221,56 @@ def test_the_pr_list_reads_with_the_read_token_and_falls_back_to_the_push_token(
     monkeypatch.delenv("CI_KIT_READ_TOKEN")
     upd._gh_read("pr", "list")
     assert seen == [None]
+
+
+# ---- the merge train (ci_kit/merge_train): riders and trains are never updated, and an open
+#      train holds every other update (a single merge beside it would put the train BEHIND)
+def _armed(n: int, state: str = "BEHIND", labels: tuple[str, ...] = (), head: str = "") -> dict:
+    return {"number": n, "autoMergeRequest": {"enabledAt": f"2026-11-11T00:00:{n:02d}Z"}, "isCrossRepository": False,
+            "labels": [{"name": x} for x in labels], "headRefName": head or f"b{n}", "mergeStateStatus": state,
+            "statusCheckRollup": []}
+
+
+def test_no_train_is_the_old_plan() -> None:
+    prs = [_armed(1), _armed(2)]
+    q = upd._train_plan(prs, prs, [], Options())
+    assert [p["number"] for p in q.update] == [1, 2]
+
+
+def test_a_rider_is_never_updated() -> None:
+    prs = [_armed(1, labels=("in-train",)), _armed(2)]
+    summary: list[str] = []
+    q = upd._train_plan(prs, prs, summary, Options())
+    assert [p["number"] for p in q.update] == [2] and "#1" in summary[0]
+
+
+def test_an_open_train_holds_updates_but_not_conflicts() -> None:
+    train = _armed(50, head="train/9")
+    prs = [train, _armed(1), _armed(2, state="DIRTY")]
+    summary: list[str] = []
+    q = upd._train_plan(prs, prs, summary, Options())
+    assert [p["number"] for p in q.update] == [2]
+    assert [(p["number"], why) for p, why in q.held] == [(1, "merge train #50 is open")]
+    assert train not in q.update and "merge train #50 open" in summary[-1]
+
+
+def test_a_fork_branch_named_train_holds_nothing() -> None:
+    fork = {**_armed(50, head="train/9"), "isCrossRepository": True}
+    prs = [fork, _armed(1)]
+    assert [p["number"] for p in upd._train_plan(prs, [prs[1]], [], Options()).update] == [1]
+
+
+def test_an_ejected_pr_is_updated_while_a_train_is_open() -> None:
+    # it rides no train; holding it while trains keep forming would starve it (ci-kit#70 finding 7)
+    prs = [_armed(50, head="train/9"), _armed(1), _armed(2, labels=("train-ejected",))]
+    q = upd._train_plan(prs, prs, [], Options())
+    assert [p["number"] for p in q.update] == [2]
+    assert [p["number"] for p, _ in q.held] == [1]
+
+
+def test_a_pr_a_train_skipped_for_moved_context_is_updated_while_a_train_is_open() -> None:
+    # it needs its own update + review before any train takes it (ci-kit#70 round 2, finding 3)
+    prs = [_armed(50, head="train/9"), _armed(1), _armed(3, labels=("train-needs-update",))]
+    q = upd._train_plan(prs, prs, [], Options())
+    assert [p["number"] for p in q.update] == [3]
+    assert [p["number"] for p, _ in q.held] == [1]

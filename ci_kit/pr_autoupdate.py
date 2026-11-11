@@ -51,6 +51,7 @@ import urllib.request
 from dataclasses import dataclass
 
 from ci_kit import pr_list, pr_queue
+from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
 
 LABEL = "conflict"
 
@@ -177,7 +178,8 @@ LABEL_COLOR = "d93f0b"
 LABEL_DESCRIPTION = "pr-autoupdate: conflicts with main (dedup state for the page)"
 
 
-def add_label(repo: str, n: int, label: str) -> tuple[bool, bool]:
+def add_label(repo: str, n: int, label: str, color: str = LABEL_COLOR,
+              description: str = LABEL_DESCRIPTION) -> tuple[bool, bool]:
     """(added, created). A failed add creates the label when the repo lacks it, then retries ONCE.
 
     Live 2026-10-30: home-host had no `conflict` label, so every add failed and the run went red
@@ -188,8 +190,8 @@ def add_label(repo: str, n: int, label: str) -> tuple[bool, bool]:
         return True, False
     created = False
     if _gh("api", f"repos/{repo}/labels/{urllib.parse.quote(label, safe='')}", check=False).returncode:
-        if _gh("label", "create", label, "-R", repo, "--color", LABEL_COLOR,
-               "--description", LABEL_DESCRIPTION, check=False).returncode:
+        if _gh("label", "create", label, "-R", repo, "--color", color,
+               "--description", description, check=False).returncode:
             return False, False
         created = True
         print(f"::notice::{repo}: created the missing `{label}` label (pr-autoupdate's conflict dedup)")
@@ -210,11 +212,39 @@ def page(title: str, body: str, click: str) -> str:
         return f"push FAILED: {e}"
 
 
+def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Options) -> pr_queue.Plan:
+    """pr_queue's plan with the MERGE TRAIN's PRs taken out (ci_kit/merge_train). A train PR is
+    never updated (a merge commit from main would break its one-commit-per-PR chain; a stale train
+    is recomposed instead), a PR riding one is left alone, and while a train is open nothing else is
+    updated either -- a single PR landing beside it would put the whole train BEHIND and throw its
+    CI away. A DIRTY PR is still attempted: that PUT pushes nothing, and it is how the conflict
+    label and page fire. An EJECTED PR is updated anyway: it rides no train, and its own update is
+    the only lane it has left -- holding it while trains keep forming would starve it (session
+    review of ci-kit#70, finding 7). So is a PR a train SKIPPED because the lines around its change
+    moved since its review (`train-needs-update`): no train takes it until its own update and
+    review, which this hold would otherwise keep from ever happening (round 2, finding 3). A repo
+    with no train sees exactly the old plan."""
+    trains = [p for p in prs if str(p.get("headRefName") or "").startswith(TRAIN_PREFIX)
+              and not p.get("isCrossRepository")]
+    riding = {p["number"] for p in armed if any(lb.get("name") == RIDING for lb in p.get("labels") or [])}
+    if riding:
+        summary.append(f"riding a merge train, not updated: {', '.join('#' + str(n) for n in sorted(riding))}")
+    q = pr_queue.plan([p for p in armed if p not in trains and p["number"] not in riding],
+                      opts.max_in_flight, opts.required)
+    if trains:
+        held = [p for p in q.update if (p.get("mergeStateStatus") or "").upper() != "DIRTY"
+                and not any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
+        q.update = [p for p in q.update if p not in held]
+        q.held += [(p, f"merge train #{trains[-1]['number']} is open") for p in held]
+        summary.append(f"merge train #{trains[-1]['number']} open: {len(held)} update(s) held, conflicts still checked")
+    return q
+
+
 def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout))
     armed = [p for p in prs if p.get("autoMergeRequest") and not p.get("isCrossRepository")]
     summary.append(f"{len(armed)} armed PR(s) of {len(prs)} open")
-    q = pr_queue.plan(armed, opts.max_in_flight, opts.required)
+    q = _train_plan(prs, armed, summary, opts)
     if opts.max_in_flight > 0:
         summary.append(f"queue: {len(q.in_flight)}/{opts.max_in_flight} in flight "
                        f"[{', '.join('#' + str(p['number']) for p in q.in_flight)}], {len(q.update)} to attempt, "
