@@ -129,6 +129,7 @@ def pr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
     monkeypatch.setenv("HEAD_REPO", "o/r")
     monkeypatch.setenv("HAS_OAUTH", "true")
+    monkeypatch.setattr(tier, "verified", lambda repo, sha: False)   # no API here: unsigned unless a test says
     _git(tmp_path, "checkout", "-qb", "pr")
     return tmp_path
 
@@ -168,3 +169,122 @@ def test_the_reviewer_line_names_the_credential_never_its_value(pr: Path, monkey
 def test_an_unreadable_diff_is_exit_2(pr: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HEAD_SHA", "0" * 40)
     assert tier.main(["--model", "m", "--guard-model", "g"]) == 2
+
+
+RENOVATE = tier.BUMP_BOTS["renovate[bot]"]
+
+
+def _bump_pr(pr: Path, extra: dict[str, bytes], email: str = RENOVATE) -> str:
+    (pr / "requirements.txt").write_bytes(b"ruff==0.7.1" + bytes([10]))
+    _git(pr, "add", ".")
+    _git(pr, "commit", "-qm", "req")
+    base = _git(pr, "rev-parse", "HEAD")
+    (pr / "requirements.txt").write_bytes(b"ruff==0.8.0" + bytes([10]))
+    for name, data in extra.items():
+        (pr / name).write_bytes(data)
+    _git(pr, "add", ".")
+    # as Renovate's API commit lands: the bot authors, GitHub (web-flow) commits
+    _git(pr, "-c", f"author.email={email}", "-c", f"committer.email={tier.WEB_FLOW}", "commit", "-qm", "bump")
+    return base
+
+
+def test_a_version_bump_pr_skips_the_model_and_says_so(pr: Path, monkeypatch: pytest.MonkeyPatch,
+                                                      capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("BASE_SHA", _bump_pr(pr, {}))
+    monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
+    monkeypatch.setenv("GUARD", "true")   # requirements.txt is a guard path in the caller
+    monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
+    monkeypatch.setattr(tier, "verified", lambda repo, sha: repo == "o/r")
+    assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
+    assert _outputs(pr / "out") == {"required": "false"}
+    assert "Review tier: skipped (version bump only, 1 lines)" in capsys.readouterr().out
+    assert "ruff==0.8.0" in (pr / "summary").read_text()
+
+
+def test_an_amended_bot_commit_is_reviewed(pr: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # reviewer 11-11 round 4: `commit --amend` (and rebase, cherry-pick) keep the bot as AUTHOR;
+    # the committer is the person who edited it
+    monkeypatch.setenv("BASE_SHA", _bump_pr(pr, {}))
+    (pr / "requirements.txt").write_bytes(b"ruff==0.8.1" + bytes([10]))
+    _git(pr, "commit", "-qa", "--amend", "--no-edit")
+    assert _git(pr, "log", "-1", "--format=%ae %ce") == f"{RENOVATE} t@t"
+    monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
+    monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
+    assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
+    assert _outputs(pr / "out")["required"] == "true"
+
+
+@pytest.mark.parametrize(("author", "email", "head_repo", "hand_commit"), [
+    ("mattj", RENOVATE, "o/r", False),                 # a person opened it: same diff, reviewed
+    ("renovate[bot]", "t@t", "o/r", False),            # the bot's PR, a commit it did not author
+    ("renovate[bot]", RENOVATE, "o/r", True),          # a hand commit pushed onto the bot's branch
+    ("renovate[bot]", RENOVATE, "evil/r", False),      # a fork head is never the bot's own branch
+    ("", RENOVATE, "o/r", False),                      # no author in the event: reviewed
+])
+def test_only_the_bump_bots_own_pr_skips(pr: Path, monkeypatch: pytest.MonkeyPatch, author: str, email: str,
+                                         head_repo: str, hand_commit: bool) -> None:
+    # reviewer 11-11 #2: a diff cannot prove a SHA or a lockfile; the bot's identity is the first lock
+    monkeypatch.setenv("BASE_SHA", _bump_pr(pr, {}, email))
+    if hand_commit:
+        (pr / "requirements.txt").write_bytes(b"ruff==0.8.1" + bytes([10]))
+        _git(pr, "commit", "-qam", "hand")
+    monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
+    monkeypatch.setenv("PR_AUTHOR", author)
+    monkeypatch.setenv("HEAD_REPO", head_repo)
+    assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
+    assert _outputs(pr / "out")["required"] == "true"
+
+
+@pytest.mark.parametrize(("edit", "required"), [
+    (None, "false"),                 # update-branch: main merged in clean, untouched -- still skips
+    (b"ruff==0.8.1", "true"),        # the same merge carrying an edit (reviewer 11-11 round 3 #1)
+])
+def test_a_merge_on_the_bots_branch_must_be_an_honest_one(pr: Path, monkeypatch: pytest.MonkeyPatch,
+                                                         edit: bytes | None, required: str) -> None:
+    base = _bump_pr(pr, {})
+    bot_head = _git(pr, "rev-parse", "HEAD")
+    _git(pr, "checkout", "-q", "-B", "main", base)          # main moves on with an unrelated commit
+    (pr / "notes.md").write_text("n" + chr(10))
+    _git(pr, "add", "notes.md")
+    _git(pr, "commit", "-qm", "main moves")
+    main_tip = _git(pr, "rev-parse", "HEAD")
+    _git(pr, "checkout", "-q", "-B", "pr", bot_head)
+    _git(pr, "merge", "-q", "--no-ff", "--no-commit", "main")
+    if edit:
+        (pr / "requirements.txt").write_bytes(edit + bytes([10]))
+        _git(pr, "add", "requirements.txt")
+    _git(pr, "-c", "user.email=someone@x", "commit", "-qm", "merge main")
+    monkeypatch.setenv("BASE_SHA", main_tip)
+    monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
+    monkeypatch.setenv("GUARD", "true")
+    monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
+    monkeypatch.setattr(tier, "verified", lambda repo, sha: True)
+    assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
+    assert _outputs(pr / "out")["required"] == required
+
+
+@pytest.mark.parametrize(("signed", "author_date"), [
+    (False, None),                      # `git filter-branch` keeps both identities and dates, drops the signature
+    (True, "2026-01-01T00:00:00Z"),     # GitHub's rebase update-branch re-commits an amend: dates part
+])
+def test_a_rewritten_bot_commit_is_reviewed(pr: Path, monkeypatch: pytest.MonkeyPatch, signed: bool,
+                                            author_date: str | None, capsys: pytest.CaptureFixture[str]) -> None:
+    # reviewer 11-11 round 5: identities alone can be carried through a rewrite
+    if author_date:
+        monkeypatch.setenv("GIT_AUTHOR_DATE", author_date)
+    monkeypatch.setenv("BASE_SHA", _bump_pr(pr, {}))
+    monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
+    monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
+    monkeypatch.setattr(tier, "verified", lambda repo, sha: signed)
+    assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
+    assert _outputs(pr / "out")["required"] == "true"
+    assert "bump skip NOT taken for renovate[bot]" in capsys.readouterr().out
+
+
+def test_a_non_utf8_file_is_reviewed_never_red(pr: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # reviewer 11-10 #2: the -U0 read must not turn a Latin-1 file into exit 2 the label cannot fix
+    monkeypatch.setenv("BASE_SHA", _bump_pr(pr, {"x.csv": b"caf" + bytes([0xE9]) + bytes([10])}))
+    monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
+    monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
+    assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
+    assert _outputs(pr / "out")["required"] == "true"
