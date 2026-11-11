@@ -304,8 +304,10 @@ jobs:
       # A PRIVATE GIT DEPENDENCY (v1.24.0), three steps (ci_kit/git_ssh.sh): the key exists ONLY
       # here, where no PR code runs (Install runs the caller's build, which could read a key from
       # its parent shell's /proc environ even after `unset`); Install gets the agent's socket and
-      # can use the key, never read it; the agent is killed before Review. A caller passing neither
-      # input: this step exits at its first line, and Install and the kill step run as before.
+      # can use the key (never read it -- unless it has root: a hosted runner's sudo can dump the
+      # agent's memory, so the key must be read-only and one repo); the agent is killed before
+      # Review. A caller passing neither input: this step exits at its first line, and Install
+      # and the kill step run as before.
       - name: Load the git ssh key
         id: gitssh
         if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true'

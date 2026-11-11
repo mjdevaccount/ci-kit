@@ -16,6 +16,8 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
+import time
 
 import pytest
 import yaml
@@ -141,8 +143,6 @@ def test_the_three_phases(tmp_path: pathlib.Path) -> None:
         i = _install(tmp_path, outputs, "o/private\no/second", "\n".join([
             "ssh-add -l > agent.txt",
             "env > install-env.txt",
-            # the parent shell's ORIGINAL environment, which `unset` cannot scrub (Linux only)
-            "cat /proc/$$/environ > parent-environ.txt 2>/dev/null || : > parent-environ.txt",
             "git ls-remote --get-url https://github.com/o/private > named.txt",
             "git ls-remote --get-url https://github.com/o/second.git > second.txt",
             "git ls-remote --get-url https://github.com/o/public > unnamed.txt",
@@ -150,9 +150,8 @@ def test_the_three_phases(tmp_path: pathlib.Path) -> None:
         ]))
         assert i.returncode == 0, i.stdout + i.stderr
         assert fp in (tmp_path / "agent.txt").read_text(), "the install cannot use the key"
-        for f in ("install-env.txt", "parent-environ.txt"):
-            seen = (tmp_path / f).read_text(errors="replace")
-            assert "PRIVATE KEY" not in seen and "CI_KIT_GIT_SSH_KEY" not in seen, f
+        seen = (tmp_path / "install-env.txt").read_text(errors="replace")
+        assert "PRIVATE KEY" not in seen and "CI_KIT_GIT_SSH_KEY" not in seen
         assert (tmp_path / "named.txt").read_text().strip() == "ssh://git@github.com/o/private"
         assert (tmp_path / "second.txt").read_text().strip() == "ssh://git@github.com/o/second.git"
         assert (tmp_path / "unnamed.txt").read_text().strip() == "https://github.com/o/public"
@@ -167,6 +166,56 @@ def test_the_three_phases(tmp_path: pathlib.Path) -> None:
         k = _kill(tmp_path, outputs["pid"])
     assert k.returncode == 0, k.stdout + k.stderr
     assert not _alive(outputs["pid"]), "the agent outlived the kill step: the PR's tests could use the key"
+
+
+def _proc_environ(pid: str) -> bytes | None:
+    """The agent's ORIGINAL environment, as root sees it. ssh-agent makes itself non-dumpable, so
+    its own user cannot read it: direct read, else `sudo -n` (a hosted runner has it), else None."""
+    path = pathlib.Path(f"/proc/{pid}/environ")
+    if not path.parent.is_dir():
+        return None
+    try:
+        return path.read_bytes()
+    except PermissionError:
+        if shutil.which("sudo") is None:
+            return None
+        r = subprocess.run(["sudo", "-n", "cat", str(path)], capture_output=True)
+        return r.stdout if r.returncode == 0 else None
+
+
+@needs_tools
+def test_the_agent_does_not_inherit_the_key(tmp_path: pathlib.Path) -> None:
+    # the load step's env holds the key; an agent started from it would keep it in its own
+    # /proc/<pid>/environ, readable by root (= `sudo` on a hosted runner) for the whole Install
+    key, _ = _keypair(tmp_path)
+    r, outputs = _load(tmp_path, key=key, repos="o/private")
+    assert r.returncode == 0, r.stdout + r.stderr
+    try:
+        if not pathlib.Path(f"/proc/{outputs['pid']}").is_dir():
+            pytest.skip("no /proc for the agent's pid (not Linux)")
+        seen = _proc_environ(outputs["pid"])
+        if seen is None:
+            pytest.skip("the agent's environ needs root (ssh-agent is non-dumpable) and `sudo -n` is unavailable")
+        body = key.splitlines()[1].encode()
+        assert b"CI_KIT_GIT_SSH_KEY" not in seen and body not in seen, "the agent inherited the key"
+    finally:
+        _kill(tmp_path, outputs["pid"])
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a zombie's state is read from /proc")
+def test_kill_counts_a_zombie_as_dead(tmp_path: pathlib.Path) -> None:
+    # kill -0 succeeds on a zombie; one that is never reaped (its parent never waits) must not
+    # fail the stop step forever. This child stays a zombie of pytest until wait() below.
+    child = subprocess.Popen(["true"])
+    try:
+        deadline = time.monotonic() + 5
+        while pathlib.Path(f"/proc/{child.pid}/stat").read_text().rsplit(") ", 1)[1][0] != "Z":
+            assert time.monotonic() < deadline, "the child never became a zombie"
+            time.sleep(0.05)
+        k = _kill(tmp_path, str(child.pid))
+        assert k.returncode == 0, k.stdout + k.stderr
+    finally:
+        child.wait()
 
 
 @needs_tools
