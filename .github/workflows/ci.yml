@@ -156,11 +156,6 @@ jobs:
       - name: actionlint
         run: docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:latest -color
 
-  # renovate/default.json5 is the estate's ONE Renovate policy: every repo extends it from main,
-  # so a typo merged here breaks Renovate everywhere and the only signal is a "Fix Renovate
-  # Configuration" issue per repo, hours later. Validated as REPO config (`--no-global`: a preset
-  # is repo-shaped; global mode skips repo-only checks), `--strict` so a needed migration is red.
-  # The annotation manager's regex has its own must-fire test in the suite above.
   # ci-kit#70 round 3: the merge train's base-change read asks GitHub's GraphQL timeline, and a
   # hand-written fixture hid that totalCount ignores the itemTypes filter. This asks the REAL API
   # with the token scoped EXACTLY like the review-gate job, so green also proves that scope can
@@ -182,6 +177,11 @@ jobs:
       - run: uv sync --frozen --all-extras
       - run: uv run pytest -q -p no:cacheprovider -rs tests/test_merge_train_live_github.py
 
+  # renovate/default.json5 is the estate's ONE Renovate policy: every repo extends it from main,
+  # so a typo merged here breaks Renovate everywhere and the only signal is a "Fix Renovate
+  # Configuration" issue per repo, hours later. Validated as REPO config (`--no-global`: a preset
+  # is repo-shaped; global mode skips repo-only checks), `--strict` so a needed migration is red.
+  # The annotation manager's regex has its own must-fire test in the suite above.
   renovate-config:
     name: renovate config
     runs-on: ubuntu-latest

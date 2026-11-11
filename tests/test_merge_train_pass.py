@@ -468,10 +468,8 @@ def test_a_rider_released_from_two_stuck_trains_is_held_not_ejected_must_fire(wo
     assert not any(s.startswith("ERROR: #1:") for s in p.summary)
 
 
-def test_finalize_retries_a_rider_whose_close_failed_must_fire(world: tuple[Repo, FakeGH]) -> None:
-    # finding 9: a failed close leaves the train un-finalized, the rider unlabelled, and is retried
-    repo, fake = world
-    _riders(repo, fake, 2)
+def _land_train_100(repo: Repo, fake: FakeGH) -> None:
+    """Compose train #100, then do what GitHub's rebase-merge does: its commits onto main, marked merged."""
     assert cli.run(_opts(), cli.Pass()) == 0
     train = fake.prs[100]
     git(repo.work, "fetch", "-q", "origin", "refs/pull/100/head")
@@ -482,6 +480,13 @@ def test_finalize_retries_a_rider_whose_close_failed_must_fire(world: tuple[Repo
     train["state"] = "merged"
     fake.merged = [{"number": 100, "mergeCommit": {"oid": landed_tip}, "labels": [{"name": TRAIN_LABEL}],
                     "mergedAt": "2099-01-01T00:00:00Z"}]
+
+
+def test_finalize_retries_a_rider_whose_close_failed_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    # finding 9: a failed close leaves the train un-finalized, the rider unlabelled, and is retried
+    repo, fake = world
+    _riders(repo, fake, 2)
+    _land_train_100(repo, fake)
     fake.close_fail = {2}
     p = cli.Pass()
     assert cli.run(_opts(), p) == 1
@@ -497,16 +502,7 @@ def test_finalize_retries_a_rider_whose_close_failed_must_fire(world: tuple[Repo
 def test_finalize_says_whether_a_moved_head_moved_forward_or_was_rewritten(world: tuple[Repo, FakeGH]) -> None:
     repo, fake = world
     _riders(repo, fake, 3)
-    assert cli.run(_opts(), cli.Pass()) == 0
-    train = fake.prs[100]
-    git(repo.work, "fetch", "-q", "origin", "refs/pull/100/head")
-    git(repo.work, "checkout", "-q", "--detach", repo.main)
-    git(repo.work, "cherry-pick", f"{repo.main}..{train['headRefOid']}", env={**ENV, "GIT_COMMITTER_NAME": "GitHub"})
-    landed_tip = git(repo.work, "rev-parse", "HEAD")
-    git(repo.work, "push", "-q", "origin", f"{landed_tip}:refs/heads/main")
-    train["state"] = "merged"
-    fake.merged = [{"number": 100, "mergeCommit": {"oid": landed_tip}, "labels": [{"name": TRAIN_LABEL}],
-                    "mergedAt": "2099-01-01T00:00:00Z"}]
+    _land_train_100(repo, fake)
     fake.prs[2]["headRefOid"] = repo.pr(2, {"later.txt": "later\n"}, base=fake.prs[2]["headRefOid"])
     fake.prs[3]["headRefOid"] = repo.pr(3, {"other.txt": "force-pushed\n"})           # not a descendant
     assert cli.run(_opts(), cli.Pass()) == 0
