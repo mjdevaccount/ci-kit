@@ -182,7 +182,8 @@ def _bump_pr(pr: Path, extra: dict[str, bytes], email: str = RENOVATE) -> str:
     for name, data in extra.items():
         (pr / name).write_bytes(data)
     _git(pr, "add", ".")
-    _git(pr, "-c", f"user.email={email}", "commit", "-qm", "bump")
+    # as Renovate's API commit lands: the bot authors, GitHub (web-flow) commits
+    _git(pr, "-c", f"author.email={email}", "-c", f"committer.email={tier.WEB_FLOW}", "commit", "-qm", "bump")
     return base
 
 
@@ -196,6 +197,19 @@ def test_a_version_bump_pr_skips_the_model_and_says_so(pr: Path, monkeypatch: py
     assert _outputs(pr / "out") == {"required": "false"}
     assert "Review tier: skipped (version bump only, 1 lines)" in capsys.readouterr().out
     assert "ruff==0.8.0" in (pr / "summary").read_text()
+
+
+def test_an_amended_bot_commit_is_reviewed(pr: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # reviewer 11-11 round 4: `commit --amend` (and rebase, cherry-pick) keep the bot as AUTHOR;
+    # the committer is the person who edited it
+    monkeypatch.setenv("BASE_SHA", _bump_pr(pr, {}))
+    (pr / "requirements.txt").write_bytes(b"ruff==0.8.1" + bytes([10]))
+    _git(pr, "commit", "-qa", "--amend", "--no-edit")
+    assert _git(pr, "log", "-1", "--format=%ae %ce") == f"{RENOVATE} t@t"
+    monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
+    monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
+    assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
+    assert _outputs(pr / "out")["required"] == "true"
 
 
 @pytest.mark.parametrize(("author", "email", "head_repo", "hand_commit"), [

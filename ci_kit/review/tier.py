@@ -52,6 +52,9 @@ from ci_kit.review.bump import LOCKFILES, bump_only
 
 NOT_PROSE = (".claude/", "prompts/")
 BUMP_BOTS = {"renovate[bot]": "29139614+renovate[bot]@users.noreply.github.com"}
+# GitHub's committer for an API commit (Renovate's own, td#2955/#2951 checked 11-11). An amend,
+# rebase or cherry-pick on a workstation keeps the bot as AUTHOR but commits as the person.
+WEB_FLOW = "noreply@github.com"
 MODES = ("subscription", "api", "auto")
 CREDS = {"oauth": ("CLAUDE_CODE_OAUTH_TOKEN", "Claude Code CLI on the subscription"),
          "api_key": ("ANTHROPIC_API_KEY", "plain Messages API, billed per token")}
@@ -88,19 +91,24 @@ def _honest_merge(sha: str, parents: list[str]) -> bool:
 
 def bot_authored(author: str, head_repo: str, repo: str, mb: str, head: str) -> bool:
     """A same-repo PR a bump bot opened, every non-merge commit authored by that bot (`%ae`, which
-    a PR's .mailmap cannot remap), every merge an honest one. A rebase or an update-branch merge
+    a PR's .mailmap cannot remap) AND committed by GitHub or the bot (`%ce`: reviewer 11-11
+    round 4, an amend keeps the author), every merge an honest one. A rebase or an update-branch merge
     keeps that; a hand commit or an edited merge on the bot's branch does not. Never raises:
     anything it cannot read means review."""
     email = BUMP_BOTS.get(author)
     if not email or not repo or head_repo != repo:
         return False
     try:
-        rows = [r.split("\x1f") for r in _git("log", "--format=%H%x1f%P%x1f%ae", f"{mb}..{head}").splitlines()]
+        log = _git("log", "--format=%H%x1f%P%x1f%ae%x1f%ce", f"{mb}..{head}")
+        rows = [r.split("\x1f") for r in log.splitlines()]
         if not rows:
             return False
-        for sha, parents, who in rows:
+        for sha, parents, who, committer in rows:
             ps = parents.split()
-            if not (who == email if len(ps) == 1 else _honest_merge(sha, ps)):
+            if len(ps) == 1:
+                if who != email or committer not in (WEB_FLOW, email):
+                    return False
+            elif not _honest_merge(sha, ps):
                 return False
         return True
     except Exception as err:  # noqa: BLE001 -- e.g. a non-UTF-8 author: review, never red
