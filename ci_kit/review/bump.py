@@ -18,7 +18,7 @@ counts only where a dependency spec puts one:
     `fail_under = 85.0` -> `10.0` stays reviewed; never `@` (PEP 508 puts a URL there);
   * on a REF line only, after `@` or an image-tag colon glued to a name (`python:3.12.7`). A ref
     line is the WHOLE line `uses|image|container: <one value> [# comment]` (lower-case keys) or,
-    in a Dockerfile, `FROM [--platform=x] <one value> [AS name]` (case-sensitive): a `run:` line
+    in a Dockerfile, `FROM [--platform=x] <one value> [AS|as name]` (upper-case FROM): a `run:` line
     that merely mentions `docker://`, an `IMAGE:` env key, a Python `from` import never is
     (reviewer 11-11 #1). Elsewhere `u@10.0.0.5` is an address and `if: n >=1.5` a threshold. A
     token followed by `/` or `:` is a host, never a ref;
@@ -36,7 +36,7 @@ The caller still forces a review with its label.
 THIS IS THE SECOND LOCK, NOT THE FIRST. A diff alone cannot prove a new commit SHA or digest is the
 release it claims, nor that a lockfile riding along holds only that bump (reviewer 11-11 #2, #5).
 ci_kit.review.tier calls this only for a same-repo PR OPENED BY Renovate whose every non-merge
-commit Renovate authored; this check then catches a hand edit pushed onto that branch.
+commit Renovate authored and every merge is a clean, unedited one (tier.bot_authored).
 """
 from __future__ import annotations
 
@@ -46,8 +46,8 @@ LOCKFILES = frozenset({"uv.lock", "poetry.lock", "package-lock.json", "pnpm-lock
                        "Cargo.lock"})
 SPEC_NAMES = frozenset({"pyproject.toml", "package.json", "Cargo.toml", "go.mod"})
 MANIFEST_NAMES = SPEC_NAMES | {"action.yml", "action.yaml"}
-_MANIFEST_RE = re.compile(r"^(requirements|constraints)[\w.-]*\.(txt|in)$|^Dockerfile(\.[A-Za-z0-9-]+)?$|"
-                          r"^[\w-]+\.Dockerfile$|^(docker-)?compose[\w.-]*\.ya?ml$")
+_DOCKERFILE = re.compile(r"^Dockerfile([.-][A-Za-z0-9-]+)?$|^[\w-]+\.Dockerfile$")
+_MANIFEST_RE = re.compile(r"^(requirements|constraints)[\w.-]*\.(txt|in)$|^(docker-)?compose[\w.-]*\.ya?ml$")
 # atomic: with backtracking `10.0.0.5/` would match `10.0.0` and leave `.5/` to compare equal
 _VERSION = r"(?>v?[0-9]+(?:\.[0-9]+)+[-+.0-9A-Za-z]*)(?![/:])"
 _SHA = r"|(?P<sp>sha256:|@|(?<![\w-])rev\s*=\s*\")(?P<sha>[0-9a-f]{40}|[0-9a-f]{64})\b(?![/:])"
@@ -57,7 +57,7 @@ _GIT_TOKEN = re.compile(rf"(?P<vp>(?<![\w-])(?:tag|rev)\s*=\s*\"|{_COMMENT})(?P<
 _REF_TOKEN = re.compile(rf"(?P<vp>@|(?<=[\w./-]):|{_COMMENT})(?P<v>{_VERSION})" + _SHA)
 _COMMENT_TOKEN = re.compile(rf"(?P<vp>{_COMMENT})(?P<v>{_VERSION})")
 _REF_LINE = re.compile(r"^\s*(-\s*)?(uses|image|container):\s*([\"']?)[^\s\"'#]+\3(\s+#.*)?\s*$")
-_FROM_LINE = re.compile(r"^FROM\s+(--platform=\S+\s+)?[^\s#]+(\s+AS\s+[\w.-]+)?\s*$")
+_FROM_LINE = re.compile(r"^FROM\s+(--platform=\S+\s+)?[^\s#]+(\s+(AS|as)\s+[\w.-]+)?\s*$")
 _GIT_LINE = re.compile(r"(?<![\w-])git\s*=\s*\"")
 _JSON_PIN = re.compile(r'^(\s*"[@\w./-]+":\s*")([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?)("\s*,?\s*)$')
 _CAPS = ("!=", "<", "<=")   # a version after these is an exclusion or a ceiling: moving it is policy
@@ -67,7 +67,7 @@ _BAD_HEADER = ("new file mode", "deleted file mode", "old mode", "new mode", "Bi
 
 def is_manifest(path: str) -> bool:
     name = path.rsplit("/", 1)[-1]
-    if name in MANIFEST_NAMES or _MANIFEST_RE.match(name):
+    if name in MANIFEST_NAMES or _MANIFEST_RE.match(name) or _DOCKERFILE.match(name):
         return True
     return path.startswith(".github/workflows/") and name.endswith((".yml", ".yaml"))
 
@@ -76,8 +76,7 @@ def _pattern(line: str, path: str) -> re.Pattern[str]:
     name = path.rsplit("/", 1)[-1]
     if name in SPEC_NAMES or name.startswith(("requirements", "constraints")):
         return _GIT_TOKEN if _GIT_LINE.search(line) else _SPEC_TOKEN
-    ref = _FROM_LINE if name == "Dockerfile" or name.startswith("Dockerfile.") or name.endswith(".Dockerfile") \
-        else _REF_LINE
+    ref = _FROM_LINE if _DOCKERFILE.match(name) else _REF_LINE
     return _REF_TOKEN if ref.match(line) else _COMMENT_TOKEN
 
 

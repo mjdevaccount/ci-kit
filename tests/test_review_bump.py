@@ -71,6 +71,8 @@ WF = "jobs:" + NL + "  r:" + NL + "    uses: mjdevaccount/ci-kit/.github/workflo
     ({"pyproject.toml": '  "httpx>=0.27,<1.0",' + NL}, {"pyproject.toml": '  "httpx>=0.28,<1.0",' + NL}),
     # reviewer 11-11 #4: a trailing version comment on a non-ref line no longer raises IndexError
     ({"Dockerfile": "ENV X=1 # 1.0.0" + NL}, {"Dockerfile": "ENV X=1 # 1.0.1" + NL}),
+    # reviewer 11-11 round 3 #4: a lower-case stage alias and a `Dockerfile-<x>` name
+    ({"Dockerfile-dev": "FROM node:20.1.0 as build" + NL}, {"Dockerfile-dev": "FROM node:20.2.0 as build" + NL}),
 ])
 def test_renovate_shapes_are_bumps(tmp_path: Path, before: dict[str, str], after: dict[str, str]) -> None:
     got = _diff(tmp_path, before, after)

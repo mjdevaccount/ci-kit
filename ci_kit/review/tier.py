@@ -19,7 +19,8 @@ is NOT docs-only. Paths under a `--not-prose` prefix (default `.claude/` agent c
 
 VERSION BUMP ONLY is the second (2026-11-10, ci_kit/review/bump.py has the rule), for a PR OPENED
 BY a bump bot (BUMP_BOTS: the event's `pull_request.user.login`, which GitHub sets, not the diff)
-from this repository, whose every non-merge commit that bot authored. A diff cannot prove a SHA
+from this repository, whose every non-merge commit that bot authored and every merge is a clean,
+unedited merge (`git merge-tree --write-tree`). A diff cannot prove a SHA
 or a lockfile is what it claims, so the bot's identity is the first lock and the diff the second
 (reviewer 11-11 #2: any other author, the same shape is reviewed). Every changed
 line of every manifest differs from its pair only in a version token, so the model would read a
@@ -72,17 +73,39 @@ def _bumps(mb: str, head: str, changed: list[str]) -> list[str]:
         return []
 
 
+def _honest_merge(sha: str, parents: list[str]) -> bool:
+    """A two-parent merge whose tree is exactly what git merges its parents to, with no conflict:
+    an update-branch merge of main. An edit or a conflict resolution inside the merge is not
+    (reviewer 11-11 round 3 #1: `--no-merges` let a hand-made merge carry a SHA swap past)."""
+    if len(parents) != 2:
+        return False
+    try:   # exit 1 = conflicts -> CalledProcessError
+        merged = _git("merge-tree", "--write-tree", parents[0], parents[1]).split("\n", 1)[0].strip()
+    except subprocess.CalledProcessError:
+        return False
+    return merged == _git("rev-parse", f"{sha}^{{tree}}").strip()
+
+
 def bot_authored(author: str, head_repo: str, repo: str, mb: str, head: str) -> bool:
-    """A same-repo PR a bump bot opened, every non-merge commit authored by that bot. A rebase or
-    an update-branch merge keeps that; a hand commit pushed onto the bot's branch does not."""
+    """A same-repo PR a bump bot opened, every non-merge commit authored by that bot (`%ae`, which
+    a PR's .mailmap cannot remap), every merge an honest one. A rebase or an update-branch merge
+    keeps that; a hand commit or an edited merge on the bot's branch does not. Never raises:
+    anything it cannot read means review."""
     email = BUMP_BOTS.get(author)
     if not email or not repo or head_repo != repo:
         return False
     try:
-        authors = set(_git("log", "--no-merges", "--format=%ae", f"{mb}..{head}").split())
-    except (subprocess.CalledProcessError, OSError):
+        rows = [r.split("\x1f") for r in _git("log", "--format=%H%x1f%P%x1f%ae", f"{mb}..{head}").splitlines()]
+        if not rows:
+            return False
+        for sha, parents, who in rows:
+            ps = parents.split()
+            if not (who == email if len(ps) == 1 else _honest_merge(sha, ps)):
+                return False
+        return True
+    except Exception as err:  # noqa: BLE001 -- e.g. a non-UTF-8 author: review, never red
+        print(f"::warning::bump-bot check could not read the commits ({type(err).__name__}): reviewing")
         return False
-    return authors == {email}
 
 
 def docs_only(changed: list[str], not_prose: tuple[str, ...] = NOT_PROSE) -> bool:

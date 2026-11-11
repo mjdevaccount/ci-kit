@@ -219,6 +219,33 @@ def test_only_the_bump_bots_own_pr_skips(pr: Path, monkeypatch: pytest.MonkeyPat
     assert _outputs(pr / "out")["required"] == "true"
 
 
+@pytest.mark.parametrize(("edit", "required"), [
+    (None, "false"),                 # update-branch: main merged in clean, untouched -- still skips
+    (b"ruff==0.8.1", "true"),        # the same merge carrying an edit (reviewer 11-11 round 3 #1)
+])
+def test_a_merge_on_the_bots_branch_must_be_an_honest_one(pr: Path, monkeypatch: pytest.MonkeyPatch,
+                                                         edit: bytes | None, required: str) -> None:
+    base = _bump_pr(pr, {})
+    bot_head = _git(pr, "rev-parse", "HEAD")
+    _git(pr, "checkout", "-q", "-B", "main", base)          # main moves on with an unrelated commit
+    (pr / "notes.md").write_text("n" + chr(10))
+    _git(pr, "add", "notes.md")
+    _git(pr, "commit", "-qm", "main moves")
+    main_tip = _git(pr, "rev-parse", "HEAD")
+    _git(pr, "checkout", "-q", "-B", "pr", bot_head)
+    _git(pr, "merge", "-q", "--no-ff", "--no-commit", "main")
+    if edit:
+        (pr / "requirements.txt").write_bytes(edit + bytes([10]))
+        _git(pr, "add", "requirements.txt")
+    _git(pr, "-c", "user.email=someone@x", "commit", "-qm", "merge main")
+    monkeypatch.setenv("BASE_SHA", main_tip)
+    monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
+    monkeypatch.setenv("GUARD", "true")
+    monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
+    assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
+    assert _outputs(pr / "out")["required"] == required
+
+
 def test_a_non_utf8_file_is_reviewed_never_red(pr: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # reviewer 11-10 #2: the -U0 read must not turn a Latin-1 file into exit 2 the label cannot fix
     monkeypatch.setenv("BASE_SHA", _bump_pr(pr, {"x.csv": b"caf" + bytes([0xE9]) + bytes([10])}))
