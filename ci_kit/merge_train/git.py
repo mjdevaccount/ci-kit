@@ -12,9 +12,22 @@ single-parent, in one chain, carry exactly one PR + head trailer, name each PR o
 must be BYTE-EQUAL to that same merge recomputed here from the named head. The tree is the only
 thing that lands, so a commit that passes carries the reviewed head's change and nothing else --
 whatever its message or author claims. Anything else is a problem the gate names and fails on.
+
+THE REVIEWED DIFF IS THE LANDED DIFF (session review of ci-kit#70, findings 1-2). Two more things
+must hold for a commit to count, at compose (the rider is SKIPPED, back to its own lane) and again
+at verify (a problem):
+  * BASE-BOUND: the review ran against a base whose merge base with the head is the train root's
+    merge base with the head (review_base_ok). A PR reviewed on top of an unreviewed branch and
+    retargeted to main would otherwise land that branch's content with no review.
+  * CONTEXT KEPT: the commit's own diff (from the commit before it), normalised the way the review
+    gate's carry hashes it -- context lines KEPT -- equals the diff the review read (merge base ->
+    head). If main or an earlier rider changed the lines around a hunk, the reviewer never saw
+    them: that is the semantic-conflict shape ci_kit/review/carry.py re-reviews, so the rider goes
+    the normal update + carry path instead of riding.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -23,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ci_kit.merge_train import TRAILER_HEAD, TRAILER_PR
+from ci_kit.review.carry import normalise
 
 MAX_COMMITS = 50  # a train is <= max-batch commits; more is not a train
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -40,6 +54,7 @@ class Rider:
     head: str
     title: str = ""
     body: str = ""
+    base: str = ""  # the base sha its passing review ran against (github.review_passed)
 
 
 @dataclass(frozen=True)
@@ -74,6 +89,41 @@ def apply_onto(cwd: Path | str, onto: str, head: str, root: str) -> str | None:
     if r.returncode:
         raise subprocess.CalledProcessError(r.returncode, "git merge-tree", r.stdout, r.stderr)
     return r.stdout.split("\n", 1)[0].strip()
+
+
+def own_diff(cwd: Path | str, a: str, b: str) -> str:
+    """Hash of `git diff a b` normalised like the review gate's carry (blob ids and hunk line
+    numbers dropped, CONTEXT KEPT); a and b may be commits or trees."""
+    raw = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "diff", "--no-color", "--no-ext-diff",
+                          "--binary", "-U3", a, b], cwd=cwd, check=True, capture_output=True).stdout
+    return hashlib.sha256(normalise(raw)).hexdigest() if raw.strip() else "empty"
+
+
+def ensure_commit(cwd: Path | str, sha: str) -> bool:
+    """Have `sha` locally, fetching it by id if needed (GitHub serves any reachable commit)."""
+    if not has_commit(cwd, sha):
+        git(cwd, "fetch", "-q", "--no-tags", "origin", sha, check=False)
+    return has_commit(cwd, sha)
+
+
+def review_base_ok(cwd: Path | str, root: str, head: str, reviewed_base: str) -> str:
+    """'' when the review that passed at `head` read the same diff the train lands on `root`: the
+    merge base of the reviewed base and the head equals the root's. Else why not."""
+    if not reviewed_base:
+        return "its passing review names no base"
+    if not ensure_commit(cwd, reviewed_base):
+        return f"the reviewed base {reviewed_base[:12]} could not be fetched"
+    seen = out(cwd, "merge-base", reviewed_base, head)
+    lands = out(cwd, "merge-base", root, head)
+    if seen != lands:
+        return (f"reviewed on {reviewed_base[:12]} (merge base {seen[:12]}), but on main its change is "
+                f"since {lands[:12]}: the train would land content the review never read")
+    return ""
+
+
+def context_kept(cwd: Path | str, onto: str, tree: str, root: str, head: str) -> bool:
+    """The rider's diff as it lands (onto -> tree) is byte-for-byte the diff its review read."""
+    return own_diff(cwd, onto, tree) == own_diff(cwd, out(cwd, "merge-base", root, head), head)
 
 
 def message(cwd: Path | str, sha: str) -> str:
@@ -149,6 +199,10 @@ def compose(cwd: Path | str, root: str, riders: list[Rider], committer: Identity
         if tree == out(cwd, "rev-parse", f"{tip}^{{tree}}"):
             skipped.append((r, "its change is already on main (an empty squash)"))
             continue
+        if not context_kept(cwd, tip, tree, root, r.head):
+            skipped.append((r, "the lines around its change moved since its review (main or a PR ahead of it "
+                               "in this train): it needs its own update and review, not a train"))
+            continue
         msg = squash_message(r, co_authors(cwd, root, r.head))
         tip = _commit(cwd, tree, tip, msg, author_of(cwd, r.head), committer)
         included.append((r, tip))
@@ -167,10 +221,11 @@ def riders_of(cwd: Path | str, root: str, head: str) -> list[tuple[int, str, str
 
 
 def verify(cwd: Path | str, base: str, head: str, ensure: Callable[[int, str], None],
-           reviewed: Callable[[int, str], tuple[bool, str]]) -> tuple[list[tuple[int, str, str]], list[str]]:
+           reviewed: Callable[[int, str], tuple]) -> tuple[list[tuple[int, str, str]], list[str]]:
     """([(pr, head, train commit)], problems). An empty problem list = every commit is its PR's
     reviewed head and nothing else. `ensure(pr, head)` fetches a head (raises if it cannot);
-    `reviewed(pr, head)` = (passed, why) from the caller's review gate at that exact head.
+    `reviewed(pr, head)` = (passed, why, reviewed base sha) from the caller's review gate at that
+    exact head (github.review_passed); a verdict naming no base is not a pass.
     Raises Invalid when the branch is not a chain of commits on main at all."""
     root = out(cwd, "merge-base", base, head)
     rows = [line.split() for line in out(cwd, "rev-list", "--reverse", "--parents", f"{root}..{head}").splitlines()]
@@ -204,12 +259,16 @@ def verify(cwd: Path | str, base: str, head: str, ensure: Callable[[int, str], N
             problems.append(f"{sha[:12]}: #{pr} at {h[:12]} does not apply cleanly onto {prev[:12]}")
         elif tree != out(cwd, "rev-parse", f"{sha}^{{tree}}"):
             problems.append(f"{sha[:12]}: its content is NOT #{pr} at {h[:12]} applied onto {prev[:12]}")
+        elif not context_kept(cwd, prev, sha, root, h):
+            problems.append(f"{sha[:12]}: #{pr} at {h[:12]} lands with different context than its review read")
         else:
-            ok, why = reviewed(pr, h)
-            if ok:
+            got = tuple(reviewed(pr, h)) + ("", "", "")
+            ok, why, rbase = bool(got[0]), str(got[1]), str(got[2])
+            bad = review_base_ok(cwd, root, h, rbase) if ok else why
+            if not bad:
                 constituents.append((pr, h, sha))
             else:
-                problems.append(f"{sha[:12]}: #{pr} at {h[:12]}: {why}")
+                problems.append(f"{sha[:12]}: #{pr} at {h[:12]}: {bad}")
         prev = sha
     return constituents, problems
 

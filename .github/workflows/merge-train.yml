@@ -35,7 +35,11 @@
 # rebase so main keeps one commit per PR); the review gate at a ci-kit with the train path
 # (v1.25.0+), or every train is red at its review gate; pr-autoupdate at v1.25.0+ (it skips
 # riding PRs and holds updates while a train is open). A train never force-pushes and never
-# bypasses protection: GitHub merges the train PR on its required checks like any other.
+# bypasses protection: it is NOT armed; this pass merges it (rebase, --match-head-commit) only
+# when its required checks are green AND every rider re-verifies at land time (open, armed, not a
+# draft, no autoland-off, head unchanged, review still passing on this base), and GitHub still
+# enforces protection on that merge. This pass only ever acts on a train PR it composed (the
+# composition record in the PR body, checked against this workflow's own run).
 #
 # THE TOKEN MUST NOT BE GITHUB_TOKEN: a push or PR made with it fires no workflow, so the train's
 # checks would never start. Unconfigured is RED. The PAT needs contents, pull requests and
@@ -47,10 +51,12 @@
 #
 # TELEMETRY: every pass writes its summary (the run is the append-only record) and every train is
 # a PR whose body and comments name what rode, what was skipped and how it ended. A pass that
-# failed something is a RED run (exit 1; 2 = could not look). From OUTSIDE, mcp
-# scripts/train_watch.py (via pr_reconcile.py) names a train open past 90 min, a train merged and
-# never finalized, a constituent closed as landed whose commit is not on main, and a stray
-# `in-train` label; mcp scripts/ci-schedule-audit.py watches the cron.
+# failed something is a RED run (exit 1; 2 = could not look): a stuck train, a retry on
+# machinery, a rider ejected or held for repeated releases, a green train GitHub would not merge,
+# a `train/` PR this workflow did not compose. From OUTSIDE, mcp scripts/train_watch.py (via
+# pr_reconcile.py) names a RIDER in trains at one head for hours (its `rode` markers, across
+# trains), a train merged and never finalized, a constituent closed as landed whose commit is not
+# on main, and a stray `in-train` label; mcp scripts/ci-schedule-audit.py watches the cron.
 name: merge-train
 
 on:

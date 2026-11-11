@@ -23,8 +23,21 @@ newer floor(n/2); a red train of 2 or 3 ejects all. An ejected PR is labelled `t
 lands through its own auto-merge (pr_autoupdate tests it alone against main), so the culprit
 meets its own red check and every innocent one lands without a train. At most ~log2(n) trains
 for one bad PR, and no train is ever retried with the same members.
+
+NOT EVERY RED IS EVIDENCE (ci-kit#70 finding 6). A red that only says the MACHINERY failed -- a
+check that never started (STARTUP_FAILURE, a status ERROR), or the train's review gate reporting
+BLIND, or blocking a train the composer's own pre-check passed -- says nothing about any PR. Its
+riders are RELEASED (`why=retry`), never ejected, and recomposed; a rider retried RETRY_LIMIT times
+at the same head is HELD out of trains (not labelled: a new head re-admits it) and the run is red.
+
+NO INFINITE RECOMPOSE (finding 3). A rider released from a stale or stuck train RECOMPOSE_LIMIT
+times at the same head is EJECTED (labelled, with the reason): something about it keeps a train
+from finishing, and its own lane will say what. The count lives in the rider's own comments
+(`released` markers), so it survives across runs and trains.
 """
 from __future__ import annotations
+
+import re
 
 from ci_kit.merge_train import EJECTED, OPT_OUT, RIDING, TRAIN_PREFIX
 
@@ -32,6 +45,12 @@ PASS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 # CANCELLED / STALE are NOT failures: a cancelled check is no evidence against any PR, so it
 # never ejects one. It stays pending, and a train pending past stale_minutes is recomposed.
 FAIL = {"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
+INFRA = {"STARTUP_FAILURE"}  # the check never ran its steps: no evidence against the code
+RECOMPOSE_LIMIT = 2
+RETRY_LIMIT = 2
+RODE = "<!-- merge-train:rode train={train} head={head} -->"
+RELEASED = "<!-- merge-train:released train={train} head={head} why={why} -->"
+_RELEASED = re.compile(r"<!-- merge-train:released train=(\d+) head=([0-9a-f]{40}) why=([a-z-]+) -->")
 
 
 def labels(pr: dict) -> set[str]:
@@ -72,6 +91,40 @@ def checks(rollup: list[dict] | None, required: tuple[str, ...]) -> tuple[str, l
     if waiting or not wanted:
         return "pending", waiting or ["(no checks reported)"]
     return "green", []
+
+
+def red_is_infra(rollup: list[dict] | None, required: tuple[str, ...]) -> bool:
+    """Every failing required check failed as MACHINERY (never started), none as a verdict."""
+    bad = []
+    for c in rollup or []:
+        name = c.get("name") or c.get("context") or ""
+        if required and name not in required:
+            continue
+        if c.get("__typename") == "StatusContext" or ("state" in c and "status" not in c):
+            state = (c.get("state") or "").upper()
+            if state in ("FAILURE", "ERROR"):
+                bad.append("infra" if state == "ERROR" else "verdict")
+        elif (c.get("status") or "").upper() == "COMPLETED" and (c.get("conclusion") or "").upper() in FAIL:
+            bad.append("infra" if (c.get("conclusion") or "").upper() in INFRA else "verdict")
+    return bool(bad) and all(b == "infra" for b in bad)
+
+
+def released(bodies: list[str], head: str, whys: set[str]) -> int:
+    """How many times this rider was released from a train AT `head` for one of `whys`."""
+    return sum(1 for b in bodies for m in _RELEASED.finditer(b) if m.group(2) == head and m.group(3) in whys)
+
+
+def rider_gate(bodies: list[str], head: str) -> tuple[str, str]:
+    """('ride' | 'eject' | 'hold', why) for a candidate at `head`, from its own comments."""
+    n = released(bodies, head, {"stale", "stuck"})
+    if n >= RECOMPOSE_LIMIT:
+        return "eject", (f"released from {n} stale/stuck trains at this head without landing: it lands on its "
+                         "own auto-merge now, where its own checks say what keeps a train from finishing")
+    r = released(bodies, head, {"retry"})
+    if r >= RETRY_LIMIT:
+        return "hold", (f"{r} trains at this head failed on machinery (a BLIND or blocked review gate, a check "
+                        "that never started): held out of trains until its head changes")
+    return "ride", ""
 
 
 def why_not(pr: dict, required: tuple[str, ...], base: str = "main") -> str:

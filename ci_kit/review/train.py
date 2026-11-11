@@ -8,10 +8,18 @@ for N reviews again and judge a diff nobody wrote; skipping review would land wh
   * every commit names exactly one PR and one head sha (its trailers), each PR once;
   * every commit's tree is BYTE-EQUAL to that head's own change three-way merged onto the commit
     before it -- recomputed here, so the commit can carry nothing but the reviewed change;
-  * that PR is open, same-repository, and the caller's review gate PASSED at that exact head
-    (ci_kit/merge_train/github.review_passed: the newest completed gate run at that sha, for that
-    PR, concluded success -- a model SHIP / SHIP WITH NOTED RISK, a carried verdict, or a
-    docs-only / version-bump skip).
+  * every commit's own diff keeps the context its review read (git.context_kept): a rider whose
+    surrounding lines main or an earlier rider changed is not the diff anyone reviewed;
+  * that PR is open, same-repository, based on THIS base, and the caller's review gate PASSED at
+    that exact head against this base (ci_kit/merge_train/github.review_passed: the newest
+    completed gate run at that sha, naming that PR on this base branch, concluded success -- a
+    model SHIP / SHIP WITH NOTED RISK, a carried verdict, or a docs-only / version-bump skip),
+    and the base sha that run reviewed has the same merge base with the head as the train's root
+    (git.review_base_ok) -- so a PR reviewed on top of an unreviewed branch cannot land it;
+  * the PR itself is a train the caller's merge-train workflow COMPOSED: its body's composition
+    record names a run of that workflow (input `train-workflow`) in this repository, that opened
+    this PR, as this PR's author, on this branch (github.composed). A hand-made `train/` PR whose
+    commits happen to verify is still blocked.
 All hold -> pass, no model call. Any one fails -> BLOCK, every problem named in the comment.
 Could not finish looking (git or gh failed, an old git without `merge-tree --merge-base`) ->
 BLIND. Both are red. The keying is the branch prefix alone, so ANY PR on a `train/` branch takes
@@ -44,13 +52,17 @@ def _ensure(pr: int, head: str) -> None:
         raise ValueError("not on the remote")
 
 
-def judge(repo: str, head_repo: str, base: str, head: str, workflow: str) -> tuple[str, list[tuple[int, str, str]], list[str]]:
-    """(result, constituents, problems)."""
+def judge(repo: str, head_repo: str, base: str, head: str, workflow: str, *, number: int, base_ref: str,
+          train_workflow: str = "merge-train.yml") -> tuple[str, list[tuple[int, str, str]], list[str]]:
+    """(result, constituents, problems) for train PR `number` (head `head`) on `base_ref` at `base`."""
     if head_repo != repo:
         return "block", [], [f"the head is a fork ({head_repo}); a train is only ever this repository's branch"]
     try:
+        why = github.composed(repo, github.pull(repo, number), train_workflow)
+        if why:
+            return "block", [], [f"not a train the merge-train workflow composed: {why}"]
         cons, problems = tgit.verify(".", base, head, _ensure,
-                                     lambda pr, h: github.review_passed(repo, workflow, pr, h))
+                                     lambda pr, h: github.review_passed(repo, workflow, pr, h, base_ref))
     except tgit.Invalid as e:
         return "block", [], [str(e)]
     except (subprocess.CalledProcessError, OSError, ValueError) as e:
@@ -85,7 +97,8 @@ def main(argv: list[str] | None = None) -> int:
     e = os.environ
     wf = e.get("WORKFLOW_REF", "").split("@", 1)[0].rsplit("/", 1)[-1] or "review-gate.yml"
     result, cons, problems = judge(e.get("GITHUB_REPOSITORY", ""), e.get("HEAD_REPO", ""),
-                                   e["BASE_SHA"], e["HEAD_SHA"], wf)
+                                   e["BASE_SHA"], e["HEAD_SHA"], wf, number=int(e["PR_NUMBER"]),
+                                   base_ref=e["BASE_REF"], train_workflow=e.get("TRAIN_WORKFLOW") or "merge-train.yml")
     with open(a.body_out, "w", encoding="utf-8") as fh:
         fh.write(body(result, cons, problems, e.get("GATE", "ci-kit")))
     titles = {"pass": f"review gate passed: merge train of {len(cons)} verified",
