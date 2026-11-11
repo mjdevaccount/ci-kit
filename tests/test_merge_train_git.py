@@ -188,20 +188,45 @@ def _stacked(repo: Repo) -> tuple[str, str]:
     return feat, repo.pr(7, {"b.txt": edit(1, "harmless")}, base=feat)
 
 
-def test_a_stacked_pr_cannot_land_its_unreviewed_parent_must_fire(repo: Repo) -> None:
+def _live_run(h: str, main: str, created: str = "2026-11-11T20:00:00Z") -> dict:
+    """The review run of #7 AS GITHUB RETURNS IT after a retarget: `pull_requests` carries the PR's
+    CURRENT base (main), not the `feat` the run reviewed (live: trade-data runs 43105767267 and
+    43090069877 report base/head state from after they ran)."""
+    return {"id": 1, "head_sha": h, "event": "pull_request", "status": "completed", "conclusion": "success",
+            "created_at": created,
+            "pull_requests": [{"number": 7, "head": {"sha": h, "ref": "pr7"}, "base": {"ref": "main", "sha": main}}]}
+
+
+def test_a_retargeted_pr_cannot_land_its_unreviewed_parent_must_fire(repo: Repo) -> None:
+    # the reviewer's probe2 (round 2, finding 1), as a must-fire test: reviewed on `feat`, retargeted
     feat, h7 = _stacked(repo)
-    # its review read feat..h7 (one line); on main, its change would be main..h7 (evil.sh too)
-    assert "the train would land content the review never read" in tgit.review_base_ok(repo.work, repo.main, h7, feat)
-    tip, included, _ = tgit.compose(repo.work, repo.main, [tgit.Rider(7, h7, base=feat)], BOT)
-    assert len(included) == 1    # compose itself does not know the base; the caller's pre-check does
-    _, problems = tgit.verify(repo.work, repo.main, tip, _nofetch, lambda pr, h: (True, "passed", feat))
-    assert len(problems) == 1 and "content the review never read" in problems[0]
-    # a verdict naming no base is not a pass
-    _, problems = tgit.verify(repo.work, repo.main, tip, _nofetch, lambda pr, h: (True, "passed"))
-    assert len(problems) == 1 and "names no base" in problems[0]
-    # the other direction: the same PR reviewed against main passes
-    h8 = repo.pr(8, {"b.txt": edit(1, "harmless")})
-    assert tgit.review_base_ok(repo.work, repo.main, h8, repo.main) == ""
+    run = _live_run(h7, repo.main)
+    tip, included, _ = tgit.compose(repo.work, repo.main, [tgit.Rider(7, h7)], BOT)
+    assert len(included) == 1 and "evil.sh" in git(repo.work, "diff", "--name-only", repo.main, tip).split()
+    # the timeline says the base changed after that run: no pass, so the commit is a problem
+    _, problems = tgit.verify(repo.work, repo.main, tip, _nofetch,
+                              lambda pr, h: gate.github.verdict([run], pr, h, retargeted="2026-11-11T20:05:00Z"))
+    assert len(problems) == 1 and "#7" in problems[0] and "base branch was changed" in problems[0]
+    # the other direction: a run created after the retarget reviewed main...h7 (evil.sh included)
+    later = _live_run(h7, repo.main, created="2026-11-11T20:06:00Z")
+    _, problems = tgit.verify(repo.work, repo.main, tip, _nofetch,
+                              lambda pr, h: gate.github.verdict([run, later], pr, h, retargeted="2026-11-11T20:05:00Z"))
+    assert problems == []
+
+
+def test_the_gate_is_blind_when_the_timeline_cannot_be_read(repo: Repo, monkeypatch: pytest.MonkeyPatch) -> None:
+    tip, _ = _train(repo)
+    monkeypatch.setattr(gate.github, "composed", lambda *a: "")
+    monkeypatch.setattr(gate.github, "pull", lambda *a: {"state": "open", "base": {"ref": "main"},
+                                                          "head": {"repo": {"full_name": "o/r"}}})
+    monkeypatch.setattr(gate.github, "runs_at", lambda *a: [])
+
+    def no_timeline(*a):
+        raise ValueError("#1: GitHub returned no base-change timeline")
+    monkeypatch.setattr(gate.github, "retargeted_at", no_timeline)
+    monkeypatch.chdir(repo.work)
+    result, _, problems = gate.judge("o/r", "o/r", repo.main, tip, "review-gate.yml", number=9, base_ref="main")
+    assert result == "blind" and "no base-change timeline" in problems[0]
 
 
 def test_a_rider_whose_context_an_earlier_rider_moved_is_skipped_must_fire(repo: Repo) -> None:

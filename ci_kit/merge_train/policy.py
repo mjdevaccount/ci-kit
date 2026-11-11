@@ -30,10 +30,14 @@ BLIND, or blocking a train the composer's own pre-check passed -- says nothing a
 riders are RELEASED (`why=retry`), never ejected, and recomposed; a rider retried RETRY_LIMIT times
 at the same head is HELD out of trains (not labelled: a new head re-admits it) and the run is red.
 
-NO INFINITE RECOMPOSE (finding 3). A rider released from a stale or stuck train RECOMPOSE_LIMIT
-times at the same head is EJECTED (labelled, with the reason): something about it keeps a train
-from finishing, and its own lane will say what. The count lives in the rider's own comments
-(`released` markers), so it survives across runs and trains.
+NO INFINITE RECOMPOSE (finding 3). A rider released from a STUCK train (checks never finished)
+RECOMPOSE_LIMIT times at the same head is HELD out of trains until its head changes, and the run
+is red: something keeps a train it rides from finishing. A STALE release is NOT counted (round 2):
+stale only says main moved -- a PR landing on its own (an ejected one, a Renovate bump) -- which
+is no fault of any rider; counting it ejected whole trains on a busy main. A rider recomposed
+forever by stale trains is the OUTSIDE watcher's: mcp train_watch times a rider across trains
+(`rode` markers). Nothing here is sticky: hold re-admits on a new head. The counts live in the
+rider's own comments (`released` markers), so they survive across runs and trains.
 """
 from __future__ import annotations
 
@@ -115,11 +119,11 @@ def released(bodies: list[str], head: str, whys: set[str]) -> int:
 
 
 def rider_gate(bodies: list[str], head: str) -> tuple[str, str]:
-    """('ride' | 'eject' | 'hold', why) for a candidate at `head`, from its own comments."""
-    n = released(bodies, head, {"stale", "stuck"})
+    """('ride' | 'hold', why) for a candidate at `head`, from its own comments."""
+    n = released(bodies, head, {"stuck"})
     if n >= RECOMPOSE_LIMIT:
-        return "eject", (f"released from {n} stale/stuck trains at this head without landing: it lands on its "
-                         "own auto-merge now, where its own checks say what keeps a train from finishing")
+        return "hold", (f"released from {n} STUCK trains at this head (checks never finished): held out of "
+                        "trains until its head changes; its own lane's checks say what never reports")
     r = released(bodies, head, {"retry"})
     if r >= RETRY_LIMIT:
         return "hold", (f"{r} trains at this head failed on machinery (a BLIND or blocked review gate, a check "

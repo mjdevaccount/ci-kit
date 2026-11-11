@@ -12,10 +12,12 @@ for N reviews again and judge a diff nobody wrote; skipping review would land wh
     surrounding lines main or an earlier rider changed is not the diff anyone reviewed;
   * that PR is open, same-repository, based on THIS base, and the caller's review gate PASSED at
     that exact head against this base (ci_kit/merge_train/github.review_passed: the newest
-    completed gate run at that sha, naming that PR on this base branch, concluded success -- a
-    model SHIP / SHIP WITH NOTED RISK, a carried verdict, or a docs-only / version-bump skip),
-    and the base sha that run reviewed has the same merge base with the head as the train's root
-    (git.review_base_ok) -- so a PR reviewed on top of an unreviewed branch cannot land it;
+    completed gate run at that sha naming that PR concluded success -- a model SHIP / SHIP WITH
+    NOTED RISK, a carried verdict, or a docs-only / version-bump skip), and that run was CREATED
+    AFTER the PR's last base change (its timeline's BaseRefChangedEvent; a run's own
+    `pull_requests` base is the PR's CURRENT base, so it cannot say) -- so a PR reviewed on top of
+    an unreviewed branch and retargeted cannot land that branch; a timeline GitHub will not
+    answer is BLIND;
   * the PR itself is a train the caller's merge-train workflow COMPOSED: its body's composition
     record names a run of that workflow (input `train-workflow`) in this repository, that opened
     this PR, as this PR's author, on this branch (github.composed). A hand-made `train/` PR whose

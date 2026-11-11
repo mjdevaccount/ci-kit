@@ -52,7 +52,7 @@
 # TELEMETRY: every pass writes its summary (the run is the append-only record) and every train is
 # a PR whose body and comments name what rode, what was skipped and how it ended. A pass that
 # failed something is a RED run (exit 1; 2 = could not look): a stuck train, a retry on
-# machinery, a rider ejected or held for repeated releases, a green train GitHub would not merge,
+# machinery, a rider held for repeated stuck or machinery releases, a green train GitHub would not merge,
 # a `train/` PR this workflow did not compose. From OUTSIDE, mcp scripts/train_watch.py (via
 # pr_reconcile.py) names a RIDER in trains at one head for hours (its `rode` markers, across
 # trains), a train merged and never finalized, a constituent closed as landed whose commit is not

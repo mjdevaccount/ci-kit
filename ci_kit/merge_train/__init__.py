@@ -31,6 +31,7 @@ TRAIN_LABEL = "merge-train"      # on every train PR
 RIDING = "in-train"              # on a constituent while its train is open: pr_autoupdate skips it
 LANDED = "landed-via-train"      # a constituent closed because its commit landed; also a finalized train PR
 EJECTED = "train-ejected"        # out of trains for good: back to its own auto-merge
+NEEDS_UPDATE = "train-needs-update"  # skipped: its context moved since review; pr-autoupdate updates it anyway
 OPT_OUT = "autoland-off"         # a label or a title tag: never in a train (as never armed)
 TRAILER_PR = "Merge-Train-PR"
 TRAILER_HEAD = "Merge-Train-Head"
@@ -41,4 +42,5 @@ LABELS = {
     RIDING: ("c5def5", "merge-train: riding an open train; pr-autoupdate skips it"),
     LANDED: ("0e8a16", "merge-train: landed as its own commit via a train"),
     EJECTED: ("d93f0b", "merge-train: ejected from a red train; lands on its own auto-merge"),
+    NEEDS_UPDATE: ("fbca04", "merge-train: skipped, the lines around its change moved; updated even while a train is open"),
 }

@@ -266,3 +266,11 @@ def test_an_ejected_pr_is_updated_while_a_train_is_open() -> None:
     q = upd._train_plan(prs, prs, [], Options())
     assert [p["number"] for p in q.update] == [2]
     assert [p["number"] for p, _ in q.held] == [1]
+
+
+def test_a_pr_a_train_skipped_for_moved_context_is_updated_while_a_train_is_open() -> None:
+    # it needs its own update + review before any train takes it (ci-kit#70 round 2, finding 3)
+    prs = [_armed(50, head="train/9"), _armed(1), _armed(3, labels=("train-needs-update",))]
+    q = upd._train_plan(prs, prs, [], Options())
+    assert [p["number"] for p in q.update] == [3]
+    assert [p["number"] for p, _ in q.held] == [1]

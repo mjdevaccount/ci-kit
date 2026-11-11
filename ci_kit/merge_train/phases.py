@@ -11,7 +11,7 @@ checks went green, with no look at whether its riders still want to land. When t
 the CLI re-verifies every rider AT LAND TIME -- still open, still armed, not a draft, no
 `autoland-off`, head == the head that rode, its review still passing at that head on this base --
 and only then merges it (`--rebase --match-head-commit`). A rider that fails is ejected with the
-reason and the train closed; the rest recompose. A green train GitHub refuses to merge (a ruleset
+reason (one whose head moved is only released) and the train closed; the rest recompose. A green train GitHub refuses to merge (a ruleset
 hold, a required check this caller did not list) is an ERROR, not a warning: nothing lands until
 someone looks.
 """
@@ -19,7 +19,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ci_kit.merge_train import COMMENT_MARK, LABELS, LANDED, OPT_OUT, RIDING, TRAIN_LABEL, TRAIN_PREFIX, github, policy
+from ci_kit.merge_train import (
+    COMMENT_MARK,
+    LABELS,
+    LANDED,
+    NEEDS_UPDATE,
+    OPT_OUT,
+    RIDING,
+    TRAIN_LABEL,
+    TRAIN_PREFIX,
+    github,
+    policy,
+)
 from ci_kit.merge_train import git as tgit
 from ci_kit.merge_train.ops import (
     Opts,
@@ -137,47 +148,53 @@ def _release(o: Opts, p: Pass, m: int, rode: list[tuple[int, str, str]], why: st
         label(o, p, n, remove=RIDING)
 
 
-def recheck(o: Opts, d: Path, n: int, h: str, root: str) -> str:
-    """'' when rider #n may still land at `h` on `root`, else why not (LANDING, above)."""
+def recheck(o: Opts, n: int, h: str) -> tuple[str, str]:
+    """('', '') when rider #n may still land at `h`, else ('release' | 'eject', why) (LANDING, above).
+    A moved head is RELEASED, not ejected: the new head is simply not what rode, and a new head is
+    what re-admits a PR anyway (round 2, finding 4). Raises when GitHub cannot answer."""
     pr = github.pull(o.repo, n)
     cur = str((pr.get("head") or {}).get("sha") or "")
     title = str(pr.get("title") or "").lower()
     names = {str(lb.get("name")) for lb in pr.get("labels") or []}
     if pr.get("state") != "open":
-        return f"it is {pr.get('state')}"
+        return "eject", f"it is {pr.get('state')}"
     if pr.get("draft"):
-        return "it was turned back into a draft"
+        return "eject", "it was turned back into a draft"
     if not pr.get("auto_merge"):
-        return "its auto-merge was disarmed"
+        return "eject", "its auto-merge was disarmed"
     if OPT_OUT in names or OPT_OUT in title:
-        return f"it opted out (`{OPT_OUT}`)"
+        return "eject", f"it opted out (`{OPT_OUT}`)"
     if cur != h:
-        return f"its head moved to {cur[:12]} after it boarded at {h[:12]}"
+        return "release", f"its head moved to {cur[:12]} after it boarded at {h[:12]}"
     if o.review_workflow:
-        ok, why, rbase = github.review_passed(o.repo, o.review_workflow, n, h, o.base, pr)
+        ok, why, _ = github.review_passed(o.repo, o.review_workflow, n, h, o.base, pr)
         if not ok:
-            return f"its review no longer passes at {h[:12]}: {why}"
-        return tgit.review_base_ok(d, root, h, rbase)
-    return ""
+            return "eject", f"its review no longer passes at {h[:12]}: {why}"
+    return "", ""
 
 
-def land(o: Opts, p: Pass, d: Path, train: dict, rode: list[tuple[int, str, str]], root: str
-         ) -> tuple[bool, set[int], frozenset[int]]:
+def land(o: Opts, p: Pass, train: dict, rode: list[tuple[int, str, str]]) -> tuple[bool, set[int], frozenset[int]]:
     m, head = int(train["number"]), str(train["headRefOid"])
-    bad = [(n, h, why) for n, h, _ in rode if (why := recheck(o, d, n, h, root))]
+    bad = [(n, h, *got) for n, h, _ in rode if (got := recheck(o, n, h))[0]]
     if bad:
-        for n, h, why in bad:
-            eject(o, p, n, h, f"at land time merge train #{m} re-checked it and {why}")
-        out = {n for n, _, _ in bad}
+        for n, h, act, why in bad:
+            if act == "eject":
+                eject(o, p, n, h, f"at land time merge train #{m} re-checked it and {why}")
+            else:
+                comment(o, p, n, f"Released from merge train #{m} at land time: {why}. Its new head rides a later "
+                                 f"train once its checks pass.\n{policy.RELEASED.format(train=m, head=h, why='moved')}")
+                label(o, p, n, remove=RIDING)
+        out = {n for n, *_ in bad}
         for n, _, _ in rode:
             if n not in out:
                 comment(o, p, n, f"Merge train #{m} was green but did not land: "
                                  f"{', '.join(f'#{x}' for x in sorted(out))} failed the land-time re-check. "
                                  "This PR rides the next train.")
                 label(o, p, n, remove=RIDING)
-        comment(o, p, m, "Closed at land time: " + "; ".join(f"#{n} {why}" for n, _, why in bad))
+        comment(o, p, m, "Closed at land time: " + "; ".join(f"#{n} {why}" for n, _, _, why in bad))
         close(o, p, m, delete_branch=True)
-        p.say(f"train #{m}: green, but {len(bad)} rider(s) failed the land-time re-check: ejected, recomposing")
+        p.say(f"train #{m}: green, but {len(bad)} rider(s) failed the land-time re-check, recomposing: "
+              + "; ".join(f"#{n} {act}ed ({why})" for n, _, act, why in bad))
         return False, set(), frozenset(out)
     numbers = {n for n, _, _ in rode}
     if o.dry_run:
@@ -206,7 +223,7 @@ def judge(o: Opts, p: Pass, d: Path, train: dict, main_sha: str) -> tuple[bool, 
     if ph == "pending":
         return True, set(numbers), frozenset()
     if ph == "green":
-        return land(o, p, d, train, rode, root)
+        return land(o, p, train, rode)
     checks = ", ".join(names[:6])
     if ph == "red":
         said = _gate_said(o.repo, m)
@@ -243,7 +260,7 @@ def judge(o: Opts, p: Pass, d: Path, train: dict, main_sha: str) -> tuple[bool, 
 
 
 # ── 4. compose ─────────────────────────────────────────────────────────────────────────────────
-def board(o: Opts, p: Pass, d: Path, cands: list[dict], main_sha: str) -> list[tgit.Rider]:
+def board(o: Opts, p: Pass, d: Path, cands: list[dict]) -> list[tgit.Rider]:
     """The riders for a train: each candidate's own history (rider_gate), head and review re-read."""
     riders: list[tgit.Rider] = []
     for c in cands:
@@ -251,10 +268,6 @@ def board(o: Opts, p: Pass, d: Path, cands: list[dict], main_sha: str) -> list[t
             break
         n, h = int(c["number"]), str(c["headRefOid"])
         act, why = policy.rider_gate(comments_of(o.repo, n), h)
-        if act == "eject":
-            eject(o, p, n, h, why)
-            p.error(f"#{n}: ejected -- {why}")
-            continue
         if act == "hold":
             p.error(f"#{n}: held out of trains -- {why}")
             continue
@@ -263,33 +276,33 @@ def board(o: Opts, p: Pass, d: Path, cands: list[dict], main_sha: str) -> list[t
         if (pr.get("head") or {}).get("sha") != h:
             p.say(f"#{n}: head moved while composing, left for the next pass")
             continue
-        rbase = ""
+        at = ""
         if o.review_workflow:
-            ok, why, rbase = github.review_passed(o.repo, o.review_workflow, n, h, o.base, pr)
-            if ok:
-                why = tgit.review_base_ok(d, main_sha, h, rbase)
-            if not ok or why:
+            ok, why, at = github.review_passed(o.repo, o.review_workflow, n, h, o.base, pr)
+            if not ok:
                 p.say(f"#{n}: not riding -- {why}")
                 continue
-        riders.append(tgit.Rider(n, h, str(pr.get("title") or ""), str(pr.get("body") or ""), rbase))
+        riders.append(tgit.Rider(n, h, str(pr.get("title") or ""), str(pr.get("body") or ""), at))
     return riders
 
 
 def compose(o: Opts, p: Pass, d: Path, cands: list[dict], main_sha: str, me: tgit.Identity) -> None:
-    riders = board(o, p, d, cands, main_sha)
+    riders = board(o, p, d, cands)
     if len(riders) < o.min_batch:
         p.say(f"{len(riders)} PR(s) ready to ride (< {o.min_batch}): no train; auto-merge lands a single PR")
         return
     tip, included, skipped = tgit.compose(d, main_sha, riders, me)
     for r, why in skipped:
         p.say(f"#{r.number}: skipped -- {why}")
+        if why == tgit.CONTEXT_MOVED:  # pr-autoupdate updates it even while trains run (round 2, finding 3)
+            label(o, p, r.number, add=NEEDS_UPDATE)
         _once(o, p, r.number, SKIPPED_MARK.format(head=r.head),
               f"Not in this merge train: {why}. It lands through its own auto-merge, or rides a later train.")
     if len(included) < o.min_batch:
         p.say(f"{len(included)} PR(s) composed cleanly (< {o.min_batch}): no train")
         return
     branch = f"{TRAIN_PREFIX}{o.run_id}"
-    rows = "\n".join(f"| #{r.number} | {r.title[:80]} | `{r.head}` | `{sha[:12]}` | passed at head on `{r.base[:12]}` |"
+    rows = "\n".join(f"| #{r.number} | {r.title[:80]} | `{r.head}` | `{sha[:12]}` | passed at head ({r.reviewed_at}) |"
                      for r, sha in included)
     body = (f"{COMMENT_MARK}\nMerge train: {len(included)} armed PRs tested ONCE on one tree and landed by "
             f"**rebase** merge, one commit per PR (ci-kit ci-merge-train, run {o.run_id}).\n\n"
@@ -317,7 +330,7 @@ def compose(o: Opts, p: Pass, d: Path, cands: list[dict], main_sha: str, me: tgi
     url = r.stdout.strip().splitlines()[-1]
     m = int(url.rstrip("/").rsplit("/", 1)[-1])
     for rr, sha in included:
-        label(o, p, rr.number, add=RIDING)
+        label(o, p, rr.number, add=RIDING, remove=NEEDS_UPDATE)
         comment(o, p, rr.number, f"Riding merge train #{m} ({url}) at head `{rr.head}` as `{sha[:12]}`. It lands as "
                                  "its own commit when the train is green and it still wants to land; pr-autoupdate "
                                  f"leaves it alone meanwhile.\n{policy.RODE.format(train=m, head=rr.head)}")

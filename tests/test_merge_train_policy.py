@@ -1,6 +1,8 @@
 """The merge train's pure decisions, and "did the review gate pass at this exact head"."""
 from __future__ import annotations
 
+import pytest
+
 from ci_kit.merge_train import EJECTED, OPT_OUT, RIDING, github, policy
 
 REQ = ("unit tests", "review gate")
@@ -74,49 +76,86 @@ def test_stray_riders() -> None:
 # ── review passed at this exact head, against this base ────────────────────────────────────────
 H = "a" * 40
 B = "b" * 40
+T1 = "2026-11-11T00:00:01Z"
 
 
 def wr(i: int, conclusion: str = "success", status: str = "completed", n: int = 7, head: str = H, prs: bool = True,
-       base: str = "main", base_sha: str = B) -> dict:
-    entry = {"number": n, "head": {"sha": head}, "base": {"ref": base, "sha": base_sha}}
+       base: str = "main") -> dict:
+    """A review-gate run AS GITHUB RETURNS IT: `pull_requests[].base`/`.head` are the PR's CURRENT
+    state when asked (live: trade-data run 43105767267 reports a base committed after it ran), so
+    `base` here is always the PR's current base, never what the run reviewed."""
+    entry = {"number": n, "head": {"sha": head}, "base": {"ref": base, "sha": B}}
     return {"id": i, "created_at": f"2026-11-11T00:00:{i:02d}Z", "head_sha": head, "event": "pull_request",
             "status": status, "conclusion": conclusion, "head_branch": "feat",
             "pull_requests": [entry] if prs else []}
 
 
 def test_review_verdict_both_directions() -> None:
-    assert github.verdict([wr(1)], 7, H, "main") == (True, github.verdict([wr(1)], 7, H, "main")[1], B)
-    assert github.verdict([], 7, H, "main")[:2] == (False, "no review-gate run names this PR at this head")
-    assert github.verdict([wr(1), wr(2, "failure")], 7, H, "main")[0] is False     # the newer block wins
-    assert github.verdict([wr(1, "failure"), wr(2)], 7, H, "main")[0] is True      # a newer pass wins
-    assert "still in_progress" in github.verdict([wr(1), wr(2, None, "in_progress")], 7, H, "main")[1]
-    assert github.verdict([wr(1, n=8)], 7, H, "main")[0] is False                  # another PR's run
-    assert github.verdict([wr(1, head="b" * 40)], 7, H, "main")[0] is False        # another head
-
-
-def test_review_verdict_is_bound_to_the_base_must_fire() -> None:
-    # ci-kit#70 finding 1: a review against another base, or one that cannot say which, is no pass
-    ok, why, _ = github.verdict([wr(1, base="feat")], 7, H, "main")
-    assert not ok and "reviewed against `feat`, not `main`" in why
-    assert github.verdict([wr(1, prs=False)], 7, H, "main")[0] is False            # empty pull_requests: refused
+    assert github.verdict([wr(1)], 7, H) == (True, github.verdict([wr(1)], 7, H)[1], T1)
+    assert github.verdict([], 7, H)[:2] == (False, "no review-gate run names this PR at this head")
+    assert github.verdict([wr(1), wr(2, "failure")], 7, H)[0] is False     # the newer block wins
+    assert github.verdict([wr(1, "failure"), wr(2)], 7, H)[0] is True      # a newer pass wins
+    assert "still in_progress" in github.verdict([wr(1), wr(2, None, "in_progress")], 7, H)[1]
+    assert github.verdict([wr(1, n=8)], 7, H)[0] is False                  # another PR's run
+    assert github.verdict([wr(1, head="b" * 40)], 7, H)[0] is False        # another head
+    assert github.verdict([wr(1, prs=False)], 7, H)[0] is False            # empty pull_requests: refused
     two = wr(1)
     two["pull_requests"].append({"number": 9, "head": {"sha": H}, "base": {"ref": "main", "sha": B}})
-    ok, why, _ = github.verdict([two], 7, H, "main")
-    assert not ok and "ambiguous" in why                                             # one head, two PRs
-    assert github.verdict([wr(1, base_sha="")], 7, H, "main")[0] is False           # no base sha recorded
-    # the newest run decides the base too: an older pass on main does not cover a newer run on feat
-    assert github.verdict([wr(1), wr(2, base="feat")], 7, H, "main")[0] is False
+    ok, why, _ = github.verdict([two], 7, H)
+    assert not ok and "ambiguous" in why                                     # one head, two PRs
+
+
+def test_a_review_run_older_than_the_last_retarget_is_no_pass_must_fire() -> None:
+    # round 2, finding 1 (the reviewer's probe2): #7's gate ran while it targeted `feat`; it was
+    # then retargeted to main -- the run now READS as base main, so only the timeline can tell
+    retargeted_run = wr(1, base="main")
+    ok, why, _ = github.verdict([retargeted_run], 7, H, retargeted="2026-11-11T00:05:00Z")
+    assert not ok and "base branch was changed at 2026-11-11T00:05:00Z, after its last review run" in why
+    assert github.verdict([retargeted_run], 7, H, retargeted=T1)[0] is False              # same second: not after
+    after = {**wr(9), "created_at": "2026-11-11T00:06:00Z"}
+    assert github.verdict([retargeted_run, after], 7, H, retargeted="2026-11-11T00:05:00Z")[0] is True  # re-reviewed
+    assert github.verdict([retargeted_run], 7, H, retargeted="garbage")[0] is False        # unparseable: refused
+    assert github.verdict([retargeted_run], 7, H, retargeted="")[0] is True                # never retargeted
+
+
+def _timeline(monkeypatch, answer) -> list:
+    calls: list = []
+
+    def fake(*a):
+        calls.append(a)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    monkeypatch.setattr(github, "gh_json", fake)
+    return calls
+
+
+def test_retargeted_at_reads_the_timeline_and_refuses_what_it_cannot_read(monkeypatch) -> None:
+    def tl(total, nodes):
+        return {"data": {"repository": {"pullRequest": {"timelineItems": {"totalCount": total, "nodes": nodes}}}}}
+    calls = _timeline(monkeypatch, tl(0, []))
+    assert github.retargeted_at("o/r", 7) == ""
+    assert "BASE_REF_CHANGED_EVENT" in calls[0][3] and "pr=7" in calls[0]
+    _timeline(monkeypatch, tl(2, [{"createdAt": "2026-11-11T00:05:00Z"}]))
+    assert github.retargeted_at("o/r", 7) == "2026-11-11T00:05:00Z"
+    for bad in ({"data": None}, None, tl(1, []), tl(1, [{}])):
+        _timeline(monkeypatch, bad)
+        with pytest.raises(ValueError):
+            github.retargeted_at("o/r", 7)
 
 
 def test_review_passed_refuses_a_closed_forked_or_retargeted_pr(monkeypatch) -> None:
     monkeypatch.setattr(github, "runs_at", lambda *a: [wr(1)])
+    monkeypatch.setattr(github, "retargeted_at", lambda *a: "")
     same = {"state": "open", "head": {"ref": "feat", "repo": {"full_name": "o/r"}}, "base": {"ref": "main"}}
-    assert github.review_passed("o/r", "review-gate.yml", 7, H, "main", same)[::2] == (True, B)
+    assert github.review_passed("o/r", "review-gate.yml", 7, H, "main", same)[::2] == (True, T1)
     assert github.review_passed("o/r", "review-gate.yml", 7, H, "main", {**same, "state": "closed"})[0] is False
     fork = {**same, "head": {"ref": "feat", "repo": None}}
     assert github.review_passed("o/r", "review-gate.yml", 7, H, "main", fork)[0] is False
     stacked = {**same, "base": {"ref": "feat"}}
     assert github.review_passed("o/r", "review-gate.yml", 7, H, "main", stacked)[0] is False
+    monkeypatch.setattr(github, "retargeted_at", lambda *a: "2026-11-11T00:05:00Z")
+    assert github.review_passed("o/r", "review-gate.yml", 7, H, "main", same)[0] is False
 
 
 # ── composed by the train ──────────────────────────────────────────────────────────────────────
@@ -154,9 +193,11 @@ def test_composed_both_directions_must_fire() -> None:
 def test_rider_gate_counts_releases_at_this_head_only() -> None:
     rel = lambda why, head=H, t=1: policy.RELEASED.format(train=t, head=head, why=why)  # noqa: E731
     assert policy.rider_gate([], H) == ("ride", "")
-    assert policy.rider_gate([rel("stale")], H)[0] == "ride"
-    assert policy.rider_gate([rel("stale"), rel("stuck", t=2)], H)[0] == "eject"
-    assert policy.rider_gate([rel("stale"), rel("stale", head=B)], H)[0] == "ride"   # a new head starts over
+    # round 2, finding 2: stale (main moved) is never held against a rider, however often
+    assert policy.rider_gate([rel("stale", t=t) for t in range(9)], H)[0] == "ride"
+    assert policy.rider_gate([rel("stale"), rel("stuck", t=2)], H)[0] == "ride"
+    assert policy.rider_gate([rel("stuck"), rel("stuck", t=2)], H)[0] == "hold"     # hold, never eject
+    assert policy.rider_gate([rel("stuck"), rel("stuck", head=B)], H)[0] == "ride"   # a new head starts over
     assert policy.rider_gate([rel("retry"), rel("retry", t=2)], H)[0] == "hold"
     assert policy.rider_gate([rel("dropped"), rel("retry")], H)[0] == "ride"
 

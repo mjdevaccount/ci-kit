@@ -51,7 +51,7 @@ import urllib.request
 from dataclasses import dataclass
 
 from ci_kit import pr_list, pr_queue
-from ci_kit.merge_train import EJECTED, RIDING, TRAIN_PREFIX
+from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
 
 LABEL = "conflict"
 
@@ -220,7 +220,10 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
     CI away. A DIRTY PR is still attempted: that PUT pushes nothing, and it is how the conflict
     label and page fire. An EJECTED PR is updated anyway: it rides no train, and its own update is
     the only lane it has left -- holding it while trains keep forming would starve it (session
-    review of ci-kit#70, finding 7). A repo with no train sees exactly the old plan."""
+    review of ci-kit#70, finding 7). So is a PR a train SKIPPED because the lines around its change
+    moved since its review (`train-needs-update`): no train takes it until its own update and
+    review, which this hold would otherwise keep from ever happening (round 2, finding 3). A repo
+    with no train sees exactly the old plan."""
     trains = [p for p in prs if str(p.get("headRefName") or "").startswith(TRAIN_PREFIX)
               and not p.get("isCrossRepository")]
     riding = {p["number"] for p in armed if any(lb.get("name") == RIDING for lb in p.get("labels") or [])}
@@ -230,7 +233,7 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
                       opts.max_in_flight, opts.required)
     if trains:
         held = [p for p in q.update if (p.get("mergeStateStatus") or "").upper() != "DIRTY"
-                and not any(lb.get("name") == EJECTED for lb in p.get("labels") or [])]
+                and not any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
         q.update = [p for p in q.update if p not in held]
         q.held += [(p, f"merge train #{trains[-1]['number']} is open") for p in held]
         summary.append(f"merge train #{trains[-1]['number']} open: {len(held)} update(s) held, conflicts still checked")

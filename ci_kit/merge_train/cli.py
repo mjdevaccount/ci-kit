@@ -15,9 +15,11 @@ workflow finishing on a train branch, and when a PR gets the `merge-train` label
      stale (main moved) / stuck (pending past --stale-minutes) -> close it, release the riders.
   3. RELEASE strays: an `in-train` label on a PR no open train carries (pr_autoupdate skips it).
   4. COMPOSE when >= --min-batch candidates (policy.candidates) remain, oldest-armed first, at
-     most --max-batch boarding: each one's release history (policy.rider_gate: eject / hold), its
-     head fetched and its review re-read at that head ON THIS BASE (github.review_passed +
-     git.review_base_ok), the train composed (git.compose), pushed to `train/<run>`, opened as a
+     most --max-batch boarding: each one's release history (policy.rider_gate: hold after
+     repeated stuck or machinery releases at one head), its head fetched and its review re-read at
+     that head ON THIS BASE (github.review_passed: a run created after the PR's last base change),
+     the train composed (git.compose; a rider whose context moved is skipped and labelled
+     `train-needs-update`), pushed to `train/<run>`, opened as a
      PR labelled `merge-train` with a constituent table and its composition record, NOT armed,
      and every rider labelled `in-train` and commented with a `rode` marker. A conflicting PR is
      commented once per head and skipped; with one candidate nothing runs.
@@ -38,8 +40,8 @@ TELEMETRY. Each pass writes its summary (step summary + log): the workflow run i
 append-only record, and every train is ALSO a PR whose body and comments say what rode, what
 was skipped and why, and how it ended. Every rider carries machine-readable markers in its own
 comments (`rode`, `released ... why=`, `landed`), which is how a rider's history survives across
-trains. LOUD (exit 1, ::error) rather than logged: a stuck train, a retry on machinery, an
-ejection or hold for repeated releases, a green train GitHub would not merge, a `train/` PR this
+trains. LOUD (exit 1, ::error) rather than logged: a stuck train, a retry on machinery, a
+hold for repeated stuck or machinery releases, a green train GitHub would not merge, a `train/` PR this
 workflow did not compose, a merged train not fully settled. What watches from outside: mcp
 scripts/train_watch.py via pr_reconcile.py (hourly) names a RIDER in trains at one head for
 hours (across trains, from its `rode` markers), a constituent closed as landed whose commit is

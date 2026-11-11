@@ -225,8 +225,8 @@ jobs:
       # is a train ci-merge-train composed: one commit per already-reviewed PR. It is VERIFIED --
       # its composition record names a run of the caller's merge-train workflow that opened it;
       # every commit byte-equal to its PR's reviewed head applied onto the commit before it, with
-      # the context the review read; that PR's gate passed at that head AGAINST THIS BASE (the
-      # reviewed base's merge base with the head is the train root's) -- and never sent to the
+      # the context the review read; that PR's gate passed at that head AGAINST THIS BASE (a run
+      # created after the PR's last base change, from its timeline) -- and never sent to the
       # model; anything else on a `train/` branch is red. The branch prefix alone keys it, so a hand PR cannot dodge review
       # by naming its branch (it fails here) and a train cannot reach the model. is_train is set
       # BEFORE python runs: a crash leaves the step failed and the Gate below reads no result,
