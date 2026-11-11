@@ -4,8 +4,8 @@
 without `actions: read` is refused -- and GitHub refuses a fine-grained PAT the check runs at all
 ("Resource not accessible by personal access token", live 2026-10-24 on every caller with an
 open PR). This query asks a check run for its name/status/conclusion and a commit status for its
-context/state, nothing more, and returns rows shaped like `gh pr list --json` so pr_queue and
-pr_autoupdate read them unchanged.
+context/state, nothing more, and returns rows shaped like `gh pr list --json` so pr_queue,
+pr_autoupdate and the merge train (ci_kit/merge_train) read them unchanged.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ query($owner: String!, $name: String!) {
     pullRequests(states: OPEN, first: 100, orderBy: {field: CREATED_AT, direction: ASC}) {
       nodes {
         number title url isCrossRepository headRefOid headRefName mergeStateStatus
+        isDraft mergeable baseRefName createdAt
         autoMergeRequest { enabledAt }
         labels(first: 30) { nodes { name } }
         commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
@@ -44,7 +45,8 @@ def rows(answer: dict) -> list[dict]:
         rollup = (commits[0]["commit"].get("statusCheckRollup") or {}) if commits else {}
         out.append({
             **{k: n.get(k) for k in ("number", "title", "url", "isCrossRepository", "headRefOid",
-                                     "headRefName", "mergeStateStatus", "autoMergeRequest")},
+                                     "headRefName", "mergeStateStatus", "autoMergeRequest",
+                                     "isDraft", "mergeable", "baseRefName", "createdAt")},
             "labels": (n.get("labels") or {}).get("nodes") or [],
             "statusCheckRollup": ((rollup.get("contexts") or {}).get("nodes")) or [],
         })
