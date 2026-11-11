@@ -268,7 +268,7 @@ def test_a_merge_on_the_bots_branch_must_be_an_honest_one(pr: Path, monkeypatch:
     (True, "2026-01-01T00:00:00Z"),     # GitHub's rebase update-branch re-commits an amend: dates part
 ])
 def test_a_rewritten_bot_commit_is_reviewed(pr: Path, monkeypatch: pytest.MonkeyPatch, signed: bool,
-                                            author_date: str | None) -> None:
+                                            author_date: str | None, capsys: pytest.CaptureFixture[str]) -> None:
     # reviewer 11-11 round 5: identities alone can be carried through a rewrite
     if author_date:
         monkeypatch.setenv("GIT_AUTHOR_DATE", author_date)
@@ -278,6 +278,7 @@ def test_a_rewritten_bot_commit_is_reviewed(pr: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr(tier, "verified", lambda repo, sha: signed)
     assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
     assert _outputs(pr / "out")["required"] == "true"
+    assert "bump skip NOT taken for renovate[bot]" in capsys.readouterr().out
 
 
 def test_a_non_utf8_file_is_reviewed_never_red(pr: Path, monkeypatch: pytest.MonkeyPatch) -> None:

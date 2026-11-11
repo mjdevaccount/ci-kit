@@ -249,7 +249,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::error::ci_kit.review.tier could not read the PR's own diff: {err}", file=sys.stderr)
         return 2
     head_repo, repo = e.get("HEAD_REPO", ""), e.get("GITHUB_REPOSITORY", "")
-    bumps = _bumps(mb, head, changed) if bot_authored(e.get("PR_AUTHOR", ""), head_repo, repo, mb, head) else []
+    author = e.get("PR_AUTHOR", "")
+    bumps = _bumps(mb, head, changed) if bot_authored(author, head_repo, repo, mb, head) else []
+    if author in BUMP_BOTS and not bumps:
+        # the skip fails SAFE but silent: this line is what a watcher counts (reviewer 11-11 round 6 #3)
+        print(f"Review tier: bump skip NOT taken for {author} (commit identity/signature or a non-bump diff)")
     t = decide(guard=_flag("GUARD"), guard_files=e.get("GUARD_FILES", ""), commits=commits,
                changed=changed, labeled=_flag("LABELED"), label=a.label,
                head_repo=head_repo, repo=repo,
