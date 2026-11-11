@@ -168,3 +168,35 @@ def test_the_reviewer_line_names_the_credential_never_its_value(pr: Path, monkey
 def test_an_unreadable_diff_is_exit_2(pr: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HEAD_SHA", "0" * 40)
     assert tier.main(["--model", "m", "--guard-model", "g"]) == 2
+
+
+def _bump_pr(pr: Path, extra: dict[str, bytes]) -> str:
+    (pr / "requirements.txt").write_bytes(b"ruff==0.7.1" + bytes([10]))
+    _git(pr, "add", ".")
+    _git(pr, "commit", "-qm", "req")
+    base = _git(pr, "rev-parse", "HEAD")
+    (pr / "requirements.txt").write_bytes(b"ruff==0.8.0" + bytes([10]))
+    for name, data in extra.items():
+        (pr / name).write_bytes(data)
+    _git(pr, "add", ".")
+    _git(pr, "commit", "-qm", "bump")
+    return base
+
+
+def test_a_version_bump_pr_skips_the_model_and_says_so(pr: Path, monkeypatch: pytest.MonkeyPatch,
+                                                      capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("BASE_SHA", _bump_pr(pr, {}))
+    monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
+    monkeypatch.setenv("GUARD", "true")   # requirements.txt is a guard path in the caller
+    assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
+    assert _outputs(pr / "out") == {"required": "false"}
+    assert "Review tier: skipped (version bump only, 1 lines)" in capsys.readouterr().out
+    assert "ruff==0.8.0" in (pr / "summary").read_text()
+
+
+def test_a_non_utf8_file_is_reviewed_never_red(pr: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # reviewer 11-10 #2: the -U0 read must not turn a Latin-1 file into exit 2 the label cannot fix
+    monkeypatch.setenv("BASE_SHA", _bump_pr(pr, {"x.csv": b"caf" + bytes([0xE9]) + bytes([10])}))
+    monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
+    assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
+    assert _outputs(pr / "out")["required"] == "true"
