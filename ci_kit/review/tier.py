@@ -17,7 +17,11 @@ the NEW name, so `git mv app/x.py docs/x.md` would read as docs-only. An empty o
 is NOT docs-only. Paths under a `--not-prose` prefix (default `.claude/` agent charters and
 `prompts/` runtime LLM prompts) are never prose, whatever their suffix.
 
-VERSION BUMP ONLY is the second (2026-11-10, ci_kit/review/bump.py has the rule): every changed
+VERSION BUMP ONLY is the second (2026-11-10, ci_kit/review/bump.py has the rule), for a PR OPENED
+BY a bump bot (BUMP_BOTS: the event's `pull_request.user.login`, which GitHub sets, not the diff)
+from this repository, whose every non-merge commit that bot authored. A diff cannot prove a SHA
+or a lockfile is what it claims, so the bot's identity is the first lock and the diff the second
+(reviewer 11-11 #2: any other author, the same shape is reviewed). Every changed
 line of every manifest differs from its pair only in a version token, so the model would read a
 version string. It drops the commit-count AND the guard-path reason -- a bumped pin in a guard
 file (`pyproject.toml`) changes no guard -- and the label still reviews. The summary lists the
@@ -46,6 +50,7 @@ from ci_kit.review import tools
 from ci_kit.review.bump import LOCKFILES, bump_only
 
 NOT_PROSE = (".claude/", "prompts/")
+BUMP_BOTS = {"renovate[bot]": "29139614+renovate[bot]@users.noreply.github.com"}
 MODES = ("subscription", "api", "auto")
 CREDS = {"oauth": ("CLAUDE_CODE_OAUTH_TOKEN", "Claude Code CLI on the subscription"),
          "api_key": ("ANTHROPIC_API_KEY", "plain Messages API, billed per token")}
@@ -65,6 +70,19 @@ def _bumps(mb: str, head: str, changed: list[str]) -> list[str]:
     except Exception as err:  # noqa: BLE001 -- any failure means "not a bump": the model reviews
         print(f"::warning::version-bump check could not read the diff ({type(err).__name__}): reviewing")
         return []
+
+
+def bot_authored(author: str, head_repo: str, repo: str, mb: str, head: str) -> bool:
+    """A same-repo PR a bump bot opened, every non-merge commit authored by that bot. A rebase or
+    an update-branch merge keeps that; a hand commit pushed onto the bot's branch does not."""
+    email = BUMP_BOTS.get(author)
+    if not email or not repo or head_repo != repo:
+        return False
+    try:
+        authors = set(_git("log", "--no-merges", "--format=%ae", f"{mb}..{head}").split())
+    except (subprocess.CalledProcessError, OSError):
+        return False
+    return authors == {email}
 
 
 def docs_only(changed: list[str], not_prose: tuple[str, ...] = NOT_PROSE) -> bool:
@@ -182,10 +200,11 @@ def main(argv: list[str] | None = None) -> int:
     except (KeyError, subprocess.CalledProcessError, OSError, ValueError) as err:
         print(f"::error::ci_kit.review.tier could not read the PR's own diff: {err}", file=sys.stderr)
         return 2
-    bumps = _bumps(mb, head, changed)
+    head_repo, repo = e.get("HEAD_REPO", ""), e.get("GITHUB_REPOSITORY", "")
+    bumps = _bumps(mb, head, changed) if bot_authored(e.get("PR_AUTHOR", ""), head_repo, repo, mb, head) else []
     t = decide(guard=_flag("GUARD"), guard_files=e.get("GUARD_FILES", ""), commits=commits,
                changed=changed, labeled=_flag("LABELED"), label=a.label,
-               head_repo=e.get("HEAD_REPO", ""), repo=e.get("GITHUB_REPOSITORY", ""),
+               head_repo=head_repo, repo=repo,
                auth_mode=e.get("AUTH_MODE", ""), has_oauth=_flag("HAS_OAUTH"), has_key=_flag("HAS_KEY"),
                model=a.model, guard_model=a.guard_model,
                not_prose=tuple(a.not_prose) if a.not_prose else NOT_PROSE,
