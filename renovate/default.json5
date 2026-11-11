@@ -406,15 +406,29 @@
       automerge: false,
       labels: ["deps", "deploys-on-merge", "stateful"],
     },
+    // ---- ghcr.io images: no release timestamp, so no END to the age wait (2026-11-11) ---------
+    // Renovate reads no release timestamp from ghcr.io, and minimumReleaseAgeBehaviour's default
+    // (timestamp-required) treats that as "not old enough" FOREVER: the update sits under the
+    // Dependency Dashboard's "Pending Status Checks" with no branch, no PR and nothing red.
+    // Seen three times, fixed twice one package at a time: windmill (this rule's old home),
+    // the scraper git-ref (first-party rule below), and home-host's `dockerfile base images`
+    // group (ghcr.io/actions/actions-runner + semaphore) pending since 2026-11-03 -- surfaced
+    // only by renovate_liveness (mcp ci-schedule-audit, CI-CRON). One rule for the REGISTRY,
+    // not the package, so the next ghcr image does not wait a week to be noticed.
+    // What is given up: the 3-day age guard for ghcr images. CI still gates every merge, the
+    // weekend window still applies, and a wait that cannot end guarded nothing.
+    {
+      matchDatasources: ["docker"],
+      matchPackageNames: ["ghcr.io/**"],
+      minimumReleaseAgeBehaviour: "timestamp-optional",
+    },
     // Windmill server (compose) and workers (worker.Dockerfile FROM) MUST share one version, so
-    // one group spans both managers. It is held for a held-deploy anyway, so a ghcr release with
-    // no timestamp must not also sit behind minimumReleaseAge forever.
+    // one group spans both managers. Held for a held-deploy; its ghcr age wait is the rule above.
     {
       matchPackageNames: ["ghcr.io/windmill-labs/windmill"],
       groupName: "windmill",
       automerge: false,
       labels: ["deps", "held-deploy"],
-      minimumReleaseAgeBehaviour: "timestamp-optional",
     },
     // A Python base-image bump changes the interpreter under every image built on it (#608:
     // python:3.14 auto-merged and wedged deploy-reconcile for 13h). Its own PR, read first.
