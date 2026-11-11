@@ -171,9 +171,10 @@ def test_lookalikes_are_not_bumps(tmp_path: Path, before: dict[str, str], after:
 
 def test_a_mode_change_is_not_a_bump(tmp_path: Path) -> None:
     _diff(tmp_path, {"requirements.txt": "ruff==0.7.1" + NL}, {"requirements.txt": "ruff==0.7.1" + NL})
-    _git(tmp_path, "update-index", "--chmod=+x", "requirements.txt")
     (tmp_path / "requirements.txt").write_text("ruff==0.8.0" + NL)
     _git(tmp_path, "add", "-A")
+    # chmod the INDEX after the add: with core.filemode=true (Linux CI) an add re-reads the 644 worktree mode
+    _git(tmp_path, "update-index", "--chmod=+x", "requirements.txt")
     _git(tmp_path, "commit", "-qm", "chmod")
     changed = _git(tmp_path, "diff", "--name-only", "HEAD~1", "HEAD").splitlines()
     diff = _git(tmp_path, "diff", "--no-renames", "--no-color", "-U0", "HEAD~1", "HEAD")
