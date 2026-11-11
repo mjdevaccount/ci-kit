@@ -45,6 +45,7 @@ import os
 import shlex
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ci_kit.review import tools
@@ -89,24 +90,40 @@ def _honest_merge(sha: str, parents: list[str]) -> bool:
     return merged == _git("rev-parse", f"{sha}^{{tree}}").strip()
 
 
-def bot_authored(author: str, head_repo: str, repo: str, mb: str, head: str) -> bool:
-    """A same-repo PR a bump bot opened, every non-merge commit authored by that bot (`%ae`, which
-    a PR's .mailmap cannot remap) AND committed by GitHub or the bot (`%ce`: reviewer 11-11
-    round 4, an amend keeps the author), every merge an honest one. A rebase or an update-branch merge
-    keeps that; a hand commit or an edited merge on the bot's branch does not. Never raises:
-    anything it cannot read means review."""
+def verified(repo: str, sha: str) -> bool:
+    """GitHub says this commit's signature is valid (`gh`, as the carry step already uses it, with
+    the job's GH_TOKEN). Any failure is False: the PR is reviewed."""
+    out = subprocess.run(["gh", "api", f"repos/{repo}/commits/{sha}", "--jq", ".commit.verification.verified"],
+                         check=True, capture_output=True, text=True, timeout=30).stdout
+    return out.strip() == "true"
+
+
+def bot_authored(author: str, head_repo: str, repo: str, mb: str, head: str,
+                 signed: Callable[[str, str], bool] | None = None) -> bool:
+    """A same-repo PR a bump bot opened; every non-merge commit is the bot's own, as GitHub made it;
+    every merge an honest one. A non-merge commit must have (reviewer 11-11 rounds 4-5):
+      * author `%ae` = the bot (a PR's .mailmap cannot remap `%ae`);
+      * committer `%ce` = GitHub or the bot -- an amend, cherry-pick or local rebase keeps the
+        author but commits as the person;
+      * author date = committer date -- GitHub's rebase-style update-branch re-commits an amended
+        commit as web-flow, but keeps its older author date;
+      * a VERIFIED signature (`signed`, the commits API) -- `git filter-branch` keeps both
+        identities and both dates, but drops the signature.
+    A hand commit, an edited merge or a rewritten commit on the bot's branch is reviewed. Never
+    raises: anything it cannot read means review."""
     email = BUMP_BOTS.get(author)
     if not email or not repo or head_repo != repo:
         return False
+    signed = signed or verified
     try:
-        log = _git("log", "--format=%H%x1f%P%x1f%ae%x1f%ce", f"{mb}..{head}")
+        log = _git("log", "--format=%H%x1f%P%x1f%ae%x1f%ce%x1f%at%x1f%ct", f"{mb}..{head}")
         rows = [r.split("\x1f") for r in log.splitlines()]
         if not rows:
             return False
-        for sha, parents, who, committer in rows:
+        for sha, parents, who, committer, at, ct in rows:
             ps = parents.split()
             if len(ps) == 1:
-                if who != email or committer not in (WEB_FLOW, email):
+                if who != email or committer not in (WEB_FLOW, email) or at != ct or not signed(repo, sha):
                     return False
             elif not _honest_merge(sha, ps):
                 return False

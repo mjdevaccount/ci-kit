@@ -129,6 +129,7 @@ def pr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
     monkeypatch.setenv("HEAD_REPO", "o/r")
     monkeypatch.setenv("HAS_OAUTH", "true")
+    monkeypatch.setattr(tier, "verified", lambda repo, sha: False)   # no API here: unsigned unless a test says
     _git(tmp_path, "checkout", "-qb", "pr")
     return tmp_path
 
@@ -193,6 +194,7 @@ def test_a_version_bump_pr_skips_the_model_and_says_so(pr: Path, monkeypatch: py
     monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
     monkeypatch.setenv("GUARD", "true")   # requirements.txt is a guard path in the caller
     monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
+    monkeypatch.setattr(tier, "verified", lambda repo, sha: repo == "o/r")
     assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
     assert _outputs(pr / "out") == {"required": "false"}
     assert "Review tier: skipped (version bump only, 1 lines)" in capsys.readouterr().out
@@ -256,8 +258,26 @@ def test_a_merge_on_the_bots_branch_must_be_an_honest_one(pr: Path, monkeypatch:
     monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
     monkeypatch.setenv("GUARD", "true")
     monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
+    monkeypatch.setattr(tier, "verified", lambda repo, sha: True)
     assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
     assert _outputs(pr / "out")["required"] == required
+
+
+@pytest.mark.parametrize(("signed", "author_date"), [
+    (False, None),                      # `git filter-branch` keeps both identities and dates, drops the signature
+    (True, "2026-01-01T00:00:00Z"),     # GitHub's rebase update-branch re-commits an amend: dates part
+])
+def test_a_rewritten_bot_commit_is_reviewed(pr: Path, monkeypatch: pytest.MonkeyPatch, signed: bool,
+                                            author_date: str | None) -> None:
+    # reviewer 11-11 round 5: identities alone can be carried through a rewrite
+    if author_date:
+        monkeypatch.setenv("GIT_AUTHOR_DATE", author_date)
+    monkeypatch.setenv("BASE_SHA", _bump_pr(pr, {}))
+    monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
+    monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
+    monkeypatch.setattr(tier, "verified", lambda repo, sha: signed)
+    assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
+    assert _outputs(pr / "out")["required"] == "true"
 
 
 def test_a_non_utf8_file_is_reviewed_never_red(pr: Path, monkeypatch: pytest.MonkeyPatch) -> None:
