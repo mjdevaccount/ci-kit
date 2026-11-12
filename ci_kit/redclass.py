@@ -58,11 +58,13 @@ NETWORK = re.compile(
     r"|getaddrinfo|socket hang up|rpc failed|early eof|the remote end hung up|unexpected disconnect"
     r"|\b(502|503|504)\b.{0,40}(bad gateway|service unavailable|gateway time-?out)"
     r"|received unexpected http status: 5\d\d|http (error )?5\d\d|api rate limit exceeded"
-    r"|failed to download action|unable to download|tar: unexpected eof", re.I)
+    r"|failed to download action|tar: unexpected eof", re.I)
 # A check-run annotation GitHub writes when the RUNNER, not a step, ended the job.
 RUNNER_LOST = re.compile(
     r"runner lost communication|received a shutdown signal|was not acquired by runner"
     r"|runner has been (deleted|removed)|lost communication with the server", re.I)
+# A check-run annotation GitHub writes when the job's OWN timeout-minutes expired (conclusion: cancelled).
+TIMEOUT = re.compile(r"exceeded the maximum execution time", re.I)
 LOG_GONE = re.compile(r"blobnotfound|http 404|not found", re.I)
 
 
@@ -79,24 +81,32 @@ def job_class(job: dict, annotations: list[str] = (), log_error: str = "", log_t
         return "pass", ""
     if c == "startup_failure":
         return MACHINERY, "the job never started (startup failure)"
-    if c == "cancelled":
-        return MACHINERY, "cancelled before it finished"
     steps = [s for s in job.get("steps") or [] if isinstance(s, dict)]
     failed = [s for s in steps if _concl(s) == "failure"]
     own = [s for s in failed if not SETUP_STEP.search(str(s.get("name") or ""))
            and not AGGREGATOR_STEP.search(str(s.get("name") or ""))]
     if own:  # a step of the job's own work failed: evidence, whatever happened to the runner after
-        return JUDGMENT, "step failed: " + ", ".join(str(s.get("name")) for s in own)
+        return JUDGMENT, "step failed: " + ", ".join(str(s.get("name")) for s in own)  # even if cancelled after
+    ran = any(_concl(s) for s in steps)
+    hung = next((a for a in annotations if TIMEOUT.search(a or "")), "")
+    if hung and ran:  # GitHub reports a job timeout-minutes expiry as CANCELLED: a hang is the PR's
+        return JUDGMENT, f"hit its time limit while running its steps: {hung.strip()[:120]}"
     lost = next((a for a in annotations if RUNNER_LOST.search(a or "")), "")
     if lost:
         return MACHINERY, f"the runner ended the job: {lost.strip()[:120]}"
+    if c == "cancelled":
+        return MACHINERY, "cancelled before it finished"
     if c == "timed_out":
-        if not steps or not any(_concl(s) for s in steps):
+        if not ran:
             return MACHINERY, "timed out before a runner ran any step (provisioning)"
         return JUDGMENT, "timed out while running its steps"
     if not failed:
-        gone = " (its log is gone: " + log_error.strip()[:60] + ")" if log_error and LOG_GONE.search(log_error) else ""
-        return MACHINERY, f"failed with no failed step -- the runner was lost or never ran one{gone}"
+        # td#2988's shape ONLY: a runner ran steps and one began and never concluded. A failure with
+        # no step at all is a workflow-expression error (strategy, runs-on, if:) -- the PR's.
+        if ran and any(not _concl(s) for s in steps):
+            gone = " (its log is gone: " + log_error.strip()[:60] + ")" if log_error and LOG_GONE.search(log_error) else ""
+            return MACHINERY, f"a step began and never concluded -- the runner was lost{gone}"
+        return JUDGMENT, "failed with no failed step and no sign the runner was lost"
     if len(failed) == 1 and AGGREGATOR_STEP.search(str(failed[0].get("name") or "")):
         return CONSEQUENCE, "an aggregator red because a job it needs failed"
     if all(SETUP_STEP.search(str(s.get("name") or "")) for s in failed):

@@ -36,7 +36,7 @@ def _classes(jobs: dict, notes: dict[str, list[str]] | None = None) -> list[tupl
 # ── redclass: the jobs depth ──────────────────────────────────────────────────────────────────
 def test_the_lost_sealed_reviewer_is_machinery_and_its_alls_green_a_consequence_must_fire() -> None:
     cls, why = redclass.job_class(_job(LOST, "reviewer / review"), [], "BlobNotFound ... HTTP 404")
-    assert cls == redclass.MACHINERY and "no failed step" in why and "log is gone" in why
+    assert cls == redclass.MACHINERY and "never concluded" in why and "log is gone" in why
     assert redclass.job_class(_job(LOST, "reviewer / review"), [LOST_NOTE])[0] == redclass.MACHINERY
     assert redclass.job_class(_job(LOST, "review gate"))[0] == redclass.CONSEQUENCE
     assert redclass.run_class(_classes(LOST))[0] == redclass.MACHINERY
@@ -71,6 +71,25 @@ def test_cancelled_startup_and_provisioning_timeouts_are_machinery_a_hang_is_not
     assert redclass.job_class({"conclusion": "timed_out", "steps": []})[0] == "machinery"
     hung = {"conclusion": "timed_out", "steps": [{"name": "pytest", "conclusion": "cancelled"}]}
     assert redclass.job_class(hung)[0] == "judgment"
+
+
+def test_review_of_1_27_0_judgment_is_never_dressed_as_machinery_must_not_fire() -> None:
+    """Reviewer findings 1, 1b, 3: a cancel AFTER an own step failed, a timeout-minutes expiry
+    (GitHub concludes it `cancelled`, with an annotation), and a job that failed with no step at all
+    (a strategy / runs-on / if: expression the PR broke) are all the PR's. Never rerun."""
+    after = {"conclusion": "cancelled", "steps": [{"name": "pytest", "conclusion": "failure"},
+                                                  {"name": "upload logs", "conclusion": "cancelled"}]}
+    assert redclass.job_class(after)[0] == "judgment"
+    hang = {"conclusion": "cancelled", "steps": [{"name": "Set up job", "conclusion": "success"},
+                                                 {"name": "pytest", "conclusion": "cancelled"}]}
+    note = "The job running on runner r1 has exceeded the maximum execution time of 30 minutes."
+    assert redclass.job_class(hang, [note])[0] == "judgment"
+    assert redclass.job_class(hang)[0] == "machinery"           # a plain cancel (superseded) still is
+    assert redclass.job_class({"conclusion": "failure", "steps": []},
+                              ["Error when evaluating 'strategy' for job 'test'"])[0] == "judgment"
+    began = {"conclusion": "failure", "steps": [{"name": "Set up job", "conclusion": "success"},
+                                                {"name": "Review", "conclusion": None}]}
+    assert redclass.job_class(began)[0] == "machinery"         # td#2988's shape: still healed
 
 
 def test_the_train_reads_the_same_rollup_classifier() -> None:
@@ -207,6 +226,27 @@ def test_a_refused_rerun_is_an_error_naming_the_grant() -> None:
     refused = _Done(1, "", "HTTP 403: Resource not accessible by personal access token")
     assert pr_heal.act("o/r", heal, set(), 2, lambda *a, input_text=None: refused, summary) == 1
     assert "Actions: Read and write" in summary[-1]
+
+
+def test_a_403_that_is_not_the_grant_does_not_blame_the_grant() -> None:
+    summary: list[str] = []
+    heal, _ = pr_heal.assess_armed("o/r", [_pr(("review gate",))], ("review gate",), 2, _read(), lambda r, n: [], summary)
+    old = _Done(1, "", "HTTP 403: Unable to retry this workflow run because it was created over a month ago")
+    assert pr_heal.act("o/r", heal, set(), 2, lambda *a, input_text=None: old, summary) == 1
+    assert "Actions: Read and write" not in summary[-1]
+
+
+def test_an_exhausted_head_that_fell_behind_is_updated_not_held_must_fire() -> None:
+    """Reviewer finding 2: the exhausted marker skipped the PR, so pr_queue held it forever -- the
+    td#2988 stall. BEHIND, it is assessed again and counted machinery: its update is free."""
+    marks = [pr_heal.EXHAUSTED.format(head=HEAD)]
+    summary: list[str] = []
+    heal, _ = pr_heal.assess_armed("o/r", [_pr(("review gate",), "BEHIND")], ("review gate",), 2, _read(),
+                                   lambda r, n: marks, summary)
+    assert pr_heal.machinery(heal) == {2988}
+    still, _ = pr_heal.assess_armed("o/r", [_pr(("review gate",))], ("review gate",), 2, _read(),
+                                    lambda r, n: marks, [])
+    assert still == {}                                           # current with main: stays named, quiet
 
 
 def test_an_unexplained_red_is_an_error_never_a_guess() -> None:

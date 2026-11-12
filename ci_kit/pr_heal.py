@@ -200,8 +200,11 @@ def classify_run(repo: str, run_id: int, read: Gh) -> tuple[int, str, str, str]:
                 log_error = (e.stderr or "no log").strip()[-200:]
         out.append((str(j.get("name")), *redclass.job_class(j, msgs, log_error, tail)))
     if not out and str(run.get("conclusion") or "").lower() in redclass.RED_RUN:
-        # a run red with no job red: it never ran one (a startup failure, a run cancelled whole)
-        out.append(("(run)", redclass.MACHINERY, f"the run ended {run.get('conclusion')} with no job run"))
+        # a run red with no job red: cancelled whole is machinery; a failure or startup_failure with no
+        # job is the workflow itself refusing to start (a YAML or permissions error) -- the PR's
+        whole = str(run.get("conclusion") or "").lower() == "cancelled"
+        out.append(("(run)", redclass.MACHINERY if whole else redclass.JUDGMENT,
+                    f"the run ended {run.get('conclusion')} with no job run"))
     cls, why = redclass.run_class(out)
     return int(run.get("run_attempt") or 1), cls, why, str(run.get("html_url") or f"run {run_id}")
 
@@ -241,7 +244,7 @@ def rerun(repo: str, v: Verdict, write: Gh) -> str:
         got = write("api", "-X", "POST", f"repos/{repo}/actions/runs/{r.run}/rerun-failed-jobs")
         if got.returncode:
             msg = (got.stderr or got.stdout or "").strip()[-300:]
-            if re.search(r"not accessible|403|must have admin|permission", msg, re.I):
+            if re.search(r"resource not accessible|must have admin|permission", msg, re.I):  # not any 403
                 msg += (" -- the push token needs Actions: Read and write (fine-grained PAT) to rerun a machinery red;"
                         " until it has it, a machinery red on a PR current with main waits for a push")
             errs.append(f"run {r.run}: {msg}")
@@ -288,7 +291,9 @@ def assess_armed(repo: str, armed: list[dict], required: tuple[str, ...], limit:
         n, head = int(p["number"]), str(p.get("headRefOid") or "")
         try:
             bodies = comments(repo, n)
-            if marked(bodies, _JUDGED, head) or marked(bodies, _EXHAUSTED, head):
+            behind = (p.get("mergeStateStatus") or "UNKNOWN").upper() in ("BEHIND", "UNKNOWN")
+            # an EXHAUSTED head that fell BEHIND is assessed again: its update is free and needs no grant
+            if marked(bodies, _JUDGED, head) or (marked(bodies, _EXHAUSTED, head) and not behind):
                 summary.append(f"#{n}: red at {head[:12]}, already named on the PR (smart auto-merge)")
                 continue
             out[n] = (assess(repo, p, required, read), bodies, p)
