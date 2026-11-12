@@ -57,6 +57,8 @@ def test_the_source_rule_comes_after_the_python_group() -> None:
 
 
 KITS = ("ci-kit", "edge-platform", "llm-ports", "market-ports")
+NAME_MATCHERS = ("matchPackageNames", "matchDepNames", "matchSourceUrls")
+KIT_MANAGERS = {"github-actions", "pep621", "custom.regex", "regex", "pip_requirements", "pip-compile"}
 
 
 def _kit_groups() -> list[dict]:
@@ -71,8 +73,12 @@ def test_each_kit_release_is_one_pr_across_its_depnames_must_fire() -> None:
     assert set(groups) == set(KITS)
     for kit, (i, r) in groups.items():
         assert i > at, f"{kit}: a later rule wins, so the group must follow the source-url rule"
-        assert set(r["matchDepNames"]) == {kit, f"mjdevaccount/{kit}"}
-        # ONE matcher: two matchers in one rule must both match, and a git source's packageName is its URL
-        assert set(r) - {"description"} == {"matchDepNames", *HOLDS}
+        # the source URL both depName forms report; never a bare name (npm has an unrelated edge-platform)
+        assert set(r["matchSourceUrls"]) == {f"https://github.com/mjdevaccount/{kit}{x}" for x in ("", ".git")}
+        # ONE matcher: two matchers in one rule must both match
+        assert set(r) - {"description"} == {"matchSourceUrls", *HOLDS}
         assert r["schedule"] == ["at any time"] and r["minimumReleaseAge"] is None
-        assert not any(kit in str(x.get("matchDepNames", "")) for x in _rules()[i + 1:] if x.get("groupName"))
+        # no later group re-splits it: one naming the kit, or one with no package filter on a kit's manager
+        assert not [x for x in _rules()[i + 1:] if x not in _kit_groups() and x.get("groupName") is not None
+                    and (kit in str(x) or (not any(k in x for k in NAME_MATCHERS)
+                                           and (not x.get("matchManagers") or set(x["matchManagers"]) & KIT_MANAGERS)))]

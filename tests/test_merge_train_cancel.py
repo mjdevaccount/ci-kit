@@ -28,8 +28,10 @@ def _train_with_runs(repo: Repo, fake: FakeGH, riders: int = 2) -> str:
         {"id": 503, "status": "completed", "head_branch": branch, "path": ".github/workflows/ci.yml"},
         # a queued merge-train pass is never dropped, even when GitHub files it under the train branch
         {"id": 504, "status": "queued", "head_branch": branch, "path": ".github/workflows/merge-train.yml@refs/heads/main"},
-        # an OPEN PR's run is never touched
+        # an OPEN PR's run is never touched, nor a fork's run on a same-named branch
         {"id": 505, "status": "in_progress", "head_branch": "pr1", "path": ".github/workflows/ci.yml"},
+        {"id": 506, "status": "in_progress", "head_branch": branch, "path": ".github/workflows/ci.yml",
+         "repo": "fork/r"},
     ]
     return branch
 
@@ -122,3 +124,11 @@ def test_dry_run_cancels_nothing(world: tuple[Repo, FakeGH]) -> None:
     p = cli.Pass()
     assert ops.cancel_runs(_opts(dry_run=True), p, "train/77") == [] and not fake.calls
     assert p.summary == ["(dry run) would cancel unfinished runs on train/77"]
+
+
+def test_the_pass_never_cancels_its_own_run_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    _, fake = world
+    fake.runs = [{"id": 4242, "status": "in_progress", "head_branch": "train/77", "path": ".github/workflows/ci.yml"},
+                 {"id": 4243, "status": "in_progress", "head_branch": "train/77", "path": ".github/workflows/ci.yml"}]
+    p = cli.Pass()
+    assert ops.cancel_runs(cli.Opts(repo="o/r", run_id="4242-2"), p, "train/77") == [4243] and not p.errors

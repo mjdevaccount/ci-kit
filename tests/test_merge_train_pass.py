@@ -87,9 +87,9 @@ class FakeGH:
                 if r["id"] == rid:
                     r["status"] = "completed"
             return "{}"
-        if a[0] == "api" and "/actions/runs?" in a[1]:  # after gh's --jq: the runs on that branch
-            branch = urllib.parse.parse_qs(a[1].split("?", 1)[1])["branch"][0]
-            return json.dumps([r for r in self.runs if r["head_branch"] == branch])
+        if a[0] == "api" and "/actions/runs?" in a[1]:  # after gh's --jq; NOT filtered by branch, so
+            assert urllib.parse.parse_qs(a[1].split("?", 1)[1])["branch"]  # the code's own filter is what's tested
+            return json.dumps([{"repo": "o/r", **r} for r in self.runs])
         if a[:2] == ("api", "user"):
             return json.dumps({"login": "me", "id": 1})
         if a[0] == "api" and "/actions/workflows/" in a[1]:
