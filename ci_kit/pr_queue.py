@@ -21,7 +21,7 @@ The rules, per armed PR, from `gh pr list --json mergeStateStatus,statusCheckRol
 - BEHIND or UNKNOWN with a check still RUNNING: held, not updated. An update would cancel that
   run. The caller re-runs the updater when a check workflow completes (`workflow_run`).
 - BEHIND or UNKNOWN with every present check green: eligible. The free slots go to the lowest
-  PR number (`landing_order`; arm time was the key until v1.25.1 and let a re-armed PR jump).
+  PR number (`landing_order`; arm time was the key until v1.26.0 and let a re-armed PR jump).
 
 `required` narrows which checks count (the names branch protection requires); empty = every
 check on the head. A required check that is ABSENT counts as neither running nor failing. So a
@@ -43,6 +43,9 @@ class Plan:
     update: list[dict] = field(default_factory=list)  # attempt, in this order
     in_flight: list[dict] = field(default_factory=list)
     held: list[tuple[dict, str]] = field(default_factory=list)  # (pr, why)
+    # eligible PRs past the free slots, in queue order: the caller attempts the next one when a
+    # PR it picked is skipped for a running review (pr_autoupdate), so a skip does not idle the slot
+    spare: list[dict] = field(default_factory=list)
 
 
 def check_state(rollup: list[dict] | None, required: tuple[str, ...] = ()) -> str:
@@ -99,6 +102,7 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = ()) 
             eligible.append(p)
     slots = max(0, max_in_flight - len(out.in_flight))
     out.update += eligible[:slots]
+    out.spare = eligible[slots:]
     for i, p in enumerate(eligible[slots:], 1):
         out.held.append((p, f"queued, position {i} (in flight: {len(out.in_flight)}/{max_in_flight})"))
     return out
