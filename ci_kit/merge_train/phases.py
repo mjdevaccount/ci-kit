@@ -36,7 +36,9 @@ from ci_kit.merge_train.ops import (
     Opts,
     Pass,
     age_min,
+    cancel_runs,
     close,
+    close_train,
     comment,
     comments_of,
     fetch,
@@ -200,7 +202,7 @@ def land(o: Opts, p: Pass, train: dict, rode: list[tuple[int, str, str]]) -> tup
                                  "This PR rides the next train.")
                 label(o, p, n, remove=RIDING)
         comment(o, p, m, "Closed at land time: " + "; ".join(f"#{n} {why}" for n, _, _, why, _ in bad))
-        close(o, p, m, delete_branch=True)
+        close_train(o, p, train)
         p.say(f"train #{m}: green, but {len(bad)} rider(s) failed the land-time re-check, recomposing: "
               + "; ".join(f"#{n} {act}d ({why})" if act.endswith("e") else f"#{n} {act}ed ({why})"
                          for n, _, act, why, _ in bad))
@@ -258,7 +260,7 @@ def judge(o: Opts, p: Pass, d: Path, train: dict, main_sha: str) -> tuple[bool, 
             _release(o, p, m, rode, "retry", f"Merge train #{m} went red but {why}: no evidence against any PR. "
                                              "This PR is recomposed into a fresh train.")
             comment(o, p, m, f"Closed: red without evidence ({why}). Its PRs are recomposed, none ejected.")
-            close(o, p, m, delete_branch=True)
+            close_train(o, p, train)
             p.error(f"train #{m}: {why}; riders released for a retry (held after {policy.RETRY_LIMIT} at one head)")
             return False, set(), frozenset()
         keep, out = policy.split(numbers)
@@ -271,7 +273,7 @@ def judge(o: Opts, p: Pass, d: Path, train: dict, main_sha: str) -> tuple[bool, 
                 label(o, p, n, remove=RIDING)
         comment(o, p, m, f"Red on **{checks}**. Bisect: keep {keep or 'none'}, eject {out} "
                          "(ejected PRs land on their own auto-merge).")
-        close(o, p, m, delete_branch=True)
+        close_train(o, p, train)
         p.say(f"train #{m}: red, closed; ejected {out}, kept {keep}")
         return False, set(), frozenset(out)
     # stale / stuck: no evidence against any PR -- release them all, counted per rider
@@ -279,7 +281,7 @@ def judge(o: Opts, p: Pass, d: Path, train: dict, main_sha: str) -> tuple[bool, 
     _release(o, p, m, rode, ph, f"Merge train #{m} closed ({ph}: {why}). This PR is recomposed into a fresh "
                                 f"train; after {policy.RECOMPOSE_LIMIT} such releases at one head it is ejected.")
     comment(o, p, m, f"Closed ({ph}): {why}. Its PRs are recomposed into a fresh train.")
-    close(o, p, m, delete_branch=True)
+    close_train(o, p, train)
     if ph == "stuck":
         p.error(f"train #{m} was stuck ({why}); a check that never reports will stall every train")
     return False, set(), frozenset()
@@ -356,6 +358,7 @@ def compose(o: Opts, p: Pass, d: Path, cands: list[dict], main_sha: str, me: tgi
     if r.returncode:
         p.error(f"open the train PR for {branch}: {(r.stderr or r.stdout).strip()[:300]}")
         tgit.git(d, "push", "-q", "origin", f":refs/heads/{branch}", check=False)
+        cancel_runs(o, p, branch)  # a push-triggered run on a branch no PR will ever land
         return
     url = r.stdout.strip().splitlines()[-1]
     m = int(url.rstrip("/").rsplit("/", 1)[-1])

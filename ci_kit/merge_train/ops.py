@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ci_kit.merge_train import COMMENT_MARK, LABELS, github
+from ci_kit.merge_train import COMMENT_MARK, LABELS, TRAIN_PREFIX, github
 from ci_kit.merge_train import git as tgit
 from ci_kit.pr_autoupdate import add_label
 
@@ -99,6 +100,56 @@ def bodies(paged: str) -> list[str]:
         while i < len(text) and text[i].isspace():
             i += 1
     return out
+
+
+def cancel_runs(o: Opts, p: Pass, branch: str) -> list[int]:
+    """Cancel every unfinished workflow run whose head branch is train branch `branch`; returns the
+    ids cancelled. WHY (trade-data 2026-11-12): train #2998 was closed (recomposed as #2999) and its
+    CI run kept the ONE heavy runner for ~25 min while real PRs queued. Closing a PR and deleting its
+    branch cancels nothing. Only a `train/` branch of THIS repository (never a fork's same-named
+    one), never this pass's own run nor any run of the
+    merge-train workflow (a queued pass must not be dropped). A cancel GitHub refuses is an ERROR
+    (the run goes red): a run left burning a slot is exactly what this exists to prevent. A run
+    that finished between the list and the cancel (409) is not a failure."""
+    if not branch.startswith(TRAIN_PREFIX):
+        p.error(f"refused to cancel runs on `{branch}`: not a `{TRAIN_PREFIX}` branch")
+        return []
+    if o.dry_run:
+        p.say(f"(dry run) would cancel unfinished runs on {branch}")
+        return []
+    q = urllib.parse.urlencode({"branch": branch, "per_page": 100})
+    r = github.gh("api", f"repos/{o.repo}/actions/runs?{q}", "--jq",
+                  "[.workflow_runs[] | {id, status, head_branch, path, repo: .head_repository.full_name}]", check=False)
+    if r.returncode:
+        p.error(f"list the runs on {branch} to cancel them: {(r.stderr or r.stdout).strip()[:300]}")
+        return []
+    own = o.train_workflow.rsplit("/", 1)[-1]
+    done: list[int] = []
+    for run in json.loads(r.stdout or "[]") or []:
+        rid = int(run.get("id") or 0)
+        if (run.get("head_branch") != branch or run.get("repo") != o.repo  # a fork's same-named branch
+                or run.get("status") == "completed" or str(rid) == o.run
+                or str(run.get("path") or "").split("@")[0].rsplit("/", 1)[-1] == own):
+            continue
+        c = github.gh("api", "-X", "POST", f"repos/{o.repo}/actions/runs/{rid}/cancel", check=False)
+        said = (c.stderr or c.stdout).strip()
+        if c.returncode and "HTTP 409" not in said:
+            p.error(f"cancel run {rid} on closed train branch {branch} (it keeps its runner): {said[:300]}")
+            continue
+        if not c.returncode:
+            done.append(rid)
+    p.say(f"{branch}: cancelled {len(done)} unfinished run(s)" + (f": {', '.join(map(str, done))}" if done else ""))
+    return done
+
+
+def close_train(o: Opts, p: Pass, train: dict) -> bool:
+    """THE one way a train PR is closed: close it, delete its branch, then cancel its unfinished runs
+    (cancel_runs). A close that failed leaves the train open, so its runs are left alone too."""
+    m, branch = int(train["number"]), str(train.get("headRefName") or "")
+    if not close(o, p, m, delete_branch=True):
+        return False
+    cancel_runs(o, p, branch)
+    return True
 
 
 def comments_of(repo: str, n: int) -> list[str]:

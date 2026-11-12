@@ -252,6 +252,23 @@ def rerun(repo: str, v: Verdict, write: Gh) -> str:
 Heal = dict[int, tuple[Verdict, list[str], dict]]  # number -> (verdict, its comments, the PR row)
 
 
+def comments_of(repo: str, n: int) -> list[str]:
+    """ci-kit's ONE comment reader (merge_train.ops, paginated): markers are budgets."""
+    from ci_kit.merge_train.ops import comments_of as read  # lazy: merge_train.ops imports pr_autoupdate
+    return read(repo, n)
+
+
+def write(*args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    """ci-kit's ONE gh writer (merge_train.github.gh), never raising: act() reads the exit code."""
+    from ci_kit.merge_train import github
+    return github.gh(*args, check=False, input_text=input_text)
+
+
+def machinery(heal: Heal) -> frozenset[int]:
+    """The assessed PRs whose red is machinery only: pr_queue counts them eligible when BEHIND."""
+    return frozenset(n for n, (v, _, _) in heal.items() if v.kind == redclass.MACHINERY)
+
+
 def assess_armed(repo: str, armed: list[dict], required: tuple[str, ...], limit: int, read: Gh,
                  comments: Callable[[str, int], list[str]], summary: list[str]) -> tuple[Heal, int]:
     """A verdict for every armed PR red at its head, and the errors. Skipped: a train or a rider

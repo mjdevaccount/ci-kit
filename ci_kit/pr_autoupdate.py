@@ -23,14 +23,17 @@ OPTIONS. `--review-workflow` (skip a PR whose review gate is running; empty = th
 `--tracker` (the issue whose row a page quotes; 0 = none), `--relock` (the caller relocks
 lockfile-only conflicts, so the page says so), `--label` (the conflict label; `conflict`), and
 `--max-in-flight N` + `--required-checks a,b` (a serial queue: at most N armed PRs tested against
-current main at once, oldest-armed first; 0 = every armed PR. The policy and the measurement
-behind it: ci_kit/pr_queue.py).
+current main at once, lowest PR number first; 0 = every armed PR. The policy and the measurement
+behind it: ci_kit/pr_queue.py). A PR the queue picked but skipped for a running review hands its
+slot to the next eligible PR (`Plan.spare`), so one long review does not idle the queue.
 
 CONFLICT = TRANSITION-ONLY PAGE. The conflict label is the dedup state: a PR that conflicts and
 is not labelled gets the label AND one ntfy push (env `NTFY_URL`; unset = no push) naming the PR
 and its tracker row; one already labelled gets neither again. A PR that updates cleanly loses the
-label. Each NEWLY labelled PR is emitted as output `relock` for a caller that can relock a
-lockfile-only conflict. Not a `labeled` trigger: GitHub runs no `pull_request` workflow on a PR
+label, and so does ANY open PR carrying it that GitHub now reports MERGEABLE (stale_labels): a
+conflict a session resolved leaves the PR current with main, so it is never attempted again.
+Each NEWLY labelled PR is emitted as output `relock` for a caller that can relock a lockfile-only
+conflict. Not a `labeled` trigger: GitHub runs no `pull_request` workflow on a PR
 with a merge conflict, so that trigger could never fire. A repo with no such label refuses the
 add, so a failed add looks the label up, CREATES it when missing (a `::notice::` names repo and
 label: the create is itself an event) and retries the add ONCE. Only a second failure is an
@@ -47,11 +50,11 @@ import os
 import subprocess
 import sys
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 
-from ci_kit import pr_heal, pr_list, pr_queue, redclass
+from ci_kit import pr_heal, pr_list, pr_queue
 from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
+from ci_kit.ntfy import page  # noqa: F401 -- re-exported: _update_one pages through this name
 
 LABEL = "conflict"
 
@@ -143,10 +146,8 @@ def page_text(repo: str, pr: dict, row: str, opts: Options) -> tuple[str, str]:
     return f"{repo.rsplit('/', 1)[-1]} #{pr['number']}: conflicts with main", body
 
 
-def _gh(*args: str, check: bool = True, env: dict[str, str] | None = None,
-        input_text: str | None = None) -> subprocess.CompletedProcess[str]:
-    body = {"input": input_text, "encoding": "utf-8"} if input_text is not None else {}  # a comment body on stdin
-    return subprocess.run(["gh", *args], check=check, capture_output=True, text=True, env=env, **body)
+def _gh(*args: str, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["gh", *args], check=check, capture_output=True, text=True, env=env)
 
 
 READ_TOKEN = "CI_KIT_READ_TOKEN"
@@ -201,20 +202,6 @@ def add_label(repo: str, n: int, label: str, color: str = LABEL_COLOR,
     return _gh(*edit, check=False).returncode == 0, created
 
 
-def page(title: str, body: str, click: str) -> str:
-    url = os.environ.get("NTFY_URL", "")
-    if not url:
-        return "NTFY_URL unset: NOT pushed"
-    req = urllib.request.Request(url, data=body.encode(), method="POST", headers={
-        # priority 3: a PR is never a reason to wake the operator
-        "Title": title, "Priority": "3", "Tags": "twisted_rightwards_arrows", "Click": click})
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return f"published ({r.status})"
-    except OSError as e:
-        return f"push FAILED: {e}"
-
-
 def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Options,
                 machinery: frozenset[int] = frozenset()) -> pr_queue.Plan:
     """pr_queue's plan with the MERGE TRAIN's PRs taken out (ci_kit/merge_train). A train PR is
@@ -239,8 +226,15 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
         held = [p for p in q.update if (p.get("mergeStateStatus") or "").upper() != "DIRTY"
                 and not any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
         q.update = [p for p in q.update if p not in held]
-        q.spare = [p for p in q.spare if (p.get("mergeStateStatus") or "").upper() == "DIRTY"
-                   or any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
+        # spare holds only eligible PRs, never DIRTY: with a train open only an EJECTED or
+        # train-needs-update one may take a slot. Each slot the hold just emptied goes to the next
+        # of those, so an ordinary lower-numbered PR held for the train cannot idle the slot an
+        # ejected PR needs (td#2980's idle slot, train edition -- review of 1.26.1, finding 1).
+        q.spare = [p for p in q.spare
+                   if any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
+        promoted, q.spare = q.spare[:len(held)], q.spare[len(held):]
+        q.update += promoted
+        q.held = [(p, why) for p, why in q.held if p not in promoted]
         q.held += [(p, f"merge train #{trains[-1]['number']} is open") for p in held]
         summary.append(f"merge train #{trains[-1]['number']} open: {len(held)} update(s) held, conflicts still checked")
     return q
@@ -250,9 +244,9 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout))
     armed = [p for p in prs if p.get("autoMergeRequest") and not p.get("isCrossRepository")]
     summary.append(f"{len(armed)} armed PR(s) of {len(prs)} open")
-    heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read, _comments, summary)
-    machinery = frozenset(n for n, (v, _, _) in heal.items() if v.kind == redclass.MACHINERY)
-    q = _train_plan(prs, armed, summary, opts, machinery)
+    heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read,
+                                        pr_heal.comments_of, summary)
+    q = _train_plan(prs, armed, summary, opts, pr_heal.machinery(heal))
     if opts.max_in_flight > 0:
         summary.append(f"queue: {len(q.in_flight)}/{opts.max_in_flight} in flight "
                        f"[{', '.join('#' + str(p['number']) for p in q.in_flight)}], {len(q.update)} to attempt, "
@@ -283,7 +277,7 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
         errors += kind == "error"
         if line:
             summary.append(line)
-    errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, _write, summary)
+    errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, pr_heal.write, summary)
     errors += unlabel_resolved(repo, prs, attempted, opts, summary)
     return 1 if errors else 0
 
@@ -324,15 +318,6 @@ def _update_one(repo: str, p: dict, opts: Options, tracker: str, relock: list[in
     return o.kind, line
 
 
-def _write(*args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
-    return _gh(*args, check=False, input_text=input_text)
-
-
-def _comments(repo: str, n: int) -> list[str]:
-    from ci_kit.merge_train.ops import comments_of  # lazy: merge_train.ops imports this module
-    return comments_of(repo, n)
-
-
 def stale_labels(prs: list[dict], attempted: set[int], label: str) -> list[int]:
     """Open PRs carrying the conflict label that GitHub now reports MERGEABLE, not attempted this
     run. Pure. The label was only ever removed from a PR the queue ATTEMPTED; a conflict resolved
@@ -369,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="the caller relocks lockfile-only conflicts; say so in the page")
     ap.add_argument("--label", default=LABEL, help="the conflict label (default: %(default)s)")
     ap.add_argument("--max-in-flight", type=int, default=0,
-                    help="armed PRs tested against current main at once, oldest-armed first (0: every armed PR)")
+                    help="armed PRs tested against current main at once, lowest PR number first (0: every armed PR)")
     ap.add_argument("--required-checks", default=os.environ.get("CI_KIT_REQUIRED_CHECKS", ""),
                     help="comma-separated check names that count for the queue ('' : every check on the head;"
                          " default: env CI_KIT_REQUIRED_CHECKS, since names carry spaces)")
