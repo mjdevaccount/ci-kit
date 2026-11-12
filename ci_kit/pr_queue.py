@@ -17,7 +17,9 @@ The rules, per armed PR, from `gh pr list --json mergeStateStatus,statusCheckRol
 - in flight: not BEHIND/DIRTY/UNKNOWN, and either CLEAN (auto-merge is about to fire) or with a
   check still running on its head. Each one holds a slot.
 - BEHIND or UNKNOWN with a FAILING check on its head: held. It cannot merge however current it
-  is; the author's fix pushes a new head, and that push runs its checks.
+  is; the author's fix pushes a new head, and that push runs its checks. UNLESS every failing
+  check failed as MACHINERY (`machinery`, from pr_heal): then it is eligible, and the update is
+  its fresh run.
 - BEHIND or UNKNOWN with a check still RUNNING: held, not updated. An update would cancel that
   run. The caller re-runs the updater when a check workflow completes (`workflow_run`).
 - BEHIND or UNKNOWN with every present check green: eligible. The free slots go to the oldest
@@ -33,7 +35,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-_FAIL = {"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
+from ci_kit.redclass import FAIL
+
+_FAIL = FAIL  # the one set (ci_kit/redclass.py)
 _RUNNING_STATUS = {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"}
 _STALE_STATES = {"BEHIND", "UNKNOWN"}
 
@@ -43,6 +47,9 @@ class Plan:
     update: list[dict] = field(default_factory=list)  # attempt, in this order
     in_flight: list[dict] = field(default_factory=list)
     held: list[tuple[dict, str]] = field(default_factory=list)  # (pr, why)
+    # eligible PRs past the free slots, in queue order: the caller attempts the next one when a
+    # PR it picked is skipped for a running review (pr_autoupdate), so a skip does not idle the slot
+    spare: list[dict] = field(default_factory=list)
 
 
 def check_state(rollup: list[dict] | None, required: tuple[str, ...] = ()) -> str:
@@ -70,8 +77,14 @@ def _armed_at(p: dict) -> tuple[str, int]:
     return ((p.get("autoMergeRequest") or {}).get("enabledAt") or "", int(p.get("number", 0)))
 
 
-def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = ()) -> Plan:
-    """Split the armed PRs into update / in flight / held. Pure: the policy the tests pin."""
+def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = (),
+         machinery: frozenset[int] = frozenset()) -> Plan:
+    """Split the armed PRs into update / in flight / held. Pure: the policy the tests pin.
+
+    `machinery` = PRs whose every failing check is MACHINERY (ci_kit/redclass.py, read by
+    pr_heal): such a PR BEHIND main is eligible as if green -- the update gives it fresh checks,
+    which is the rerun it needs, with no rerun permission. Its failing checks are no author's
+    to fix, so "the author's fix re-queues it" would wait forever."""
     out = Plan()
     if max_in_flight <= 0:
         out.update = list(armed)
@@ -87,7 +100,7 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = ()) 
                 out.in_flight.append(p)
             else:
                 out.held.append((p, f"current with main, checks {checks}"))
-        elif checks == "failing":
+        elif checks == "failing" and p.get("number") not in machinery:
             out.held.append((p, "behind, a check is failing on its head (the author's fix re-queues it)"))
         elif checks == "running":
             out.held.append((p, "behind, checks still running (an update would cancel them)"))
@@ -95,6 +108,7 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = ()) 
             eligible.append(p)
     slots = max(0, max_in_flight - len(out.in_flight))
     out.update += eligible[:slots]
+    out.spare = eligible[slots:]
     for i, p in enumerate(eligible[slots:], 1):
         out.held.append((p, f"queued, position {i} (in flight: {len(out.in_flight)}/{max_in_flight})"))
     return out

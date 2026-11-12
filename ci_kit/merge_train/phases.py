@@ -219,6 +219,21 @@ def land(o: Opts, p: Pass, train: dict, rode: list[tuple[int, str, str]]) -> tup
     return True, numbers, frozenset()
 
 
+def machinery(o: Opts, p: Pass, train: dict) -> str:
+    """Why the train's red is MACHINERY at the jobs depth ('' = it is not, or GitHub would not say).
+    The rollup sees a lost runner as a plain FAILURE (td#2988's sealed reviewer, 2026-11-11): read
+    as a verdict, it would bisect innocent riders out. ci_kit/pr_heal + redclass, the one classifier
+    pr-autoupdate's smart auto-merge reads. Unreadable = '' (bisect, the old behaviour), named."""
+    from ci_kit.pr_autoupdate import _gh_read  # lazy: pr_autoupdate imports merge_train
+    from ci_kit.pr_heal import assess
+    try:
+        v = assess(o.repo, train, o.required, _gh_read)
+    except Exception as e:  # noqa: BLE001 -- any refusal falls back to the rollup's verdict, named
+        p.say(f"train #{train['number']}: could not read its red jobs ({e}); judged on the rollup")
+        return ""
+    return "; ".join(r.why for r in v.reds) if v.kind == "machinery" else ""
+
+
 def judge(o: Opts, p: Pass, d: Path, train: dict, main_sha: str) -> tuple[bool, set[int], frozenset[int]]:
     """(stop this pass?, PR numbers still riding, PR numbers not to compose this pass)."""
     m, head = int(train["number"]), str(train["headRefOid"])
@@ -236,8 +251,10 @@ def judge(o: Opts, p: Pass, d: Path, train: dict, main_sha: str) -> tuple[bool, 
     checks = ", ".join(names[:6])
     if ph == "red":
         said = _gate_said(o.repo, m)
-        if policy.red_is_infra(train.get("statusCheckRollup"), o.required) or (said and len(names) == 1):
-            why = f"the review gate was {said.upper()} on it" if said else f"{checks} never ran (machinery, not code)"
+        lost = "" if said else machinery(o, p, train)
+        if policy.red_is_infra(train.get("statusCheckRollup"), o.required) or lost or (said and len(names) == 1):
+            why = (f"the review gate was {said.upper()} on it" if said else
+                   f"{checks} failed on machinery, not code ({lost})" if lost else f"{checks} never ran (machinery, not code)")
             _release(o, p, m, rode, "retry", f"Merge train #{m} went red but {why}: no evidence against any PR. "
                                              "This PR is recomposed into a fresh train.")
             comment(o, p, m, f"Closed: red without evidence ({why}). Its PRs are recomposed, none ejected.")

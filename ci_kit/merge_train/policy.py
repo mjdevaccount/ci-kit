@@ -44,12 +44,12 @@ from __future__ import annotations
 import re
 
 from ci_kit.merge_train import EJECTED, OPT_OUT, RIDING, TRAIN_PREFIX
+from ci_kit.redclass import FAIL, PASS, rollup_infra
 
-PASS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
-# CANCELLED / STALE are NOT failures: a cancelled check is no evidence against any PR, so it
-# never ejects one. It stays pending, and a train pending past stale_minutes is recomposed.
-FAIL = {"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
-INFRA = {"STARTUP_FAILURE"}  # the check never ran its steps: no evidence against the code
+# PASS / FAIL / INFRA and the machinery-vs-verdict test live in ci_kit/redclass.py, shared with
+# pr_queue and pr_heal. CANCELLED / STALE are NOT failures here: a cancelled check is no evidence
+# against any PR, so it never ejects one. It stays pending, and a train pending past
+# stale_minutes is recomposed.
 RECOMPOSE_LIMIT = 2
 RETRY_LIMIT = 2
 RODE = "<!-- merge-train:rode train={train} head={head} -->"
@@ -98,19 +98,9 @@ def checks(rollup: list[dict] | None, required: tuple[str, ...]) -> tuple[str, l
 
 
 def red_is_infra(rollup: list[dict] | None, required: tuple[str, ...]) -> bool:
-    """Every failing required check failed as MACHINERY (never started), none as a verdict."""
-    bad = []
-    for c in rollup or []:
-        name = c.get("name") or c.get("context") or ""
-        if required and name not in required:
-            continue
-        if c.get("__typename") == "StatusContext" or ("state" in c and "status" not in c):
-            state = (c.get("state") or "").upper()
-            if state in ("FAILURE", "ERROR"):
-                bad.append("infra" if state == "ERROR" else "verdict")
-        elif (c.get("status") or "").upper() == "COMPLETED" and (c.get("conclusion") or "").upper() in FAIL:
-            bad.append("infra" if (c.get("conclusion") or "").upper() in INFRA else "verdict")
-    return bool(bad) and all(b == "infra" for b in bad)
+    """Every failing required check failed as MACHINERY (never started), none as a verdict.
+    The rollup-depth test (redclass.rollup_infra); phases.judge asks the jobs depth too."""
+    return rollup_infra(rollup, required)
 
 
 def released(bodies: list[str], head: str, whys: set[str]) -> int:

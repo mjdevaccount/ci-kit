@@ -3,6 +3,7 @@ failure is named in the pass, never raised past it) plus the git fetches over it
 from __future__ import annotations
 
 import datetime as dt
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -88,9 +89,23 @@ def close(o: Opts, p: Pass, n: int, delete_branch: bool = False) -> bool:
                  *(["--delete-branch"] if delete_branch else []))
 
 
+def bodies(paged: str) -> list[str]:
+    """`gh api --paginate --jq '[.[].body]'` prints one JSON array PER PAGE, back to back. Pure."""
+    out: list[str] = []
+    dec, i, text = json.JSONDecoder(), 0, paged.strip()
+    while i < len(text):
+        got, i = dec.raw_decode(text, i)
+        out += [str(b) for b in got] if isinstance(got, list) else []
+        while i < len(text) and text[i].isspace():
+            i += 1
+    return out
+
+
 def comments_of(repo: str, n: int) -> list[str]:
-    got = github.gh_json("api", f"repos/{repo}/issues/{n}/comments?per_page=100", "--jq", "[.[].body]")
-    return [str(b) for b in got] if isinstance(got, list) else []
+    """EVERY comment body, oldest first. Paginated: the release/rerun markers counted from these
+    are budgets, and a first-page-only read silently reset one past 100 comments."""
+    return bodies(github.gh("api", "--paginate", f"repos/{repo}/issues/{n}/comments?per_page=100",
+                            "--jq", "[.[].body]").stdout or "")
 
 
 def fetch(d: Path, *refs: str) -> None:

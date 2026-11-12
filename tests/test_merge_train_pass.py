@@ -38,6 +38,8 @@ class FakeGH:
         self.comments: dict[int, list[str]] = {}
         self.close_fail: set[int] = set()
         self.merge_fail = ""
+        self.check_runs: list[dict] = []   # REST check runs at a train head (pr_heal.assess)
+        self.jobs: dict = {"jobs": []}     # REST jobs of a red run (redclass)
 
     def add(self, n: int, head: str, **k) -> None:
         self.prs[n] = {"number": n, "title": f"feat: {n}", "body": f"body {n}", "headRefName": f"pr{n}",
@@ -87,6 +89,15 @@ class FakeGH:
                                                   "status": "completed", "head_branch": f"pr{n}",
                                                   "conclusion": "success" if self.reviewed_ok else "failure",
                                                   "pull_requests": [{"number": n, "head": {"sha": head}, "base": now_base}]}]})
+        path = next((str(x) for x in a if str(x).startswith("repos/")), "")
+        if a[0] == "api" and path.endswith("/annotations"):
+            return "[]"
+        if a[0] == "api" and "/actions/runs/" in path and "/jobs?" in path:
+            return json.dumps(self.jobs)
+        if a[:2] == ("api", "--paginate") and "/check-runs?" in path:
+            return "\n".join(json.dumps(c) for c in self.check_runs)
+        if a[:2] == ("api", "--paginate") and path.endswith("comments?per_page=100"):
+            return json.dumps(self.comments.get(int(path.split("/issues/")[1].split("/")[0]), []))
         if a[0] == "api" and "/actions/runs/" in a[1]:
             run = a[1].rsplit("/", 1)[1]
             return json.dumps({"id": int(run), "path": ".github/workflows/merge-train.yml",
@@ -422,6 +433,21 @@ def test_a_red_without_evidence_retries_and_never_ejects_must_fire(world: tuple[
     assert cli.run(_opts(), p) == 1 and max(fake.prs) == 101
     assert sum("held out of trains" in s for s in p.summary) == 4
     assert not any(EJECTED in fake.prs[n]["labels"] for n in range(1, 5))
+
+
+def test_a_lost_runner_red_releases_the_riders_never_ejects_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    # td#2988's shape (run 43115550872): the rollup says FAILURE, the jobs say the runner was lost
+    repo, fake = world
+    _riders(repo, fake, 4)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    fake.prs[100]["statusCheckRollup"] = [GREEN[0], {**GREEN[1], "conclusion": "FAILURE"}]
+    fake.check_runs = [{"id": 130850491916, "name": "review gate",
+                        "details_url": "https://github.com/o/r/actions/runs/43115550872/job/130850491916"}]
+    fake.jobs = json.loads((REC / "jobs_trade-data_43115550872_machinery.json").read_text(encoding="utf-8"))
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 1, p.summary          # loud, like every machinery retry
+    assert not any(EJECTED in fake.prs[n]["labels"] for n in range(1, 5))
+    assert any("failed on machinery" in s for s in p.summary)
 
 
 def test_a_gate_block_with_another_check_red_still_bisects(world: tuple[Repo, FakeGH]) -> None:

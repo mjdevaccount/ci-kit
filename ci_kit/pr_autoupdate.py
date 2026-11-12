@@ -50,7 +50,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
-from ci_kit import pr_list, pr_queue
+from ci_kit import pr_heal, pr_list, pr_queue, redclass
 from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
 
 LABEL = "conflict"
@@ -64,6 +64,7 @@ class Options:
     label: str = LABEL  # the conflict label (the page dedup)
     max_in_flight: int = 0  # PRs tested against current main at once (pr_queue); 0 = update every armed PR
     required: tuple[str, ...] = ()  # the check names that count for pr_queue; () = every check
+    rerun_limit: int = pr_heal.LIMIT  # machinery reruns per head (pr_heal); 0 = no smart auto-merge
 
 
 @dataclass(frozen=True)
@@ -142,8 +143,10 @@ def page_text(repo: str, pr: dict, row: str, opts: Options) -> tuple[str, str]:
     return f"{repo.rsplit('/', 1)[-1]} #{pr['number']}: conflicts with main", body
 
 
-def _gh(*args: str, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["gh", *args], check=check, capture_output=True, text=True, env=env)
+def _gh(*args: str, check: bool = True, env: dict[str, str] | None = None,
+        input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    body = {"input": input_text, "encoding": "utf-8"} if input_text is not None else {}  # a comment body on stdin
+    return subprocess.run(["gh", *args], check=check, capture_output=True, text=True, env=env, **body)
 
 
 READ_TOKEN = "CI_KIT_READ_TOKEN"
@@ -212,7 +215,8 @@ def page(title: str, body: str, click: str) -> str:
         return f"push FAILED: {e}"
 
 
-def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Options) -> pr_queue.Plan:
+def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Options,
+                machinery: frozenset[int] = frozenset()) -> pr_queue.Plan:
     """pr_queue's plan with the MERGE TRAIN's PRs taken out (ci_kit/merge_train). A train PR is
     never updated (a merge commit from main would break its one-commit-per-PR chain; a stale train
     is recomposed instead), a PR riding one is left alone, and while a train is open nothing else is
@@ -230,11 +234,13 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
     if riding:
         summary.append(f"riding a merge train, not updated: {', '.join('#' + str(n) for n in sorted(riding))}")
     q = pr_queue.plan([p for p in armed if p not in trains and p["number"] not in riding],
-                      opts.max_in_flight, opts.required)
+                      opts.max_in_flight, opts.required, machinery)
     if trains:
         held = [p for p in q.update if (p.get("mergeStateStatus") or "").upper() != "DIRTY"
                 and not any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
         q.update = [p for p in q.update if p not in held]
+        q.spare = [p for p in q.spare if (p.get("mergeStateStatus") or "").upper() == "DIRTY"
+                   or any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
         q.held += [(p, f"merge train #{trains[-1]['number']} is open") for p in held]
         summary.append(f"merge train #{trains[-1]['number']} open: {len(held)} update(s) held, conflicts still checked")
     return q
@@ -244,7 +250,9 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout))
     armed = [p for p in prs if p.get("autoMergeRequest") and not p.get("isCrossRepository")]
     summary.append(f"{len(armed)} armed PR(s) of {len(prs)} open")
-    q = _train_plan(prs, armed, summary, opts)
+    heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read, _comments, summary)
+    machinery = frozenset(n for n, (v, _, _) in heal.items() if v.kind == redclass.MACHINERY)
+    q = _train_plan(prs, armed, summary, opts, machinery)
     if opts.max_in_flight > 0:
         summary.append(f"queue: {len(q.in_flight)}/{opts.max_in_flight} in flight "
                        f"[{', '.join('#' + str(p['number']) for p in q.in_flight)}], {len(q.update)} to attempt, "
@@ -255,46 +263,99 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     if opts.tracker:
         tracker = _gh("issue", "view", str(opts.tracker), "-R", repo, "--json", "body", "-q",
                       ".body", check=False).stdout
-    errors = 0
-    for p in q.update:
+    todo, spare, attempted, updated = list(q.update), list(q.spare), set(), set()
+    while todo:
+        p = todo.pop(0)
         n = p["number"]
-        labelled = any(lb.get("name") == opts.label for lb in p.get("labels") or [])
         if reviewing(repo, p["headRefName"], opts.review_workflow):
             summary.append(f"#{n}: skipped, review gate running (retried when it completes)")
+            if (p.get("mergeStateStatus") or "").upper() != "DIRTY" and spare:
+                # the slot it would have taken is free: the next PR in line takes it, so one PR's
+                # running review does not idle the queue (td#2980, 2026-11-11: skipped 21:10-23:32Z
+                # with 0/1 in flight while five armed PRs waited behind it)
+                nxt = spare.pop(0)
+                summary.append(f"#{nxt['number']}: takes the slot #{n}'s running review left free")
+                todo.append(nxt)
             continue
-        r = _gh("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
-                "-f", f"expected_head_sha={p['headRefOid']}", check=False)
-        o = classify(r.returncode, r.stdout or r.stderr)
-        if o.kind in ("conflict", "error"):
-            # live proof 2026-09-26: a PR merged between `pr list` and this PUT, and GitHub
-            # answered "merge conflict" for a PR that no longer existed as open
-            state = _gh("pr", "view", str(n), "-R", repo, "--json", "state", "-q", ".state", check=False)
-            if state.returncode == 0 and state.stdout.strip() not in ("", "OPEN"):
-                summary.append(f"#{n}: {state.stdout.strip().lower()} during the update, skipped")
-                continue
-        add, do_page, remove = actions_for(o, labelled)
-        line = f"#{n}: {o.kind}" + (f" ({o.detail})" if o.detail else "")
-        if add:
-            added, created = add_label(repo, n, opts.label)
-            if created:
-                line += f"; `{opts.label}` label created"
-            if not added:
-                # the label IS the page dedup: unlabelled, this PR would be paged on every merge
-                o = Outcome("error", f"conflict, but the `{opts.label}` label could not be added")
-                do_page = False
-            else:
-                relock.append(n)
-        if remove:
-            _gh("pr", "edit", str(n), "-R", repo, "--remove-label", opts.label, check=False)
-            line += "; conflict label removed"
-        if do_page:
-            title, body = page_text(repo, p, tracker_row(tracker, n), opts)
-            line += "; page " + page(title, body, p["url"])
-        if o.kind == "error":
-            errors += 1
-            print(f"::error::#{n}: {o.detail}")
-        summary.append(line)
+        attempted.add(n)
+        kind, line = _update_one(repo, p, opts, tracker, relock)
+        updated |= {n} if kind == "updated" else set()
+        errors += kind == "error"
+        if line:
+            summary.append(line)
+    errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, _write, summary)
+    errors += unlabel_resolved(repo, prs, attempted, opts, summary)
     return 1 if errors else 0
+
+
+def _update_one(repo: str, p: dict, opts: Options, tracker: str, relock: list[int]) -> tuple[str, str]:
+    """PUT update-branch for one PR and act on the answer: (outcome kind | 'gone', summary line)."""
+    n = p["number"]
+    labelled = any(lb.get("name") == opts.label for lb in p.get("labels") or [])
+    r = _gh("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
+            "-f", f"expected_head_sha={p['headRefOid']}", check=False)
+    o = classify(r.returncode, r.stdout or r.stderr)
+    if o.kind in ("conflict", "error"):
+        # live proof 2026-09-26: a PR merged between `pr list` and this PUT, and GitHub
+        # answered "merge conflict" for a PR that no longer existed as open
+        state = _gh("pr", "view", str(n), "-R", repo, "--json", "state", "-q", ".state", check=False)
+        if state.returncode == 0 and state.stdout.strip() not in ("", "OPEN"):
+            return "gone", f"#{n}: {state.stdout.strip().lower()} during the update, skipped"
+    add, do_page, remove = actions_for(o, labelled)
+    line = f"#{n}: {o.kind}" + (f" ({o.detail})" if o.detail else "")
+    if add:
+        added, created = add_label(repo, n, opts.label)
+        if created:
+            line += f"; `{opts.label}` label created"
+        if not added:
+            # the label IS the page dedup: unlabelled, this PR would be paged on every merge
+            o = Outcome("error", f"conflict, but the `{opts.label}` label could not be added")
+            do_page = False
+        else:
+            relock.append(n)
+    if remove:
+        _gh("pr", "edit", str(n), "-R", repo, "--remove-label", opts.label, check=False)
+        line += "; conflict label removed"
+    if do_page:
+        title, body = page_text(repo, p, tracker_row(tracker, n), opts)
+        line += "; page " + page(title, body, p["url"])
+    if o.kind == "error":
+        print(f"::error::#{n}: {o.detail}")
+    return o.kind, line
+
+
+def _write(*args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    return _gh(*args, check=False, input_text=input_text)
+
+
+def _comments(repo: str, n: int) -> list[str]:
+    from ci_kit.merge_train.ops import comments_of  # lazy: merge_train.ops imports this module
+    return comments_of(repo, n)
+
+
+def stale_labels(prs: list[dict], attempted: set[int], label: str) -> list[int]:
+    """Open PRs carrying the conflict label that GitHub now reports MERGEABLE, not attempted this
+    run. Pure. The label was only ever removed from a PR the queue ATTEMPTED; a conflict resolved
+    by a session's push leaves the PR current with main, so it was never attempted again and kept
+    the label (td#2983, 2026-11-11: labelled 23:05Z, resolved 23:32Z, still labelled). `mergeable`
+    is GitHub's own test merge against the CURRENT base, recomputed after every push to it;
+    UNKNOWN (not computed yet) keeps the label until a run that knows."""
+    return sorted(int(p["number"]) for p in prs
+                  if int(p["number"]) not in attempted and (p.get("mergeable") or "").upper() == "MERGEABLE"
+                  and (p.get("mergeStateStatus") or "").upper() != "DIRTY"
+                  and any(lb.get("name") == label for lb in p.get("labels") or []))
+
+
+def unlabel_resolved(repo: str, prs: list[dict], attempted: set[int], opts: Options, summary: list[str]) -> int:
+    errors = 0
+    for n in stale_labels(prs, attempted, opts.label):
+        r = _gh("pr", "edit", str(n), "-R", repo, "--remove-label", opts.label, check=False)
+        if r.returncode:
+            errors += 1
+            print(f"::error::#{n}: could not remove the stale `{opts.label}` label: {(r.stderr or '').strip()[:200]}")
+        summary.append(f"#{n}: `{opts.label}` label {'NOT ' if r.returncode else ''}removed -- GitHub reports it "
+                       "mergeable with main now (resolved since it was labelled)")
+    return errors
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -312,10 +373,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--required-checks", default=os.environ.get("CI_KIT_REQUIRED_CHECKS", ""),
                     help="comma-separated check names that count for the queue ('' : every check on the head;"
                          " default: env CI_KIT_REQUIRED_CHECKS, since names carry spaces)")
+    ap.add_argument("--rerun-limit", type=int, default=pr_heal.LIMIT,
+                    help="smart auto-merge: machinery reruns per PR head (ci_kit/pr_heal.py; 0: off)")
     args = ap.parse_args(argv)
     opts = Options(review_workflow=args.review_workflow, tracker=args.tracker, relock=args.relock,
                    label=args.label, max_in_flight=args.max_in_flight,
-                   required=tuple(s.strip() for s in args.required_checks.split(",") if s.strip()))
+                   required=tuple(s.strip() for s in args.required_checks.split(",") if s.strip()),
+                   rerun_limit=args.rerun_limit)
     summary: list[str] = []
     relock: list[int] = []
     try:
