@@ -36,8 +36,9 @@ def test_checks_are_strict_about_an_absent_required_check() -> None:
                           run("review gate")], REQ)[0] == "red"
 
 
-def test_candidates_oldest_armed_first_and_every_exclusion_named() -> None:
-    prs = [pr(3), pr(1), pr(2),
+def test_candidates_lowest_number_first_and_every_exclusion_named() -> None:
+    # #1 armed LAST (re-armed after a push); it still leads -- the PR number is the landing order
+    prs = [pr(3), pr(1, autoMergeRequest={"enabledAt": "2026-11-12T09:00:00Z"}), pr(2),
            pr(4, autoMergeRequest=None), pr(5, isDraft=True), pr(6, labels=[{"name": OPT_OUT}]),
            pr(7, title="wip [autoland-off]"), pr(8, labels=[{"name": EJECTED}]), pr(9, mergeable="CONFLICTING"),
            pr(10, statusCheckRollup=[run("unit tests", "FAILURE"), run("review gate")]),

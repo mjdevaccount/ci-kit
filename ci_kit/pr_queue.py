@@ -9,7 +9,7 @@ BEHIND again. So updating N PRs at once buys one merge and throws away N-1 CI ru
 
 THE GATE IS UNCHANGED. Branch protection still refuses a PR that is not up to date with main and
 green on its own head. This module changes only WHEN the updater makes a PR up to date: at most
-`max_in_flight` armed PRs are being tested against current main at a time, oldest-armed first.
+`max_in_flight` armed PRs are being tested against current main at a time, lowest PR number first (`landing_order`).
 
 The rules, per armed PR, from `gh pr list --json mergeStateStatus,statusCheckRollup,...`:
 - DIRTY (conflicts with main): always attempted. The PUT pushes nothing on a conflict, so it
@@ -20,8 +20,8 @@ The rules, per armed PR, from `gh pr list --json mergeStateStatus,statusCheckRol
   is; the author's fix pushes a new head, and that push runs its checks.
 - BEHIND or UNKNOWN with a check still RUNNING: held, not updated. An update would cancel that
   run. The caller re-runs the updater when a check workflow completes (`workflow_run`).
-- BEHIND or UNKNOWN with every present check green: eligible. The free slots go to the oldest
-  `autoMergeRequest.enabledAt`.
+- BEHIND or UNKNOWN with every present check green: eligible. The free slots go to the lowest
+  PR number (`landing_order`; arm time was the key until v1.26.0 and let a re-armed PR jump).
 
 `required` narrows which checks count (the names branch protection requires); empty = every
 check on the head. A required check that is ABSENT counts as neither running nor failing. So a
@@ -69,8 +69,12 @@ def check_state(rollup: list[dict] | None, required: tuple[str, ...] = ()) -> st
     return "running" if running else "green"
 
 
-def _armed_at(p: dict) -> tuple[str, int]:
-    return ((p.get("autoMergeRequest") or {}).get("enabledAt") or "", int(p.get("number", 0)))
+def landing_order(p: dict) -> int:
+    """THE order armed PRs land in, for the serial queue AND the merge train: lowest PR number
+    first. The operator reads a backlog by number, so arm time (re-armed by any re-push or
+    autoland toggle) reordered it behind his back (trade-data 2026-11-12: #2980 waited behind
+    #2993/#2994). One key, so the two consumers cannot drift."""
+    return int(p.get("number", 0))
 
 
 def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = ()) -> Plan:
@@ -80,7 +84,7 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = ()) 
         out.update = list(armed)
         return out
     eligible: list[dict] = []
-    for p in sorted(armed, key=_armed_at):
+    for p in sorted(armed, key=landing_order):
         merge = (p.get("mergeStateStatus") or "UNKNOWN").upper()
         checks = check_state(p.get("statusCheckRollup"), required)
         if merge == "DIRTY":

@@ -50,6 +50,13 @@
   prHourlyLimit: 0,
   labels: ["deps"],
   platformAutomerge: false,   // see the header: Renovate waits on EVERY check, then merges
+  // `autoland-off` (the estate's opt-out: a label or a title tag, honoured by the PR hooks, the
+  // merge train and pr-autoupdate) is ALSO Renovate's stop label. Renovate 44 has no "skip automerge"
+  // label, but a PR carrying stopUpdatingLabel returns before the automerge check
+  // (workers/repository/update/branch/index.js), so it neither rebases nor merges it. trade-data#2995
+  // (2026-11-12 03:21:47Z) was merged by Renovate two minutes after a session disarmed it and added
+  // `autoland-off`. Ticking the PR's rebase box overrides the label for that one pass.
+  stopUpdatingLabel: "autoland-off",
   // A relock commit is still Renovate's branch. Renovate will not auto-merge (or rebase) a branch
   // carrying a commit it did not author, and the relock workflows (edge-ci relock-uv.yml, local-mcp
   // relock.yml) commit as github-actions[bot] -- local-mcp#221 sat CLEAN, every check green,
@@ -137,8 +144,9 @@
   // depName is `mjdevaccount/<kit>` in every shape -- the same name the github-actions manager
   // gives a `uses:` -- so a kit release is ONE branch across workflows, scripts and pins (the
   // packageRule "first-party kits" below keeps the actions group from splitting it). Exception:
-  // a uv git source (trade-data `ci-kit = { git = ..., tag = ... }`) is pep621's, and the later
-  // "python (non-major)" group wins for it -- a second PR, which pep621 DOES relock.
+  // a uv git source (trade-data `ci-kit = { git = ..., tag = ... }`) is pep621's with depName
+  // `ci-kit`; the per-kit groups at the end of packageRules put it in the SAME PR (2026-11-12,
+  // trade-data#2995 + #2996 were two heavy runs for one release), and pep621 still relocks it.
   // RELOCKED IN ACTIONS, NOT HERE: a regex manager rewrites pyproject.toml and leaves uv.lock
   // stale, and hosted Renovate runs no postUpgradeTasks. A uv repo whose kit pin only a regex
   // reads -- a release WHEEL (finance-ops, trade-quant, trade-data: slim images with no git, so not
@@ -263,8 +271,8 @@
     // First-party kits: NOT in the actions group. A kit release is one branch per kit, keyed on
     // depName `mjdevaccount/<kit>`, holding its `uses:` lines AND the customManagers pins above --
     // grouped into "github actions" the `uses:` half would land apart from the rest, and
-    // pin-drift reads every shape. (The python group on the next line still wins for a pep621
-    // uv git source of a kit -- see customManagers.)
+    // pin-drift reads every shape. (A pep621 uv git source of a kit, depName `ci-kit`, joins the
+    // same PR through the per-kit groups at the end of this list.)
     // ANY DAY, NO AGE WAIT (2026-11-03, edge-ci#7: ci-kit v1.11.0 "Awaiting Schedule" on a
     // Tuesday while ci-pin-drift stayed red estate-wide). We publish these, so there is no
     // yanked or hijacked upstream to wait out, and deploy-reconcile is already RTH-fenced, which
@@ -295,6 +303,20 @@
       schedule: ["at any time"],
       minimumReleaseAge: null,
     },
+    // ONE PR PER KIT PER RELEASE (2026-11-12). With groupName null, Renovate keys a branch on
+    // depName, and a kit has TWO: `mjdevaccount/ci-kit` (a `uses:` line, the customManagers pins)
+    // and `ci-kit` (trade-data's uv git source, pep621). ci-kit v1.25.0 opened trade-data#2995
+    // "update dependency ci-kit" AND #2996 "update mjdevaccount/ci-kit action", each a full heavy
+    // unit run on trade-data's ONE heavy runner. A named group spans managers, so both depNames
+    // land in one branch. ONE matcher, the source URL (two matchers in one rule must BOTH match):
+    // github-tags (the `uses:` line and the pins) and git-tags (the uv git source) both report
+    // https://github.com/mjdevaccount/<kit>, which is how the rule above already caught #2995.
+    // Not bare depNames: npm has an unrelated `edge-platform`. Same holds as the two rules above
+    // (any time, no age wait). AFTER them on purpose: a later rule wins.
+    { description: "first-party kit ci-kit, one PR per release", matchSourceUrls: ["https://github.com/mjdevaccount/ci-kit", "https://github.com/mjdevaccount/ci-kit.git"], groupName: "ci-kit", schedule: ["at any time"], minimumReleaseAge: null },
+    { description: "first-party kit edge-platform, one PR per release", matchSourceUrls: ["https://github.com/mjdevaccount/edge-platform", "https://github.com/mjdevaccount/edge-platform.git"], groupName: "edge-platform", schedule: ["at any time"], minimumReleaseAge: null },
+    { description: "first-party kit llm-ports, one PR per release", matchSourceUrls: ["https://github.com/mjdevaccount/llm-ports", "https://github.com/mjdevaccount/llm-ports.git"], groupName: "llm-ports", schedule: ["at any time"], minimumReleaseAge: null },
+    { description: "first-party kit market-ports, one PR per release", matchSourceUrls: ["https://github.com/mjdevaccount/market-ports", "https://github.com/mjdevaccount/market-ports.git"], groupName: "market-ports", schedule: ["at any time"], minimumReleaseAge: null },
 
     // ---- container images in compose files DEPLOY ON MERGE ---------------------------------
     // trade-infra's compose is shipped by deploy-reconcile within the hour, unattended.
@@ -495,6 +517,28 @@
     {
       matchPackageNames: ["/^(https://github\\.com/)?mjdevaccount//i"],
       minimumReleaseAge: null,
+    },
+
+    // ---- a repo with a MERGE QUEUE: Renovate never merges (2026-11-12) ----------------------
+    // trade-data runs ci-kit's merge train + serial pr-autoupdate, which land armed PRs lowest
+    // number first, one heavy CI run at a time. Renovate's own merge sees none of it:
+    // trade-data#2995 was merged BY RENOVATE at 03:21:47Z, two minutes after a session ran
+    // `gh pr merge --disable-auto` and added `autoland-off`; it jumped the queue, moved main under
+    // #2981 and cost a full heavy re-run. `platformAutomerge: true` does NOT stop that (Renovate
+    // 44.221.1 source, workers/repository/update/pr/automerge.js): with `automerge` on, every pass
+    // whose branch is green still calls platform.mergePr itself, and reattemptPlatformAutomerge
+    // re-arms a PR a human disarmed. So here Renovate's merge step is `pr-comment`: when green it
+    // only posts the comment below. `automerge` stays true, so the PR body still reads
+    // "**Automerge**: Enabled" -- the verdict mcp scripts/pr_reconcile.py reads to ARM it (squash,
+    // --auto); the queue then lands it like any armed PR, and `--disable-auto` / `autoland-off`
+    // hold it. The every-check gate the header describes becomes the REQUIRED checks here, the
+    // standard every other PR in the repo already merges under. Another repo that adopts
+    // merge-train.yml joins this list.
+    {
+      description: "merge-queue repos: Renovate never merges; the estate arms, the queue lands",
+      matchRepositories: ["mjdevaccount/trade-data"],
+      automergeType: "pr-comment",
+      automergeComment: "Renovate does not merge PRs in this repository (ci-kit renovate/default.json5, merge-queue repos): mcp pr_reconcile arms this PR and the merge train / pr-autoupdate queue lands it in PR-number order. `autoland-off` holds it.",
     },
   ],
 }

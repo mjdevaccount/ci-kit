@@ -1,4 +1,4 @@
-"""pr-autoupdate's two queue fixes (v1.25.1), from trade-data 2026-11-11, both directions.
+"""pr-autoupdate's two queue fixes (v1.26.1), from trade-data 2026-11-11, both directions.
 
 td#2980: picked by the serial queue but skipped for a running review, 21:10-23:32Z, with 0/1 in
 flight: its slot idled while five armed PRs waited. MUST FIRE: the next PR in line takes it.
