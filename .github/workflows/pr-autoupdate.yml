@@ -20,7 +20,9 @@
 # carry these exact names).
 #
 # A conflicting PR gets the conflict label and ONE ntfy page (if `ntfy-url` is given); the label
-# is the dedup. Newly labelled PR numbers come back as output `relock` (JSON list) for a caller
+# is the dedup. SMART AUTO-MERGE (`rerun-limit`, default 2): an armed PR red only on MACHINERY is
+# healed (rerun, or the queue's update when it is behind main); one red on JUDGMENT is named once
+# in a PR comment and left for a session (ci_kit/redclass.py, ci_kit/pr_heal.py). Newly labelled PR numbers come back as output `relock` (JSON list) for a caller
 # that can relock a lockfile.
 #
 # UNCONFIGURED IS RED: with no `token` the job fails naming it. GITHUB_TOKEN is NOT a fallback --
@@ -59,6 +61,14 @@ on:
         description: comma-separated check names the queue reads (your branch protection's required contexts; '' = every check)
         type: string
         default: ""
+      rerun-limit:
+        description: >-
+          smart auto-merge (ci_kit/pr_heal.py): a red on an armed PR that is MACHINERY (a lost runner,
+          a cancelled run, a setup step's network error) is rerun at most this many times per head;
+          a JUDGMENT red gets one PR comment and is never rerun. 0 = off. A rerun needs the `token`
+          PAT to hold Actions: Read and write -- refused, the run is red naming that grant
+        type: number
+        default: 2
     secrets:
       token:
         description: fine-grained PAT with contents, pull requests and workflows RW, actions read, on the caller repo
@@ -124,5 +134,6 @@ jobs:
             --tracker ${{ inputs.tracker }}
             --label ${{ inputs.label }}
             --max-in-flight ${{ inputs.max-in-flight }}
+            --rerun-limit ${{ inputs.rerun-limit }}
             ${{ inputs.review-workflow != '' && format('--review-workflow {0}', inputs.review-workflow) || '' }}
             ${{ inputs.relock && '--relock' || '' }}

@@ -50,11 +50,11 @@ import os
 import subprocess
 import sys
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 
-from ci_kit import pr_list, pr_queue
+from ci_kit import pr_heal, pr_list, pr_queue
 from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
+from ci_kit.ntfy import page  # noqa: F401 -- re-exported: _update_one pages through this name
 
 LABEL = "conflict"
 
@@ -67,6 +67,7 @@ class Options:
     label: str = LABEL  # the conflict label (the page dedup)
     max_in_flight: int = 0  # PRs tested against current main at once (pr_queue); 0 = update every armed PR
     required: tuple[str, ...] = ()  # the check names that count for pr_queue; () = every check
+    rerun_limit: int = pr_heal.LIMIT  # machinery reruns per head (pr_heal); 0 = no smart auto-merge
 
 
 @dataclass(frozen=True)
@@ -201,21 +202,8 @@ def add_label(repo: str, n: int, label: str, color: str = LABEL_COLOR,
     return _gh(*edit, check=False).returncode == 0, created
 
 
-def page(title: str, body: str, click: str) -> str:
-    url = os.environ.get("NTFY_URL", "")
-    if not url:
-        return "NTFY_URL unset: NOT pushed"
-    req = urllib.request.Request(url, data=body.encode(), method="POST", headers={
-        # priority 3: a PR is never a reason to wake the operator
-        "Title": title, "Priority": "3", "Tags": "twisted_rightwards_arrows", "Click": click})
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return f"published ({r.status})"
-    except OSError as e:
-        return f"push FAILED: {e}"
-
-
-def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Options) -> pr_queue.Plan:
+def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Options,
+                machinery: frozenset[int] = frozenset()) -> pr_queue.Plan:
     """pr_queue's plan with the MERGE TRAIN's PRs taken out (ci_kit/merge_train). A train PR is
     never updated (a merge commit from main would break its one-commit-per-PR chain; a stale train
     is recomposed instead), a PR riding one is left alone, and while a train is open nothing else is
@@ -233,7 +221,7 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
     if riding:
         summary.append(f"riding a merge train, not updated: {', '.join('#' + str(n) for n in sorted(riding))}")
     q = pr_queue.plan([p for p in armed if p not in trains and p["number"] not in riding],
-                      opts.max_in_flight, opts.required)
+                      opts.max_in_flight, opts.required, machinery)
     if trains:
         held = [p for p in q.update if (p.get("mergeStateStatus") or "").upper() != "DIRTY"
                 and not any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
@@ -256,7 +244,9 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout))
     armed = [p for p in prs if p.get("autoMergeRequest") and not p.get("isCrossRepository")]
     summary.append(f"{len(armed)} armed PR(s) of {len(prs)} open")
-    q = _train_plan(prs, armed, summary, opts)
+    heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read,
+                                        pr_heal.comments_of, summary)
+    q = _train_plan(prs, armed, summary, opts, pr_heal.machinery(heal))
     if opts.max_in_flight > 0:
         summary.append(f"queue: {len(q.in_flight)}/{opts.max_in_flight} in flight "
                        f"[{', '.join('#' + str(p['number']) for p in q.in_flight)}], {len(q.update)} to attempt, "
@@ -267,8 +257,7 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     if opts.tracker:
         tracker = _gh("issue", "view", str(opts.tracker), "-R", repo, "--json", "body", "-q",
                       ".body", check=False).stdout
-    errors = 0
-    todo, spare, attempted = list(q.update), list(q.spare), set()
+    todo, spare, attempted, updated = list(q.update), list(q.spare), set(), set()
     while todo:
         p = todo.pop(0)
         n = p["number"]
@@ -284,9 +273,11 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
             continue
         attempted.add(n)
         kind, line = _update_one(repo, p, opts, tracker, relock)
+        updated |= {n} if kind == "updated" else set()
         errors += kind == "error"
         if line:
             summary.append(line)
+    errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, pr_heal.write, summary)
     errors += unlabel_resolved(repo, prs, attempted, opts, summary)
     return 1 if errors else 0
 
@@ -367,10 +358,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--required-checks", default=os.environ.get("CI_KIT_REQUIRED_CHECKS", ""),
                     help="comma-separated check names that count for the queue ('' : every check on the head;"
                          " default: env CI_KIT_REQUIRED_CHECKS, since names carry spaces)")
+    ap.add_argument("--rerun-limit", type=int, default=pr_heal.LIMIT,
+                    help="smart auto-merge: machinery reruns per PR head (ci_kit/pr_heal.py; 0: off)")
     args = ap.parse_args(argv)
     opts = Options(review_workflow=args.review_workflow, tracker=args.tracker, relock=args.relock,
                    label=args.label, max_in_flight=args.max_in_flight,
-                   required=tuple(s.strip() for s in args.required_checks.split(",") if s.strip()))
+                   required=tuple(s.strip() for s in args.required_checks.split(",") if s.strip()),
+                   rerun_limit=args.rerun_limit)
     summary: list[str] = []
     relock: list[int] = []
     try:

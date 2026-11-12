@@ -20,7 +20,7 @@ query($owner: String!, $name: String!) {
         labels(first: 30) { nodes { name } }
         commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
           __typename
-          ... on CheckRun { name status conclusion }
+          ... on CheckRun { name status conclusion startedAt }
           ... on StatusContext { context state }
         } } } } } }
       }
