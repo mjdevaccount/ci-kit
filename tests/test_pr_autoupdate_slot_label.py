@@ -25,7 +25,8 @@ def _pr(n: int, **k) -> dict:
             "autoMergeRequest": {"enabledAt": f"2026-11-11T0{n % 10}:00:00Z"}, "statusCheckRollup": [], **k}
 
 
-def _world(monkeypatch: pytest.MonkeyPatch, rows: list[dict], reviewing: set[str], edit_rc: int = 0) -> list[tuple]:
+def _world(monkeypatch: pytest.MonkeyPatch, rows: list[dict], reviewing: set[str], edit_rc: int = 0,
+           put: _Done | None = None) -> list[tuple]:
     calls: list[tuple] = []
     monkeypatch.setattr(upd.pr_list, "rows", lambda _: rows)
     monkeypatch.setattr(upd, "_gh_read", lambda *a: _Done(out="{}"))
@@ -33,7 +34,13 @@ def _world(monkeypatch: pytest.MonkeyPatch, rows: list[dict], reviewing: set[str
 
     def gh(*a: str, **k) -> _Done:
         calls.append(a)
-        return _Done(rc=edit_rc) if a[:2] == ("pr", "edit") else _Done()
+        if a[:2] == ("pr", "edit"):
+            return _Done(rc=edit_rc)
+        if a[:3] == ("api", "-X", "PUT") and put is not None:
+            return put
+        if a[:2] == ("pr", "view"):
+            return _Done(out="OPEN")
+        return _Done()
     monkeypatch.setattr(upd, "_gh", gh)
     return calls
 
@@ -78,7 +85,8 @@ def test_stale_labels_both_directions() -> None:
            _pr(1, mergeable="CONFLICTING", mergeStateStatus="DIRTY", labels=lab),
            _pr(2, mergeable="UNKNOWN", mergeStateStatus="UNKNOWN", labels=lab),  # not computed yet
            _pr(3, mergeStateStatus="CLEAN"),                                      # never labelled
-           _pr(4, labels=lab)]                                                    # attempted: its own path
+           _pr(4, labels=lab),                                                    # attempted: its own path
+           _pr(5, mergeStateStatus="DIRTY", labels=lab)]                          # MERGEABLE but DIRTY: kept
     assert upd.stale_labels(prs, attempted={4}, label="conflict") == [2983]
 
 
@@ -96,3 +104,29 @@ def test_a_label_that_will_not_come_off_is_an_error(monkeypatch: pytest.MonkeyPa
     summary: list[str] = []
     assert upd.run("o/r", summary, [], upd.Options(max_in_flight=1)) == 1
     assert any("label NOT removed" in s for s in summary)
+
+
+def test_a_labelled_pr_whose_update_conflicts_keeps_its_label_must_not_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review finding 1: GitHub said MERGEABLE at list time, main moved, the PUT says conflict. The
+    attempted PR is excluded from the stale sweep, so its list-time MERGEABLE cannot strip the label
+    (which would re-page it next run)."""
+    lab = [{"name": "conflict"}]
+    calls = _world(monkeypatch, [_pr(7, labels=lab)], set(),
+                   put=_Done(rc=1, out='{"message": "merge conflict between base and head"}'))
+    summary: list[str] = []
+    upd.run("o/r", summary, [], upd.Options(max_in_flight=1))
+    assert _puts(calls) == ["repos/o/r/pulls/7/update-branch"]
+    assert not any(a[:2] == ("pr", "edit") and "--remove-label" in a for a in calls)
+
+
+def test_an_open_train_keeps_an_ordinary_spare_out_of_a_freed_slot_must_not_fire(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review finding 2: with a train open, an EJECTED PR mid-review must not hand its slot to an
+    ordinary PR -- updating that one would put the open train BEHIND (the hold's whole point)."""
+    train = _pr(9, headRefName="train/1-1", autoMergeRequest=None)
+    ejected = _pr(1, labels=[{"name": upd.EJECTED}])
+    calls = _world(monkeypatch, [train, ejected, _pr(2)], {"b1"})
+    summary: list[str] = []
+    assert upd.run("o/r", summary, [], upd.Options(max_in_flight=1, review_workflow="rg.yml")) == 0
+    assert _puts(calls) == []
+    assert not any("takes the slot" in s for s in summary)
