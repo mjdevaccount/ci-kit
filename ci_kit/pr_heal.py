@@ -93,8 +93,12 @@ def red_checks(rollup: list[dict] | None, required: tuple[str, ...] = ()) -> lis
     a merge forever and no author's push is owed for it). A name reported twice takes its newest
     answer: GraphQL lists the latest check run per name per suite. Pure."""
     out: list[str] = []
-    for c in rollup or []:
+    newest: dict[str, dict] = {}
+    for c in rollup or []:  # two runs of one workflow at one head are two suites: keep the later
         name = c.get("name") or c.get("context") or ""
+        if name not in newest or str(c.get("startedAt") or "") >= str(newest[name].get("startedAt") or ""):
+            newest[name] = c
+    for name, c in newest.items():
         if required and name not in required:
             continue
         if c.get("__typename") == "StatusContext" or ("state" in c and "status" not in c):

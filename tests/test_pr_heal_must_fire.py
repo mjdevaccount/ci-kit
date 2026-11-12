@@ -93,6 +93,18 @@ def test_red_checks_counts_cancelled_and_failing_required_checks() -> None:
     assert pr_heal.red_checks(roll, ("review gate", "unit tests", "lint")) == ["review gate", "unit tests"]
 
 
+def test_a_superseded_red_is_not_red_but_a_newer_red_is() -> None:
+    """Survey 2026-11-11: 370 of 385 machinery reds were CANCELLED runs, most superseded by a later
+    run at the same head. The later answer decides; order in the rollup must not."""
+    old = {"name": "unit tests", "status": "COMPLETED", "conclusion": "CANCELLED", "startedAt": "2026-11-11T21:00:00Z"}
+    ok = {"name": "unit tests", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-11-11T21:05:00Z"}
+    running = {"name": "unit tests", "status": "IN_PROGRESS", "conclusion": None, "startedAt": "2026-11-11T21:05:00Z"}
+    bad = {"name": "unit tests", "status": "COMPLETED", "conclusion": "FAILURE", "startedAt": "2026-11-11T21:09:00Z"}
+    assert pr_heal.red_checks([old, ok]) == [] and pr_heal.red_checks([ok, old]) == []
+    assert pr_heal.red_checks([running, old]) == []
+    assert pr_heal.red_checks([old, ok, bad]) == ["unit tests"]                     # must fire
+
+
 def test_machinery_is_rerun_up_to_the_limit_then_named_once_must_fire() -> None:
     v = _verdict()
     assert pr_heal.decide(v, [], behind=False, limit=2)[0] == "rerun"
