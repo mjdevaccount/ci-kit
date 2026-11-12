@@ -152,3 +152,21 @@ def test_an_open_train_hands_a_reviewing_ejected_slot_to_the_next_ejected_must_f
     calls = _world(monkeypatch, [train, _pr(1, labels=ej), _pr(2), _pr(3, labels=ej)], {"b1"})
     assert upd.run("o/r", [], [], upd.Options(max_in_flight=1, review_workflow="rg.yml")) == 0
     assert _puts(calls) == ["repos/o/r/pulls/3/update-branch"]
+
+
+def test_promotion_fills_only_the_slots_the_hold_emptied_and_leaves_spare_must_not_fire(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of 8a4d43e, gaps 1+2: ONE held ordinary PR frees ONE slot, so exactly one ejected
+    spare is promoted (never two -- max-in-flight), and the promoted PR leaves spare, so its own
+    running review hands on to the NEXT ejected PR, never back to itself."""
+    train = _pr(9, headRefName="train/1-1", autoMergeRequest=None)
+    ej = [{"name": upd.EJECTED}]
+    rows = [train, _pr(1), _pr(2, labels=ej), _pr(3, labels=ej), _pr(4, labels=ej)]
+    calls = _world(monkeypatch, rows, set())
+    assert upd.run("o/r", [], [], upd.Options(max_in_flight=1)) == 0
+    assert _puts(calls) == ["repos/o/r/pulls/2/update-branch"]                 # one slot, one PR
+    calls = _world(monkeypatch, rows, {"b2"})
+    summary: list[str] = []
+    assert upd.run("o/r", summary, [], upd.Options(max_in_flight=1, review_workflow="rg.yml")) == 0
+    assert _puts(calls) == ["repos/o/r/pulls/3/update-branch"]
+    assert not any(s.startswith("#2: takes the slot") for s in summary)
