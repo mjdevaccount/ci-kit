@@ -130,3 +130,25 @@ def test_an_open_train_keeps_an_ordinary_spare_out_of_a_freed_slot_must_not_fire
     assert upd.run("o/r", summary, [], upd.Options(max_in_flight=1, review_workflow="rg.yml")) == 0
     assert _puts(calls) == []
     assert not any("takes the slot" in s for s in summary)
+
+
+def test_an_open_train_gives_the_slot_it_holds_to_an_ejected_pr_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of 1.26.1, finding 1: the slot went to ordinary #1, the train hold took it back, and
+    ejected #2 waited in spare forever -- 0/1 in flight. The emptied slot goes to #2 now."""
+    train = _pr(9, headRefName="train/1-1", autoMergeRequest=None)
+    calls = _world(monkeypatch, [train, _pr(1), _pr(2, labels=[{"name": upd.EJECTED}]), _pr(3)], set())
+    summary: list[str] = []
+    assert upd.run("o/r", summary, [], upd.Options(max_in_flight=1)) == 0
+    assert _puts(calls) == ["repos/o/r/pulls/2/update-branch"]                 # never 1 or 3
+    assert not any(s.startswith("#2: held") for s in summary)
+
+
+def test_an_open_train_hands_a_reviewing_ejected_slot_to_the_next_ejected_must_fire(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of 1.26.1, finding 2: the positive train-open handoff. Ejected #1 is mid-review;
+    ejected #3 takes its slot, ordinary #2 never does."""
+    train = _pr(9, headRefName="train/1-1", autoMergeRequest=None)
+    ej = [{"name": upd.EJECTED}]
+    calls = _world(monkeypatch, [train, _pr(1, labels=ej), _pr(2), _pr(3, labels=ej)], {"b1"})
+    assert upd.run("o/r", [], [], upd.Options(max_in_flight=1, review_workflow="rg.yml")) == 0
+    assert _puts(calls) == ["repos/o/r/pulls/3/update-branch"]

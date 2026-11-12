@@ -238,8 +238,15 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
         held = [p for p in q.update if (p.get("mergeStateStatus") or "").upper() != "DIRTY"
                 and not any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
         q.update = [p for p in q.update if p not in held]
-        q.spare = [p for p in q.spare if (p.get("mergeStateStatus") or "").upper() == "DIRTY"
-                   or any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
+        # spare holds only eligible PRs, never DIRTY: with a train open only an EJECTED or
+        # train-needs-update one may take a slot. Each slot the hold just emptied goes to the next
+        # of those, so an ordinary lower-numbered PR held for the train cannot idle the slot an
+        # ejected PR needs (td#2980's idle slot, train edition -- review of 1.26.1, finding 1).
+        q.spare = [p for p in q.spare
+                   if any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
+        promoted, q.spare = q.spare[:len(held)], q.spare[len(held):]
+        q.update += promoted
+        q.held = [(p, why) for p, why in q.held if p not in promoted]
         q.held += [(p, f"merge train #{trains[-1]['number']} is open") for p in held]
         summary.append(f"merge train #{trains[-1]['number']} open: {len(held)} update(s) held, conflicts still checked")
     return q
