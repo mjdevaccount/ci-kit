@@ -71,7 +71,7 @@ on:
         type: string
         default: ""
       max-batch:
-        description: at most this many PRs per train, oldest-armed first
+        description: at most this many PRs per train, lowest PR number first
         type: number
         default: 8
       min-batch:

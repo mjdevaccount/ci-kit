@@ -14,7 +14,7 @@ workflow finishing on a train branch, and when a PR gets the `merge-train` label
      evidence (a check that never ran, a BLIND/BLOCKED gate) -> release every rider for a retry;
      stale (main moved) / stuck (pending past --stale-minutes) -> close it, release the riders.
   3. RELEASE strays: an `in-train` label on a PR no open train carries (pr_autoupdate skips it).
-  4. COMPOSE when >= --min-batch candidates (policy.candidates) remain, oldest-armed first, at
+  4. COMPOSE when >= --min-batch candidates (policy.candidates) remain, lowest PR number first, at
      most --max-batch boarding: each one's release history (policy.rider_gate: hold after
      repeated stuck or machinery releases at one head), its head fetched and its review re-read at
      that head ON THIS BASE (github.review_passed: a run created after the PR's last base change),

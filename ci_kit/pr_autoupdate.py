@@ -23,7 +23,7 @@ OPTIONS. `--review-workflow` (skip a PR whose review gate is running; empty = th
 `--tracker` (the issue whose row a page quotes; 0 = none), `--relock` (the caller relocks
 lockfile-only conflicts, so the page says so), `--label` (the conflict label; `conflict`), and
 `--max-in-flight N` + `--required-checks a,b` (a serial queue: at most N armed PRs tested against
-current main at once, oldest-armed first; 0 = every armed PR. The policy and the measurement
+current main at once, lowest PR number first; 0 = every armed PR. The policy and the measurement
 behind it: ci_kit/pr_queue.py).
 
 CONFLICT = TRANSITION-ONLY PAGE. The conflict label is the dedup state: a PR that conflicts and
@@ -308,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="the caller relocks lockfile-only conflicts; say so in the page")
     ap.add_argument("--label", default=LABEL, help="the conflict label (default: %(default)s)")
     ap.add_argument("--max-in-flight", type=int, default=0,
-                    help="armed PRs tested against current main at once, oldest-armed first (0: every armed PR)")
+                    help="armed PRs tested against current main at once, lowest PR number first (0: every armed PR)")
     ap.add_argument("--required-checks", default=os.environ.get("CI_KIT_REQUIRED_CHECKS", ""),
                     help="comma-separated check names that count for the queue ('' : every check on the head;"
                          " default: env CI_KIT_REQUIRED_CHECKS, since names carry spaces)")
