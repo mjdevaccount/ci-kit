@@ -13,6 +13,7 @@ workflow finishing on a train branch, and when a PR gets the `merge-train` label
      merge it (phases.land); red -> close it and bisect (policy.split), unless the red is no
      evidence (a check that never ran, a BLIND/BLOCKED gate) -> release every rider for a retry;
      stale (main moved) / stuck (pending past --stale-minutes) -> close it, release the riders.
+     Every close is ops.close_train: the train branch's unfinished runs are cancelled with it.
   3. RELEASE strays: an `in-train` label on a PR no open train carries (pr_autoupdate skips it).
   4. COMPOSE when >= --min-batch candidates (policy.candidates) remain, lowest PR number first, at
      most --max-batch boarding: each one's release history (policy.rider_gate: hold after
@@ -31,9 +32,9 @@ that lands. A rebase merge makes one main commit
 per PR with the PR's own title, body and trailers; the tree of the last one is the train's tested
 tree, so a caller's "tested-tree" reuse (trade-data ci.yml) re-tests nothing on that push.
 
-THE TOKEN is the caller's fine-grained PAT (`GH_TOKEN`: contents, pull requests and workflows
-RW, actions read) -- a push or PR made with GITHUB_TOKEN fires no workflow, so the train's checks
-would never start. Check runs are read with `CI_KIT_READ_TOKEN` (GITHUB_TOKEN), as pr_autoupdate
+THE TOKEN is the caller's fine-grained PAT (`GH_TOKEN`: contents, pull requests, workflows and
+actions RW; actions to cancel a closed train's runs) -- a push or PR made with GITHUB_TOKEN fires
+no workflow, so the train's checks would never start. Check runs are read with `CI_KIT_READ_TOKEN` (GITHUB_TOKEN), as pr_autoupdate
 does: GitHub refuses a fine-grained PAT the check runs.
 
 TELEMETRY. Each pass writes its summary (step summary + log): the workflow run is the
@@ -64,7 +65,7 @@ from pathlib import Path
 from ci_kit import pr_list
 from ci_kit.merge_train import RIDING, ops, phases, policy
 from ci_kit.merge_train import git as tgit
-from ci_kit.merge_train.ops import Opts, Pass, close, comment, fetch, label
+from ci_kit.merge_train.ops import Opts, Pass, comment, fetch, label
 from ci_kit.pr_autoupdate import _gh_read
 
 __all__ = ["Opts", "Pass", "main", "run", "workspace"]
@@ -99,7 +100,7 @@ def run(o: Opts, p: Pass) -> int:
     exclude: frozenset[int] = frozenset()
     for extra in trains[:-1]:  # one train at a time: an older open one is superseded
         comment(o, p, int(extra["number"]), "Closed: a newer train is open.")
-        close(o, p, int(extra["number"]), delete_branch=True)
+        ops.close_train(o, p, extra)
     if trains:
         stop, riding, exclude = phases.judge(o, p, d, trains[-1], main_sha)
         if stop:

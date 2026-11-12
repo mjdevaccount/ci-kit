@@ -42,7 +42,8 @@ def test_no_later_rule_puts_a_hold_back_on_a_registry_manager() -> None:
     # a later rule re-holds a kit when it sets a hold AND reaches registry packages: a registry
     # manager (or no manager filter) and no package list, or a package list naming a kit
     later = [r for r in _rules()[at + 1:]
-             if any(k in r and r[k] is not None for k in HOLDS)
+             if r not in _kit_groups()
+             and any(k in r and r[k] is not None for k in HOLDS)
              and (not r.get("matchManagers") or set(r["matchManagers"]) & REGISTRY_MANAGERS)
              and (not r.get("matchPackageNames")
                   or any("mjdevaccount" in str(p).lower() or str(p) == "llm-ports" for p in r["matchPackageNames"]))]
@@ -53,3 +54,25 @@ def test_the_source_rule_comes_after_the_python_group() -> None:
     at, _ = _source_rule()
     python_group = [i for i, r in enumerate(_rules()) if r.get("groupName") == "python (non-major)"]
     assert python_group and max(python_group) < at
+
+
+KITS = ("ci-kit", "edge-platform", "llm-ports", "market-ports")
+
+
+def _kit_groups() -> list[dict]:
+    return [r for r in _rules() if r.get("groupName") in KITS]
+
+
+def test_each_kit_release_is_one_pr_across_its_depnames_must_fire() -> None:
+    # trade-data 2026-11-12: ci-kit v1.25.0 opened #2995 (pep621, depName `ci-kit`) AND #2996
+    # (github-actions, depName `mjdevaccount/ci-kit`) -- two heavy unit runs for one release
+    at, _ = _source_rule()
+    groups = {r["groupName"]: (i, r) for i, r in enumerate(_rules()) if r in _kit_groups()}
+    assert set(groups) == set(KITS)
+    for kit, (i, r) in groups.items():
+        assert i > at, f"{kit}: a later rule wins, so the group must follow the source-url rule"
+        assert set(r["matchDepNames"]) == {kit, f"mjdevaccount/{kit}"}
+        # ONE matcher: two matchers in one rule must both match, and a git source's packageName is its URL
+        assert set(r) - {"description"} == {"matchDepNames", *HOLDS}
+        assert r["schedule"] == ["at any time"] and r["minimumReleaseAge"] is None
+        assert not any(kit in str(x.get("matchDepNames", "")) for x in _rules()[i + 1:] if x.get("groupName"))

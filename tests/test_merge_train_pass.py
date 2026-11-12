@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import subprocess
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,8 @@ class FakeGH:
         self.comments: dict[int, list[str]] = {}
         self.close_fail: set[int] = set()
         self.merge_fail = ""
+        self.runs: list[dict] = []               # workflow runs: id, status, head_branch, path
+        self.cancel_fail: dict[int, str] = {}    # run id -> what gh says when the cancel is refused
 
     def add(self, n: int, head: str, **k) -> None:
         self.prs[n] = {"number": n, "title": f"feat: {n}", "body": f"body {n}", "headRefName": f"pr{n}",
@@ -76,6 +79,17 @@ class FakeGH:
             return json.dumps(got)
         if a[:2] == ("api", "graphql"):
             return self._gql()
+        if a[:3] == ("api", "-X", "POST") and a[3].endswith("/cancel"):
+            rid = int(a[3].split("/actions/runs/")[1].split("/")[0])
+            if rid in self.cancel_fail:
+                return 1, self.cancel_fail[rid]
+            for r in self.runs:
+                if r["id"] == rid:
+                    r["status"] = "completed"
+            return "{}"
+        if a[0] == "api" and "/actions/runs?" in a[1]:  # after gh's --jq: the runs on that branch
+            branch = urllib.parse.parse_qs(a[1].split("?", 1)[1])["branch"][0]
+            return json.dumps([r for r in self.runs if r["head_branch"] == branch])
         if a[:2] == ("api", "user"):
             return json.dumps({"login": "me", "id": 1})
         if a[0] == "api" and "/actions/workflows/" in a[1]:

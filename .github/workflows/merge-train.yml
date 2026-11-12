@@ -43,7 +43,8 @@
 #
 # THE TOKEN MUST NOT BE GITHUB_TOKEN: a push or PR made with it fires no workflow, so the train's
 # checks would never start. Unconfigured is RED. The PAT needs contents, pull requests and
-# workflows RW (a train carrying a workflow edit is refused without workflows), actions read.
+# workflows RW (a train carrying a workflow edit is refused without workflows), actions RW (a closed
+# train's unfinished runs are cancelled, v1.26.0: without it each close is a red run naming the 403).
 #
 # pull_request_target, NOT pull_request: the job checks NOTHING out and runs no PR code (git
 # reads PR heads as data in a temp repo), and the BASE branch's copy of the caller decides what
@@ -92,7 +93,7 @@ on:
         default: false
     secrets:
       token:
-        description: fine-grained PAT with contents, pull requests and workflows RW, actions read, on the caller repo
+        description: fine-grained PAT with contents, pull requests, workflows and actions RW, on the caller repo
         required: true
 
 permissions:
@@ -122,7 +123,7 @@ jobs:
       - name: Refuse to run unconfigured
         run: |
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::secret 'token' is empty for $GITHUB_REPOSITORY: no merge train runs. Map a fine-grained token (contents, pull requests, workflows: read+write; actions: read) onto 'token'."
+            echo "::error::secret 'token' is empty for $GITHUB_REPOSITORY: no merge train runs. Map a fine-grained token (contents, pull requests, workflows, actions: read+write) onto 'token'."
             exit 1
           fi
       - name: One pass

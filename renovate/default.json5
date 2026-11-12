@@ -137,8 +137,9 @@
   // depName is `mjdevaccount/<kit>` in every shape -- the same name the github-actions manager
   // gives a `uses:` -- so a kit release is ONE branch across workflows, scripts and pins (the
   // packageRule "first-party kits" below keeps the actions group from splitting it). Exception:
-  // a uv git source (trade-data `ci-kit = { git = ..., tag = ... }`) is pep621's, and the later
-  // "python (non-major)" group wins for it -- a second PR, which pep621 DOES relock.
+  // a uv git source (trade-data `ci-kit = { git = ..., tag = ... }`) is pep621's with depName
+  // `ci-kit`; the per-kit groups at the end of packageRules put it in the SAME PR (2026-11-12,
+  // trade-data#2995 + #2996 were two heavy runs for one release), and pep621 still relocks it.
   // RELOCKED IN ACTIONS, NOT HERE: a regex manager rewrites pyproject.toml and leaves uv.lock
   // stale, and hosted Renovate runs no postUpgradeTasks. A uv repo whose kit pin only a regex
   // reads -- a release WHEEL (finance-ops, trade-quant, trade-data: slim images with no git, so not
@@ -263,8 +264,8 @@
     // First-party kits: NOT in the actions group. A kit release is one branch per kit, keyed on
     // depName `mjdevaccount/<kit>`, holding its `uses:` lines AND the customManagers pins above --
     // grouped into "github actions" the `uses:` half would land apart from the rest, and
-    // pin-drift reads every shape. (The python group on the next line still wins for a pep621
-    // uv git source of a kit -- see customManagers.)
+    // pin-drift reads every shape. (A pep621 uv git source of a kit, depName `ci-kit`, joins the
+    // same PR through the per-kit groups at the end of this list.)
     // ANY DAY, NO AGE WAIT (2026-11-03, edge-ci#7: ci-kit v1.11.0 "Awaiting Schedule" on a
     // Tuesday while ci-pin-drift stayed red estate-wide). We publish these, so there is no
     // yanked or hijacked upstream to wait out, and deploy-reconcile is already RTH-fenced, which
@@ -295,6 +296,18 @@
       schedule: ["at any time"],
       minimumReleaseAge: null,
     },
+    // ONE PR PER KIT PER RELEASE (2026-11-12). With groupName null, Renovate keys a branch on
+    // depName, and a kit has TWO: `mjdevaccount/ci-kit` (a `uses:` line, the customManagers pins)
+    // and `ci-kit` (trade-data's uv git source, pep621). ci-kit v1.25.0 opened trade-data#2995
+    // "update dependency ci-kit" AND #2996 "update mjdevaccount/ci-kit action", each a full heavy
+    // unit run on trade-data's ONE heavy runner. A named group spans managers, so both depNames
+    // land in one branch. matchDepNames, not matchPackageNames: a uv git source's packageName is
+    // its URL, and two matchers in one rule must BOTH match. Same holds as the two rules above
+    // (any time, no age wait). AFTER them on purpose: a later rule wins.
+    { description: "first-party kit ci-kit, one PR per release", matchDepNames: ["ci-kit", "mjdevaccount/ci-kit"], groupName: "ci-kit", schedule: ["at any time"], minimumReleaseAge: null },
+    { description: "first-party kit edge-platform, one PR per release", matchDepNames: ["edge-platform", "mjdevaccount/edge-platform"], groupName: "edge-platform", schedule: ["at any time"], minimumReleaseAge: null },
+    { description: "first-party kit llm-ports, one PR per release", matchDepNames: ["llm-ports", "mjdevaccount/llm-ports"], groupName: "llm-ports", schedule: ["at any time"], minimumReleaseAge: null },
+    { description: "first-party kit market-ports, one PR per release", matchDepNames: ["market-ports", "mjdevaccount/market-ports"], groupName: "market-ports", schedule: ["at any time"], minimumReleaseAge: null },
 
     // ---- container images in compose files DEPLOY ON MERGE ---------------------------------
     // trade-infra's compose is shipped by deploy-reconcile within the hour, unattended.
