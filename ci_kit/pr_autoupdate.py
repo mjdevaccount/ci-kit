@@ -24,13 +24,16 @@ OPTIONS. `--review-workflow` (skip a PR whose review gate is running; empty = th
 lockfile-only conflicts, so the page says so), `--label` (the conflict label; `conflict`), and
 `--max-in-flight N` + `--required-checks a,b` (a serial queue: at most N armed PRs tested against
 current main at once, oldest-armed first; 0 = every armed PR. The policy and the measurement
-behind it: ci_kit/pr_queue.py).
+behind it: ci_kit/pr_queue.py). A PR the queue picked but skipped for a running review hands its
+slot to the next eligible PR (`Plan.spare`), so one long review does not idle the queue.
 
 CONFLICT = TRANSITION-ONLY PAGE. The conflict label is the dedup state: a PR that conflicts and
 is not labelled gets the label AND one ntfy push (env `NTFY_URL`; unset = no push) naming the PR
 and its tracker row; one already labelled gets neither again. A PR that updates cleanly loses the
-label. Each NEWLY labelled PR is emitted as output `relock` for a caller that can relock a
-lockfile-only conflict. Not a `labeled` trigger: GitHub runs no `pull_request` workflow on a PR
+label, and so does ANY open PR carrying it that GitHub now reports MERGEABLE (stale_labels): a
+conflict a session resolved leaves the PR current with main, so it is never attempted again.
+Each NEWLY labelled PR is emitted as output `relock` for a caller that can relock a lockfile-only
+conflict. Not a `labeled` trigger: GitHub runs no `pull_request` workflow on a PR
 with a merge conflict, so that trigger could never fire. A repo with no such label refuses the
 add, so a failed add looks the label up, CREATES it when missing (a `::notice::` names repo and
 label: the create is itself an event) and retries the add ONCE. Only a second failure is an
@@ -235,6 +238,8 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
         held = [p for p in q.update if (p.get("mergeStateStatus") or "").upper() != "DIRTY"
                 and not any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
         q.update = [p for p in q.update if p not in held]
+        q.spare = [p for p in q.spare if (p.get("mergeStateStatus") or "").upper() == "DIRTY"
+                   or any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
         q.held += [(p, f"merge train #{trains[-1]['number']} is open") for p in held]
         summary.append(f"merge train #{trains[-1]['number']} open: {len(held)} update(s) held, conflicts still checked")
     return q
@@ -256,45 +261,88 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
         tracker = _gh("issue", "view", str(opts.tracker), "-R", repo, "--json", "body", "-q",
                       ".body", check=False).stdout
     errors = 0
-    for p in q.update:
+    todo, spare, attempted = list(q.update), list(q.spare), set()
+    while todo:
+        p = todo.pop(0)
         n = p["number"]
-        labelled = any(lb.get("name") == opts.label for lb in p.get("labels") or [])
         if reviewing(repo, p["headRefName"], opts.review_workflow):
             summary.append(f"#{n}: skipped, review gate running (retried when it completes)")
+            if (p.get("mergeStateStatus") or "").upper() != "DIRTY" and spare:
+                # the slot it would have taken is free: the next PR in line takes it, so one PR's
+                # running review does not idle the queue (td#2980, 2026-11-11: skipped 21:10-23:32Z
+                # with 0/1 in flight while five armed PRs waited behind it)
+                nxt = spare.pop(0)
+                summary.append(f"#{nxt['number']}: takes the slot #{n}'s running review left free")
+                todo.append(nxt)
             continue
-        r = _gh("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
-                "-f", f"expected_head_sha={p['headRefOid']}", check=False)
-        o = classify(r.returncode, r.stdout or r.stderr)
-        if o.kind in ("conflict", "error"):
-            # live proof 2026-09-26: a PR merged between `pr list` and this PUT, and GitHub
-            # answered "merge conflict" for a PR that no longer existed as open
-            state = _gh("pr", "view", str(n), "-R", repo, "--json", "state", "-q", ".state", check=False)
-            if state.returncode == 0 and state.stdout.strip() not in ("", "OPEN"):
-                summary.append(f"#{n}: {state.stdout.strip().lower()} during the update, skipped")
-                continue
-        add, do_page, remove = actions_for(o, labelled)
-        line = f"#{n}: {o.kind}" + (f" ({o.detail})" if o.detail else "")
-        if add:
-            added, created = add_label(repo, n, opts.label)
-            if created:
-                line += f"; `{opts.label}` label created"
-            if not added:
-                # the label IS the page dedup: unlabelled, this PR would be paged on every merge
-                o = Outcome("error", f"conflict, but the `{opts.label}` label could not be added")
-                do_page = False
-            else:
-                relock.append(n)
-        if remove:
-            _gh("pr", "edit", str(n), "-R", repo, "--remove-label", opts.label, check=False)
-            line += "; conflict label removed"
-        if do_page:
-            title, body = page_text(repo, p, tracker_row(tracker, n), opts)
-            line += "; page " + page(title, body, p["url"])
-        if o.kind == "error":
-            errors += 1
-            print(f"::error::#{n}: {o.detail}")
-        summary.append(line)
+        attempted.add(n)
+        kind, line = _update_one(repo, p, opts, tracker, relock)
+        errors += kind == "error"
+        if line:
+            summary.append(line)
+    errors += unlabel_resolved(repo, prs, attempted, opts, summary)
     return 1 if errors else 0
+
+
+def _update_one(repo: str, p: dict, opts: Options, tracker: str, relock: list[int]) -> tuple[str, str]:
+    """PUT update-branch for one PR and act on the answer: (outcome kind | 'gone', summary line)."""
+    n = p["number"]
+    labelled = any(lb.get("name") == opts.label for lb in p.get("labels") or [])
+    r = _gh("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
+            "-f", f"expected_head_sha={p['headRefOid']}", check=False)
+    o = classify(r.returncode, r.stdout or r.stderr)
+    if o.kind in ("conflict", "error"):
+        # live proof 2026-09-26: a PR merged between `pr list` and this PUT, and GitHub
+        # answered "merge conflict" for a PR that no longer existed as open
+        state = _gh("pr", "view", str(n), "-R", repo, "--json", "state", "-q", ".state", check=False)
+        if state.returncode == 0 and state.stdout.strip() not in ("", "OPEN"):
+            return "gone", f"#{n}: {state.stdout.strip().lower()} during the update, skipped"
+    add, do_page, remove = actions_for(o, labelled)
+    line = f"#{n}: {o.kind}" + (f" ({o.detail})" if o.detail else "")
+    if add:
+        added, created = add_label(repo, n, opts.label)
+        if created:
+            line += f"; `{opts.label}` label created"
+        if not added:
+            # the label IS the page dedup: unlabelled, this PR would be paged on every merge
+            o = Outcome("error", f"conflict, but the `{opts.label}` label could not be added")
+            do_page = False
+        else:
+            relock.append(n)
+    if remove:
+        _gh("pr", "edit", str(n), "-R", repo, "--remove-label", opts.label, check=False)
+        line += "; conflict label removed"
+    if do_page:
+        title, body = page_text(repo, p, tracker_row(tracker, n), opts)
+        line += "; page " + page(title, body, p["url"])
+    if o.kind == "error":
+        print(f"::error::#{n}: {o.detail}")
+    return o.kind, line
+
+
+def stale_labels(prs: list[dict], attempted: set[int], label: str) -> list[int]:
+    """Open PRs carrying the conflict label that GitHub now reports MERGEABLE, not attempted this
+    run. Pure. The label was only ever removed from a PR the queue ATTEMPTED; a conflict resolved
+    by a session's push leaves the PR current with main, so it was never attempted again and kept
+    the label (td#2983, 2026-11-11: labelled 23:05Z, resolved 23:32Z, still labelled). `mergeable`
+    is GitHub's own test merge against the CURRENT base, recomputed after every push to it;
+    UNKNOWN (not computed yet) keeps the label until a run that knows."""
+    return sorted(int(p["number"]) for p in prs
+                  if int(p["number"]) not in attempted and (p.get("mergeable") or "").upper() == "MERGEABLE"
+                  and (p.get("mergeStateStatus") or "").upper() != "DIRTY"
+                  and any(lb.get("name") == label for lb in p.get("labels") or []))
+
+
+def unlabel_resolved(repo: str, prs: list[dict], attempted: set[int], opts: Options, summary: list[str]) -> int:
+    errors = 0
+    for n in stale_labels(prs, attempted, opts.label):
+        r = _gh("pr", "edit", str(n), "-R", repo, "--remove-label", opts.label, check=False)
+        if r.returncode:
+            errors += 1
+            print(f"::error::#{n}: could not remove the stale `{opts.label}` label: {(r.stderr or '').strip()[:200]}")
+        summary.append(f"#{n}: `{opts.label}` label {'NOT ' if r.returncode else ''}removed -- GitHub reports it "
+                       "mergeable with main now (resolved since it was labelled)")
+    return errors
 
 
 def main(argv: list[str] | None = None) -> int:
