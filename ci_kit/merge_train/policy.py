@@ -44,6 +44,7 @@ from __future__ import annotations
 import re
 
 from ci_kit.merge_train import EJECTED, OPT_OUT, RIDING, TRAIN_PREFIX
+from ci_kit.pr_queue import landing_order
 
 PASS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 # CANCELLED / STALE are NOT failures: a cancelled check is no evidence against any PR, so it
@@ -156,15 +157,11 @@ def why_not(pr: dict, required: tuple[str, ...], base: str = "main") -> str:
     return ""
 
 
-def armed_at(pr: dict) -> tuple[str, int]:
-    return ((pr.get("autoMergeRequest") or {}).get("enabledAt") or "", int(pr.get("number", 0)))
-
-
 def candidates(prs: list[dict], required: tuple[str, ...], base: str = "main",
                exclude: frozenset[int] = frozenset()) -> tuple[list[dict], list[tuple[dict, str]]]:
-    """(candidates oldest-armed first, [(pr, why not)]). `exclude` = numbers ejected this run."""
+    """(candidates lowest PR number first, [(pr, why not)]). `exclude` = numbers ejected this run."""
     ok, no = [], []
-    for p in sorted(prs, key=armed_at):
+    for p in sorted(prs, key=landing_order):
         why = "ejected from a train this run" if p.get("number") in exclude else why_not(p, required, base)
         (no.append((p, why)) if why else ok.append(p))
     return ok, no

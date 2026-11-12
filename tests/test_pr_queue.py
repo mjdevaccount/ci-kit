@@ -52,10 +52,11 @@ def test_zero_is_the_old_behaviour_every_armed_pr() -> None:
     assert _nums(plan(prs, 0).update) == [1, 2, 3]
 
 
-def test_one_slot_goes_to_the_oldest_green_behind_pr() -> None:
+def test_one_slot_goes_to_the_lowest_numbered_green_behind_pr() -> None:
+    # #2 armed EARLIEST; #1 still goes first -- the PR number is the landing order, not arm time
     prs = [_pr(3, "BEHIND", GREEN), _pr(2, "BEHIND", GREEN, armed_at="2026-10-23T09:00:00Z"), _pr(1, "BEHIND", GREEN)]
     q = plan(prs, 1)
-    assert _nums(q.update) == [2]
+    assert _nums(q.update) == [1]
     assert [why for _, why in q.held] == ["queued, position 1 (in flight: 0/1)", "queued, position 2 (in flight: 0/1)"]
 
 
