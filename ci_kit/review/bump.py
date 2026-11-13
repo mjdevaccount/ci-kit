@@ -36,7 +36,8 @@ The caller still forces a review with its label.
 THIS IS THE SECOND LOCK, NOT THE FIRST. A diff alone cannot prove a new commit SHA or digest is the
 release it claims, nor that a lockfile riding along holds only that bump (reviewer 11-11 #2, #5).
 ci_kit.review.tier calls this only for a same-repo PR OPENED BY Renovate whose every non-merge
-commit Renovate authored and every merge is a clean, unedited one (tier.bot_authored).
+commit Renovate authored (or touches lockfiles only, whoever authored it) and every merge is a
+clean, unedited one (tier.bump_identity).
 """
 from __future__ import annotations
 
