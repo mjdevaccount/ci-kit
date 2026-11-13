@@ -308,7 +308,8 @@ def _relock(pr: Path, files: dict[str, bytes | None], email: str = ACTIONS, allo
 
 
 def _run_relock(pr: Path, monkeypatch: pytest.MonkeyPatch, before: dict[str, bytes],
-                relock: dict[str, bytes | None], allow_empty: bool = False) -> str:
+                relock: dict[str, bytes | None], allow_empty: bool = False,
+                guard_files: str = "requirements.txt") -> str:
     for name, data in before.items():   # already on main, below the PR's base
         (pr / name).parent.mkdir(parents=True, exist_ok=True)
         (pr / name).write_bytes(data)
@@ -318,6 +319,7 @@ def _run_relock(pr: Path, monkeypatch: pytest.MonkeyPatch, before: dict[str, byt
     _relock(pr, relock, allow_empty=allow_empty)
     monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
     monkeypatch.setenv("GUARD", "true")
+    monkeypatch.setenv("GUARD_FILES", guard_files)
     monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
     monkeypatch.setattr(tier, "verified", lambda repo, sha: _git(pr, "log", "-1", "--format=%ae", sha) == RENOVATE)
     assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
@@ -330,14 +332,18 @@ def test_a_foreign_lockfile_only_commit_on_a_bot_bump_skips(pr: Path, monkeypatc
     assert _run_relock(pr, monkeypatch, LOCK, {"uv.lock": b"ci-kit 1.27.1" + bytes([10])}) == "false"
     out = capsys.readouterr().out
     assert "Review tier: skipped (version bump only, 1 lines)" in out
-    assert "lockfile-only commits by another author accepted" in out and "github-actions[bot]" in out
-    assert "NOT taken" not in out
+    # the accepted commit is named by its SHA: an author string is the committer's to choose
+    assert f"lockfile-only commits by another author accepted: {_git(pr, 'rev-parse', 'HEAD')[:8]}" in out
+    assert "github-actions" not in out and "NOT taken" not in out
 
 
 @pytest.mark.parametrize(("before", "relock", "allow_empty"), [
     (LOCK, {"app/x.py": b"x = 2" + bytes([10])}, False),                                  # a code file
     (LOCK, {"uv.lock": b"l2" + bytes([10]), "app/x.py": b"x = 2" + bytes([10])}, False),  # a lockfile AND code
     (LOCK, {"x.py": b"x" + bytes([10]), "uv.lock": b"l2" + bytes([10])}, False),          # a new code file beside it
+    (LOCK, {"x-uv.lock": b"l2" + bytes([10])}, False),                                    # a lockfile SUFFIX is not a name
+    (LOCK, {".claude/uv.lock": b"l2" + bytes([10])}, False),                              # under a not-prose prefix
+    (LOCK, {"app/x.py": None, "poetry.lock": b"x = 1" + bytes([10])}, False),             # code RENAMED to a lockfile
     (LOCK, {}, True),                                                                     # an empty commit: nothing read
 ])
 def test_a_foreign_commit_touching_anything_but_lockfiles_is_reviewed(
@@ -357,6 +363,55 @@ def test_a_lockfile_renamed_to_code_is_reviewed(pr: Path, monkeypatch: pytest.Mo
     assert "failed lock: non-lockfile foreign commit" in capsys.readouterr().out
 
 
+def test_code_renamed_to_a_lockfile_name_is_not_lockfile_only(pr: Path) -> None:
+    # with rename detection `--name-only` prints the NEW name alone: `--no-renames` is the rule
+    _git(pr, "mv", "app/x.py", "uv.lock")
+    _git(pr, "commit", "-qm", "mv")
+    assert _git(pr, "diff", "--name-only", "-M", "HEAD~1", "HEAD") == "uv.lock"
+    assert tier.lockfile_paths("HEAD~1", "HEAD") == []
+
+
+def test_a_foreign_commit_on_a_guarded_lockfile_is_reviewed(pr: Path, monkeypatch: pytest.MonkeyPatch,
+                                                           capsys: pytest.CaptureFixture[str]) -> None:
+    # the skip drops the guard reason for the bot's version tokens, never for another author's lockfile
+    relock = {"uv.lock": b"ci-kit 1.27.1" + bytes([10])}
+    assert _run_relock(pr, monkeypatch, LOCK, relock, guard_files="requirements.txt uv.lock") == "true"
+    out = capsys.readouterr().out
+    assert f"failed lock: foreign commit {_git(pr, 'rev-parse', 'HEAD')[:8]} touches a guarded lockfile" in out
+    assert tier.guarded_foreign({"aaaaaaaa": ["web/uv.lock"]}, "'web/uv.lock' x.py") == "aaaaaaaa"
+    assert tier.guarded_foreign({"aaaaaaaa": ["web/uv.lock"]}, "uv.lock x.py") == ""
+    assert tier.guarded_foreign({"aaaaaaaa": ["uv.lock"]}, "'unbalanced uv.lock") == "aaaaaaaa"
+
+
+def _forge(pr: Path, author_email: str) -> None:
+    """Rewrite HEAD with `author_email` exactly as given: `git commit` refuses a control byte in
+    an identity, `git hash-object` does not, and neither does a push."""
+    raw = subprocess.run(["git", "-C", str(pr), "cat-file", "commit", "HEAD"], check=True,
+                         capture_output=True).stdout
+    head, _, body = raw.partition(bytes([10, 10]))
+    lines = [b"author t <" + author_email.encode() + b"> 5 +0000" if ln.startswith(b"author ") else
+             b"committer t <t@t> 5 +0000" if ln.startswith(b"committer ") else ln
+             for ln in head.split(bytes([10]))]
+    obj = bytes([10]).join(lines) + bytes([10, 10]) + body
+    sha = subprocess.run(["git", "-C", str(pr), "hash-object", "-t", "commit", "-w", "--stdin"],
+                         input=obj, check=True, capture_output=True).stdout.decode().strip()
+    _git(pr, "reset", "-q", "--hard", sha)
+
+
+def test_a_commit_whose_author_field_forges_a_bot_row_is_reviewed(pr: Path) -> None:
+    # one HAND commit of code, no bot commit at all. Its author email carries the field and line
+    # separators, so a `splitlines()` parse read it as a bot row plus an honest merge of the base
+    base = _git(pr, "rev-parse", "HEAD")
+    (pr / "app" / "x.py").write_text("x = 2" + chr(10))
+    _git(pr, "commit", "-qam", "code")
+    us, rs = chr(0x1f), chr(0x1e)
+    _forge(pr, f"{RENOVATE}{us}{tier.WEB_FLOW}{us}5{us}5{rs}{base}{us}{base} {base}{us}z")
+    raw = _git(pr, "log", "--format=%H%x1f%P%x1f%ae%x1f%ce%x1f%at%x1f%ct", f"{base}..HEAD")
+    assert [len(r.split(us)) for r in raw.splitlines()] == [6, 6]   # the forgery, as the old parse saw it
+    failed, foreign = tier.bump_identity("renovate[bot]", "o/r", "o/r", base, "HEAD", signed=lambda r, s: True)
+    assert failed == "unreadable commits (ValueError)" and foreign == {}
+
+
 def test_a_lockfile_moved_between_lockfile_names_is_lockfile_only(pr: Path) -> None:
     lock = b"l" + bytes([10])
     (pr / "uv.lock").write_bytes(lock)
@@ -365,10 +420,10 @@ def test_a_lockfile_moved_between_lockfile_names_is_lockfile_only(pr: Path) -> N
     (pr / "web").mkdir()
     _git(pr, "mv", "uv.lock", "web/uv.lock")
     _git(pr, "commit", "-qm", "move")
-    assert tier.lockfile_only("HEAD~1", "HEAD")
+    assert tier.lockfile_paths("HEAD~1", "HEAD") == ["uv.lock", "web/uv.lock"]
     _git(pr, "rm", "-q", "web/uv.lock")   # a deleted lockfile is still a lockfile-only commit; the
     _git(pr, "commit", "-qm", "rm")       # whole-PR bump_only refuses a deleted file on its own
-    assert tier.lockfile_only("HEAD~1", "HEAD")
+    assert tier.lockfile_paths("HEAD~1", "HEAD") == ["web/uv.lock"]
 
 
 def test_an_unreadable_commit_diff_is_reviewed_never_red(pr: Path, monkeypatch: pytest.MonkeyPatch,
@@ -390,7 +445,7 @@ def test_a_root_commit_in_the_range_is_reviewed(pr: Path) -> None:
     _git(pr, "checkout", "-q", "--orphan", "lonely")
     _git(pr, "-c", f"author.email={RENOVATE}", "-c", f"committer.email={tier.WEB_FLOW}", "commit", "-qm", "root")
     failed, foreign = tier.bump_identity("renovate[bot]", "o/r", "o/r", base, "HEAD", signed=lambda r, s: True)
-    assert failed.startswith("root or shallow commit") and foreign == []
+    assert failed.startswith("root or shallow commit") and foreign == {}
 
 
 def test_lockfile_only_commits_without_any_bot_commit_are_not_a_bot_bump(pr: Path) -> None:

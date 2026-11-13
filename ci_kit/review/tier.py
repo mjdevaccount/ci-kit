@@ -22,8 +22,12 @@ BY a bump bot (BUMP_BOTS: the event's `pull_request.user.login`, which GitHub se
 from this repository, whose every non-merge commit that bot authored and every merge is a clean,
 unedited merge (`git merge-tree --write-tree`). One allowance (2026-11-12, trade-data relock.yml):
 a non-merge commit by ANY author whose own diff touches lockfiles only is accepted -- the gate
-passes a lockfile-only diff whoever wrote it, so composing the two adds no trust; any other
-foreign commit is reviewed, and the log names the lock that failed. A diff cannot prove a SHA
+passes a lockfile-only diff whoever wrote it, so composing the two adds no trust. That holds
+only under the docs/lockfile tier's own two conditions, so both are kept: a lockfile under a
+`--not-prose` prefix is not one, and a lockfile the caller GUARDS is reviewed (the bump skip
+drops the guard reason for the bot's version tokens, never for another author's lockfile).
+Any other foreign commit is reviewed, and the log names the lock that failed, by SHA ONLY: an
+author string is the committer's to choose, and these lines are parsed. A diff cannot prove a SHA
 or a lockfile is what it claims, so the bot's identity is the first lock and the diff the second
 (reviewer 11-11 #2: any other author, the same shape is reviewed). Every changed
 line of every manifest differs from its pair only in a version token, so the model would read a
@@ -101,21 +105,28 @@ def verified(repo: str, sha: str) -> bool:
     return out.strip() == "true"
 
 
-def lockfile_only(parent: str, sha: str) -> bool:
-    """This commit's OWN diff (against its first parent, `--no-renames`, so a rename is a delete
-    plus an add and both names must be lockfiles) touches lockfiles and nothing else. An empty
-    commit or a diff git cannot read is not lockfile-only: nothing read != clean."""
+def _lockfile(path: str, not_prose: tuple[str, ...]) -> bool:
+    """A lockfile by its exact basename, outside every not-prose prefix (docs_only's rule)."""
+    return not any(path.startswith(p) for p in not_prose) and path.rsplit("/", 1)[-1] in LOCKFILES
+
+
+def lockfile_paths(parent: str, sha: str, not_prose: tuple[str, ...] = NOT_PROSE) -> list[str]:
+    """The paths of this commit's OWN diff (against its first parent) when every one is a
+    lockfile, else []. `--no-renames`: a rename is a delete plus an add and BOTH names must be
+    lockfiles (with rename detection `git mv app/x.py uv.lock` prints `uv.lock` alone). An empty
+    commit or a diff git cannot read is []: nothing read != clean."""
     out = _git("diff", "--no-renames", "--name-only", "-z", parent, sha)
     paths = [p for p in out.split("\0") if p]
-    return bool(paths) and all(p.rsplit("/", 1)[-1] in LOCKFILES for p in paths)
+    return paths if paths and all(_lockfile(p, not_prose) for p in paths) else []
 
 
 def bump_identity(author: str, head_repo: str, repo: str, mb: str, head: str,
-                  signed: Callable[[str, str], bool] | None = None) -> tuple[str, list[str]]:
-    """('', foreign) when the commit locks hold, else (the lock that failed, []). A same-repo PR a
+                  signed: Callable[[str, str], bool] | None = None,
+                  not_prose: tuple[str, ...] = NOT_PROSE) -> tuple[str, dict[str, list[str]]]:
+    """('', foreign) when the commit locks hold, else (the lock that failed, {}). A same-repo PR a
     bump bot opened; every non-merge commit is EITHER the bot's own, as GitHub made it, OR touches
-    lockfiles only (any author: `foreign` lists them, `sha8 author`); every merge an honest one; at
-    least one bot commit. A bot commit must have (reviewer 11-11 rounds 4-5):
+    lockfiles only (any author: `foreign` maps its sha8 to the lockfiles it touched); every merge
+    an honest one; at least one bot commit. A bot commit must have (reviewer 11-11 rounds 4-5):
       * author `%ae` = the bot (a PR's .mailmap cannot remap `%ae`);
       * committer `%ce` = GitHub or the bot -- an amend, cherry-pick or local rebase keeps the
         author but commits as the person;
@@ -126,37 +137,54 @@ def bump_identity(author: str, head_repo: str, repo: str, mb: str, head: str,
     THE LOCKFILE ALLOWANCE (2026-11-12): trade-data's relock.yml adds a `github-actions[bot]`
     `uv.lock` commit to a first-party wheel bump. The gate already passes a lockfile-only diff
     whoever wrote it (docs_only), so trusting a lockfile-only commit inside a bot bump adds no
-    trust; no author string is trusted for it. A root or shallow-grafted commit (no parent) is
-    reviewed. A hand commit touching any other path, an edited merge or a rewritten bot commit is
-    reviewed. Never raises: anything it cannot read means review."""
+    trust; no author string is trusted for it, and none is PRINTED (the failed lock and the
+    accepted list carry a sha8: an author email is the committer's to write, and both lines are
+    parsed by a watcher). A root or shallow-grafted commit (no parent) is reviewed. A hand commit
+    touching any other path, an edited merge or a rewritten bot commit is reviewed.
+    THE COMMIT LIST IS NUL-SEPARATED (`git log -z`): an author field may hold any byte but NUL, and
+    `splitlines()` also breaks on \\x1e, \\x0b, \\x0c and CR, so one hand commit could print as a
+    bot row plus an honest merge. A record that is not six fields is unreadable: review.
+    Never raises: anything it cannot read means review."""
     email = BUMP_BOTS.get(author)
     if not email or not repo or head_repo != repo:
-        return "identity (PR opener or fork head)", []
+        return "identity (PR opener or fork head)", {}
     signed = signed or verified
     try:
-        log = _git("log", "--format=%H%x1f%P%x1f%ae%x1f%ce%x1f%at%x1f%ct", f"{mb}..{head}")
-        rows = [r.split("\x1f") for r in log.splitlines()]
-        foreign: list[str] = []
+        log = _git("log", "-z", "--format=%H%x1f%P%x1f%ae%x1f%ce%x1f%at%x1f%ct", f"{mb}..{head}")
+        rows = [r.split("\x1f") for r in log.split("\0") if r]
+        foreign: dict[str, list[str]] = {}
         own = 0
         for sha, parents, who, committer, at, ct in rows:
             ps = parents.split()
             if not ps:
-                return f"root or shallow commit {sha[:8]}", []
+                return f"root or shallow commit {sha[:8]}", {}
             if len(ps) > 1:
                 if not _honest_merge(sha, ps):
-                    return f"merge {sha[:8]} is not a clean, unedited merge", []
+                    return f"merge {sha[:8]} is not a clean, unedited merge", {}
             elif who == email and committer in (WEB_FLOW, email) and at == ct and signed(repo, sha):
                 own += 1
-            elif lockfile_only(ps[0], sha):
-                foreign.append(f"{sha[:8]} {who}")
+            elif paths := lockfile_paths(ps[0], sha, not_prose):
+                foreign[sha[:8]] = paths
             else:
-                return f"non-lockfile foreign commit {sha[:8]} by {who} (identity/signature)", []
+                return f"non-lockfile foreign commit {sha[:8]} (identity/signature)", {}
         if not own:
-            return "identity (no commit by the bump bot)", []
+            return "identity (no commit by the bump bot)", {}
         return "", foreign
     except Exception as err:  # noqa: BLE001 -- e.g. a non-UTF-8 author: review, never red
         print(f"::warning::bump-bot check could not read the commits ({type(err).__name__}): reviewing")
-        return f"unreadable commits ({type(err).__name__})", []
+        return f"unreadable commits ({type(err).__name__})", {}
+
+
+def guarded_foreign(foreign: dict[str, list[str]], guard_files: str) -> str:
+    """The sha8 of the first accepted foreign commit that touches a file the caller GUARDS
+    (`guard_files`: paths-filter's `list-files: shell` text), else ''. The bump skip drops the
+    guard reason because a bot's version token changes no guard; a lockfile the caller chose to
+    guard, written by someone else, is exactly what that guard is for."""
+    try:
+        guarded = set(shlex.split(guard_files))
+    except ValueError:
+        guarded = set(guard_files.split())
+    return next((sha for sha, paths in foreign.items() if guarded.intersection(paths)), "")
 
 
 def bot_authored(author: str, head_repo: str, repo: str, mb: str, head: str,
@@ -282,9 +310,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     head_repo, repo = e.get("HEAD_REPO", ""), e.get("GITHUB_REPOSITORY", "")
     author = e.get("PR_AUTHOR", "")
-    failed, foreign, bumps = "identity (not a bump bot)", [], []
+    not_prose = tuple(a.not_prose) if a.not_prose else NOT_PROSE
+    failed, foreign, bumps = "identity (not a bump bot)", {}, []
     if author in BUMP_BOTS:
-        failed, foreign = bump_identity(author, head_repo, repo, mb, head)
+        failed, foreign = bump_identity(author, head_repo, repo, mb, head, not_prose=not_prose)
+        if not failed and (sha := guarded_foreign(foreign, e.get("GUARD_FILES", ""))):
+            failed = f"foreign commit {sha} touches a guarded lockfile"
         bumps = [] if failed else _bumps(mb, head, changed)
         failed = failed or ("" if bumps else "non-bump diff")
     if author in BUMP_BOTS and not bumps:
@@ -293,14 +324,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Review tier: bump skip NOT taken for {author} (commit identity/signature or a non-bump diff)"
               f" -- failed lock: {failed}")
     elif foreign:
-        print(f"Review tier: lockfile-only commits by another author accepted: {', '.join(foreign[:10])}")
+        print(f"Review tier: lockfile-only commits by another author accepted: {', '.join(list(foreign)[:10])}")
     t = decide(guard=_flag("GUARD"), guard_files=e.get("GUARD_FILES", ""), commits=commits,
                changed=changed, labeled=_flag("LABELED"), label=a.label,
                head_repo=head_repo, repo=repo,
                auth_mode=e.get("AUTH_MODE", ""), has_oauth=_flag("HAS_OAUTH"), has_key=_flag("HAS_KEY"),
-               model=a.model, guard_model=a.guard_model,
-               not_prose=tuple(a.not_prose) if a.not_prose else NOT_PROSE,
-               bumps=bumps)
+               model=a.model, guard_model=a.guard_model, not_prose=not_prose, bumps=bumps)
     for n in t.notes:
         tools.summary(n)
     tools.emit("required", "true" if t.required else "false")
