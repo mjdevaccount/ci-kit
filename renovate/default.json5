@@ -470,6 +470,30 @@
       automerge: false,
       minimumReleaseAge: null,
     },
+    // ---- cgr.dev/chainguard/minio:latest: a digest the age gate can NEVER release (2026-11-12) --
+    // Chainguard's free minio has ONLY `latest`/`latest-dev` (cgr.dev tags/list, 11-12), so the pin
+    // is `latest@sha256:...` and every move is a digest update. Renovate ages a digest update
+    // against the matched VERSION's timestamp, reads timestamps from Docker Hub only, and holds an
+    // unversioned tag on any other registry "indefinitely" under timestamp-required
+    // (docs.renovatebot.com/key-concepts/minimum-release-age/, "digest updates", read 11-12 for
+    // 44.236.5). Measured: pinned since trade-infra#630 (10-18), zero Renovate PRs in 25 days,
+    // dashboard trade-infra#515 lists both langfuse-minio entries `[Updates: latest]` in no branch.
+    // Cadence would block it anyway: 34 index builds 10-01..11-12, median gap 0.74 days.
+    // The age gate is yank protection for an UNATTENDED merge, so it is REPLACED, not just lifted:
+    // no auto-merge (minio holds langfuse's event store, a data volume; a `latest` move can be a
+    // minio release, same reasoning as the litellm floating-tag rule), its own PR (in "compose
+    // images" it would stop that whole group auto-merging), opened in the weekend window and NOT
+    // re-pushed between windows, so the reviewed digest is the one that lands. A session merges it.
+    {
+      matchDatasources: ["docker"],
+      matchPackageNames: ["cgr.dev/chainguard/minio"],
+      matchUpdateTypes: ["digest"],
+      groupName: "chainguard minio",
+      minimumReleaseAge: null,
+      automerge: false,
+      updateNotScheduled: false,
+      labels: ["deps", "deploys-on-merge", "floating-tag", "stateful"],
+    },
     // A pgbouncer PATCH lands on green: CI runs scripts/test_pgbouncer_lan.sh against the
     // image, so a broken patch is a red check. After "database images" so it wins for patches.
     {
