@@ -20,7 +20,10 @@ is NOT docs-only. Paths under a `--not-prose` prefix (default `.claude/` agent c
 VERSION BUMP ONLY is the second (2026-11-10, ci_kit/review/bump.py has the rule), for a PR OPENED
 BY a bump bot (BUMP_BOTS: the event's `pull_request.user.login`, which GitHub sets, not the diff)
 from this repository, whose every non-merge commit that bot authored and every merge is a clean,
-unedited merge (`git merge-tree --write-tree`). A diff cannot prove a SHA
+unedited merge (`git merge-tree --write-tree`). One allowance (2026-11-12, trade-data relock.yml):
+a non-merge commit by ANY author whose own diff touches lockfiles only is accepted -- the gate
+passes a lockfile-only diff whoever wrote it, so composing the two adds no trust; any other
+foreign commit is reviewed, and the log names the lock that failed. A diff cannot prove a SHA
 or a lockfile is what it claims, so the bot's identity is the first lock and the diff the second
 (reviewer 11-11 #2: any other author, the same shape is reviewed). Every changed
 line of every manifest differs from its pair only in a version token, so the model would read a
@@ -98,10 +101,21 @@ def verified(repo: str, sha: str) -> bool:
     return out.strip() == "true"
 
 
-def bot_authored(author: str, head_repo: str, repo: str, mb: str, head: str,
-                 signed: Callable[[str, str], bool] | None = None) -> bool:
-    """A same-repo PR a bump bot opened; every non-merge commit is the bot's own, as GitHub made it;
-    every merge an honest one. A non-merge commit must have (reviewer 11-11 rounds 4-5):
+def lockfile_only(parent: str, sha: str) -> bool:
+    """This commit's OWN diff (against its first parent, `--no-renames`, so a rename is a delete
+    plus an add and both names must be lockfiles) touches lockfiles and nothing else. An empty
+    commit or a diff git cannot read is not lockfile-only: nothing read != clean."""
+    out = _git("diff", "--no-renames", "--name-only", "-z", parent, sha)
+    paths = [p for p in out.split("\0") if p]
+    return bool(paths) and all(p.rsplit("/", 1)[-1] in LOCKFILES for p in paths)
+
+
+def bump_identity(author: str, head_repo: str, repo: str, mb: str, head: str,
+                  signed: Callable[[str, str], bool] | None = None) -> tuple[str, list[str]]:
+    """('', foreign) when the commit locks hold, else (the lock that failed, []). A same-repo PR a
+    bump bot opened; every non-merge commit is EITHER the bot's own, as GitHub made it, OR touches
+    lockfiles only (any author: `foreign` lists them, `sha8 author`); every merge an honest one; at
+    least one bot commit. A bot commit must have (reviewer 11-11 rounds 4-5):
       * author `%ae` = the bot (a PR's .mailmap cannot remap `%ae`);
       * committer `%ce` = GitHub or the bot -- an amend, cherry-pick or local rebase keeps the
         author but commits as the person;
@@ -109,28 +123,46 @@ def bot_authored(author: str, head_repo: str, repo: str, mb: str, head: str,
         commit as web-flow, but keeps its older author date;
       * a VERIFIED signature (`signed`, the commits API) -- `git filter-branch` keeps both
         identities and both dates, but drops the signature.
-    A hand commit, an edited merge or a rewritten commit on the bot's branch is reviewed. Never
-    raises: anything it cannot read means review."""
+    THE LOCKFILE ALLOWANCE (2026-11-12): trade-data's relock.yml adds a `github-actions[bot]`
+    `uv.lock` commit to a first-party wheel bump. The gate already passes a lockfile-only diff
+    whoever wrote it (docs_only), so trusting a lockfile-only commit inside a bot bump adds no
+    trust; no author string is trusted for it. A root or shallow-grafted commit (no parent) is
+    reviewed. A hand commit touching any other path, an edited merge or a rewritten bot commit is
+    reviewed. Never raises: anything it cannot read means review."""
     email = BUMP_BOTS.get(author)
     if not email or not repo or head_repo != repo:
-        return False
+        return "identity (PR opener or fork head)", []
     signed = signed or verified
     try:
         log = _git("log", "--format=%H%x1f%P%x1f%ae%x1f%ce%x1f%at%x1f%ct", f"{mb}..{head}")
         rows = [r.split("\x1f") for r in log.splitlines()]
-        if not rows:
-            return False
+        foreign: list[str] = []
+        own = 0
         for sha, parents, who, committer, at, ct in rows:
             ps = parents.split()
-            if len(ps) == 1:
-                if who != email or committer not in (WEB_FLOW, email) or at != ct or not signed(repo, sha):
-                    return False
-            elif not _honest_merge(sha, ps):
-                return False
-        return True
+            if not ps:
+                return f"root or shallow commit {sha[:8]}", []
+            if len(ps) > 1:
+                if not _honest_merge(sha, ps):
+                    return f"merge {sha[:8]} is not a clean, unedited merge", []
+            elif who == email and committer in (WEB_FLOW, email) and at == ct and signed(repo, sha):
+                own += 1
+            elif lockfile_only(ps[0], sha):
+                foreign.append(f"{sha[:8]} {who}")
+            else:
+                return f"non-lockfile foreign commit {sha[:8]} by {who} (identity/signature)", []
+        if not own:
+            return "identity (no commit by the bump bot)", []
+        return "", foreign
     except Exception as err:  # noqa: BLE001 -- e.g. a non-UTF-8 author: review, never red
         print(f"::warning::bump-bot check could not read the commits ({type(err).__name__}): reviewing")
-        return False
+        return f"unreadable commits ({type(err).__name__})", []
+
+
+def bot_authored(author: str, head_repo: str, repo: str, mb: str, head: str,
+                 signed: Callable[[str, str], bool] | None = None) -> bool:
+    """bump_identity's verdict alone: every commit lock holds."""
+    return bump_identity(author, head_repo, repo, mb, head, signed)[0] == ""
 
 
 def docs_only(changed: list[str], not_prose: tuple[str, ...] = NOT_PROSE) -> bool:
@@ -250,10 +282,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     head_repo, repo = e.get("HEAD_REPO", ""), e.get("GITHUB_REPOSITORY", "")
     author = e.get("PR_AUTHOR", "")
-    bumps = _bumps(mb, head, changed) if bot_authored(author, head_repo, repo, mb, head) else []
+    failed, foreign, bumps = "identity (not a bump bot)", [], []
+    if author in BUMP_BOTS:
+        failed, foreign = bump_identity(author, head_repo, repo, mb, head)
+        bumps = [] if failed else _bumps(mb, head, changed)
+        failed = failed or ("" if bumps else "non-bump diff")
     if author in BUMP_BOTS and not bumps:
-        # the skip fails SAFE but silent: this line is what a watcher counts (reviewer 11-11 round 6 #3)
-        print(f"Review tier: bump skip NOT taken for {author} (commit identity/signature or a non-bump diff)")
+        # the skip fails SAFE but silent: this line is what a watcher counts (reviewer 11-11 round 6 #3);
+        # its prefix is mcp/scripts/review_gate_auth.py's regex, the failed lock goes AFTER it
+        print(f"Review tier: bump skip NOT taken for {author} (commit identity/signature or a non-bump diff)"
+              f" -- failed lock: {failed}")
+    elif foreign:
+        print(f"Review tier: lockfile-only commits by another author accepted: {', '.join(foreign[:10])}")
     t = decide(guard=_flag("GUARD"), guard_files=e.get("GUARD_FILES", ""), commits=commits,
                changed=changed, labeled=_flag("LABELED"), label=a.label,
                head_repo=head_repo, repo=repo,

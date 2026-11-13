@@ -288,3 +288,123 @@ def test_a_non_utf8_file_is_reviewed_never_red(pr: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
     assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
     assert _outputs(pr / "out")["required"] == "true"
+
+
+LOCK = {"uv.lock": b"ci-kit 1.27.0" + bytes([10])}
+ACTIONS = "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+def _relock(pr: Path, files: dict[str, bytes | None], email: str = ACTIONS, allow_empty: bool = False) -> None:
+    """A second commit on the bot's branch, as trade-data's relock.yml makes one: another author."""
+    for name, data in files.items():
+        if data is None:
+            _git(pr, "rm", "-q", name)
+        else:
+            (pr / name).parent.mkdir(parents=True, exist_ok=True)
+            (pr / name).write_bytes(data)
+            _git(pr, "add", name)
+    extra = ["--allow-empty"] if allow_empty else []
+    _git(pr, "-c", f"user.email={email}", "commit", "-qm", "chore(lock): relock uv.lock", *extra)
+
+
+def _run_relock(pr: Path, monkeypatch: pytest.MonkeyPatch, before: dict[str, bytes],
+                relock: dict[str, bytes | None], allow_empty: bool = False) -> str:
+    for name, data in before.items():   # already on main, below the PR's base
+        (pr / name).parent.mkdir(parents=True, exist_ok=True)
+        (pr / name).write_bytes(data)
+        _git(pr, "add", name)
+        _git(pr, "commit", "-qm", "lock on main")
+    monkeypatch.setenv("BASE_SHA", _bump_pr(pr, {}))
+    _relock(pr, relock, allow_empty=allow_empty)
+    monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
+    monkeypatch.setenv("GUARD", "true")
+    monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
+    monkeypatch.setattr(tier, "verified", lambda repo, sha: _git(pr, "log", "-1", "--format=%ae", sha) == RENOVATE)
+    assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
+    return _outputs(pr / "out")["required"]
+
+
+def test_a_foreign_lockfile_only_commit_on_a_bot_bump_skips(pr: Path, monkeypatch: pytest.MonkeyPatch,
+                                                           capsys: pytest.CaptureFixture[str]) -> None:
+    # trade-data #3040/#3012: renovate[bot] bumps pyproject, github-actions[bot] relocks uv.lock
+    assert _run_relock(pr, monkeypatch, LOCK, {"uv.lock": b"ci-kit 1.27.1" + bytes([10])}) == "false"
+    out = capsys.readouterr().out
+    assert "Review tier: skipped (version bump only, 1 lines)" in out
+    assert "lockfile-only commits by another author accepted" in out and "github-actions[bot]" in out
+    assert "NOT taken" not in out
+
+
+@pytest.mark.parametrize(("before", "relock", "allow_empty"), [
+    (LOCK, {"app/x.py": b"x = 2" + bytes([10])}, False),                                  # a code file
+    (LOCK, {"uv.lock": b"l2" + bytes([10]), "app/x.py": b"x = 2" + bytes([10])}, False),  # a lockfile AND code
+    (LOCK, {"x.py": b"x" + bytes([10]), "uv.lock": b"l2" + bytes([10])}, False),          # a new code file beside it
+    (LOCK, {}, True),                                                                     # an empty commit: nothing read
+])
+def test_a_foreign_commit_touching_anything_but_lockfiles_is_reviewed(
+        pr: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+        before: dict[str, bytes], relock: dict[str, bytes | None], allow_empty: bool) -> None:
+    assert _run_relock(pr, monkeypatch, before, relock, allow_empty) == "true"
+    out = capsys.readouterr().out
+    assert "bump skip NOT taken for renovate[bot]" in out
+    assert "failed lock: non-lockfile foreign commit" in out
+
+
+def test_a_lockfile_renamed_to_code_is_reviewed(pr: Path, monkeypatch: pytest.MonkeyPatch,
+                                                capsys: pytest.CaptureFixture[str]) -> None:
+    # `--no-renames`: the rename is a delete (uv.lock) plus an add (app/lock.py); the add is code
+    lock = b"l" + bytes([10])
+    assert _run_relock(pr, monkeypatch, {"uv.lock": lock}, {"uv.lock": None, "app/lock.py": lock}) == "true"
+    assert "failed lock: non-lockfile foreign commit" in capsys.readouterr().out
+
+
+def test_a_lockfile_moved_between_lockfile_names_is_lockfile_only(pr: Path) -> None:
+    lock = b"l" + bytes([10])
+    (pr / "uv.lock").write_bytes(lock)
+    _git(pr, "add", ".")
+    _git(pr, "commit", "-qm", "lock")
+    (pr / "web").mkdir()
+    _git(pr, "mv", "uv.lock", "web/uv.lock")
+    _git(pr, "commit", "-qm", "move")
+    assert tier.lockfile_only("HEAD~1", "HEAD")
+    _git(pr, "rm", "-q", "web/uv.lock")   # a deleted lockfile is still a lockfile-only commit; the
+    _git(pr, "commit", "-qm", "rm")       # whole-PR bump_only refuses a deleted file on its own
+    assert tier.lockfile_only("HEAD~1", "HEAD")
+
+
+def test_an_unreadable_commit_diff_is_reviewed_never_red(pr: Path, monkeypatch: pytest.MonkeyPatch,
+                                                         capsys: pytest.CaptureFixture[str]) -> None:
+    real = tier._git
+
+    def broken(*args: str) -> str:
+        if args[:2] == ("diff", "--no-renames") and "-z" in args:
+            raise subprocess.CalledProcessError(128, "git")
+        return real(*args)
+    monkeypatch.setattr(tier, "_git", broken)
+    assert _run_relock(pr, monkeypatch, LOCK, {"uv.lock": b"l" + bytes([10])}) == "true"
+    assert "failed lock: unreadable commits (CalledProcessError)" in capsys.readouterr().out
+
+
+def test_a_root_commit_in_the_range_is_reviewed(pr: Path) -> None:
+    # a shallow clone grafts its oldest commit parentless: the walk must not read it as a bump
+    base = _bump_pr(pr, {})
+    _git(pr, "checkout", "-q", "--orphan", "lonely")
+    _git(pr, "-c", f"author.email={RENOVATE}", "-c", f"committer.email={tier.WEB_FLOW}", "commit", "-qm", "root")
+    failed, foreign = tier.bump_identity("renovate[bot]", "o/r", "o/r", base, "HEAD", signed=lambda r, s: True)
+    assert failed.startswith("root or shallow commit") and foreign == []
+
+
+def test_lockfile_only_commits_without_any_bot_commit_are_not_a_bot_bump(pr: Path) -> None:
+    base = _git(pr, "rev-parse", "HEAD")
+    _relock(pr, {"uv.lock": b"l" + bytes([10])})
+    failed, _ = tier.bump_identity("renovate[bot]", "o/r", "o/r", base, "HEAD", signed=lambda r, s: True)
+    assert failed == "identity (no commit by the bump bot)"
+
+
+def test_the_refusal_names_a_non_bump_diff(pr: Path, monkeypatch: pytest.MonkeyPatch,
+                                           capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("BASE_SHA", _bump_pr(pr, {"x.csv": b"a" + bytes([10])}))
+    monkeypatch.setenv("HEAD_SHA", _git(pr, "rev-parse", "HEAD"))
+    monkeypatch.setenv("PR_AUTHOR", "renovate[bot]")
+    monkeypatch.setattr(tier, "verified", lambda repo, sha: True)
+    assert tier.main(["--model", "m", "--guard-model", "g"]) == 0
+    assert "failed lock: non-bump diff" in capsys.readouterr().out
