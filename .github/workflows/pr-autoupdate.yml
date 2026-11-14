@@ -94,9 +94,18 @@ on:
         description: the queue head waiting this long on a pool a non-head job holds turns the run red (queue-head-starved)
         type: number
         default: 15
+      queue-hold:
+        description: >-
+          the QUEUE HOLD (ci_kit/pr_hold.py, v1.30.0): post commit status `queue/position` -- success on the queue
+          head (and a merge train), pending on every other open PR -- so an out-of-turn auto-merge cannot land once
+          branch protection requires `queue/position`. Needs the token's Commit statuses read+write. Turn this on
+          FIRST and require the context only after a pass has posted (protection first blocks every merge).
+          Keep `queue/position` OUT of `required-checks`: the queue must not read a waiting PR as running.
+        type: boolean
+        default: false
     secrets:
       token:
-        description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs), on the caller repo
+        description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs), commit statuses RW with queue-hold, on the caller repo
         required: true
       ntfy-url:
         description: an ntfy topic URL to page on a NEW conflict ('' = no page)
@@ -147,6 +156,8 @@ jobs:
       # pr-autoupdate-self runs THIS file from main against the @v1 tool, which lags a merge by the
       # tag-version + major-tag run, and an older tool refuses a flag it does not know.
       CI_KIT_SCARCE_POOLS: ${{ inputs.scarce-pools }}
+      # an env var, never a flag: an older @v1 tool would refuse a flag it does not know
+      CI_KIT_QUEUE_HOLD: ${{ inputs.queue-hold }}
       CI_KIT_EVENT: ${{ github.event_name }}
       CI_KIT_BEFORE: ${{ github.event.before }}
       CI_KIT_SHA: ${{ github.sha }}

@@ -52,7 +52,7 @@ import sys
 import urllib.parse
 from dataclasses import dataclass
 
-from ci_kit import pr_heal, pr_list, pr_queue, pr_sched
+from ci_kit import pr_heal, pr_hold, pr_list, pr_queue, pr_sched
 from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
 from ci_kit.ntfy import page  # noqa: F401 -- re-exported: _update_one pages through this name
 
@@ -74,6 +74,7 @@ class Options:
     head_stall_min: float = 15.0
     before: str = ""  # a push to main's previous sha (the out-of-queue merge check)
     sha: str = ""
+    hold: bool = False  # the queue hold: required status `queue/position`, success on the head only (pr_hold)
 
 
 @dataclass(frozen=True)
@@ -250,8 +251,11 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout))
     armed = [p for p in prs if p.get("autoMergeRequest") and not p.get("isCrossRepository")]
     summary.append(f"{len(armed)} armed PR(s) of {len(prs)} open")
+    # FIRST, before anything that can fail: the head's `queue/position` success is what lets it merge
+    held = pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of) if opts.hold else 0
     heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read,
                                         pr_heal.comments_of, summary)
+    errors += held
     # a PARKED PR (the scheduler cancelled or deferred its run) is eligible like a machinery red:
     # nothing in it is the author's to fix, and the update is its fresh run
     parked = frozenset(int(p["number"]) for p in prs if _has(p, pr_sched.PARKED))
@@ -425,7 +429,8 @@ def main(argv: list[str] | None = None) -> int:
                    scarce=scarce,
                    preempt_after_min=args.preempt_after_min, head_stall_min=args.head_stall_min,
                    before=os.environ.get("CI_KIT_BEFORE", ""),
-                   sha=os.environ.get("CI_KIT_SHA", "") if os.environ.get("CI_KIT_EVENT") == "push" else "")
+                   sha=os.environ.get("CI_KIT_SHA", "") if os.environ.get("CI_KIT_EVENT") == "push" else "",
+                   hold=os.environ.get("CI_KIT_QUEUE_HOLD", "").strip().lower() in ("1", "true"))
     summary: list[str] = []
     relock: list[int] = []
     try:
