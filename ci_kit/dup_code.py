@@ -63,7 +63,7 @@ from ci_kit import discover, release_bin, site_lint
 GATE = "dup-code"
 # renovate: datasource=github-releases depName=kucherenko/jscpd
 JSCPD_VERSION = "5.4.3"
-#: sha256 of each release tarball, from the release's signed checksums.txt (2026-10-20). A bump
+#: sha256 of each release tarball, from the release's signed checksums.txt (v5.4.3, 2026-11-14). A bump
 #: moves the version AND every hash in one edit; a tarball that does not match is exit 2
 #: (ci_kit/release_bin.py, the fetch shared with ci-api-diff).
 JSCPD = release_bin.Pin(
@@ -72,12 +72,12 @@ JSCPD = release_bin.Pin(
     assets={"darwin-arm64": "darwin-arm64", "darwin-x64": "darwin-x64", "linux-arm64": "linux-arm64-gnu",
             "linux-x64": "linux-x64-gnu", "windows-arm64": "windows-arm64-msvc", "windows-x64": "windows-x64-msvc"},
     sha256={
-        "darwin-arm64": "b51d22d7c7610d27d8fd022577021ff3266a10f13295a2e545a8b8e126133a88",
-        "darwin-x64": "ae8d24aba2719df7682b1bb2c5021ab096116b8240c45fdae88654fc1ff36b17",
-        "linux-arm64": "f796d57334c34e9361575588ee130f8b0a00388e7e42f3b27f7d50d4aecf85ae",
-        "linux-x64": "216bae5de2b30c57f893286585c7a348e8af7cd36810949831f569d29f495a3b",
-        "windows-arm64": "283a4a021570370ee145ed692455290f516d1e528cdcb1747ffe72ff9814d159",
-        "windows-x64": "a7927e3bbdd341a139459c684d3f5e0b6409b7b1660bae275d44523f63128d87",
+        "darwin-arm64": "e119c4c5388118ad348a799c478589f7ad0fa707c0b7c819d6febc94f6f98522",
+        "darwin-x64": "7e5b81a0b30f1d261bf9cd8d8e72be43f0ce55a54a9374f1111123bb29362362",
+        "linux-arm64": "221a62a254ab4cc42f26e076943ca79ecd311ae41646a76a08e4b790ed8c5fbe",
+        "linux-x64": "a19d719331b21a047a7537f982566dabcf6d6e5f51581c3b80d9c420979cc92c",
+        "windows-arm64": "ac398ff10ddee4c6f0e57dd82db32ab17a82a397238ea8fd56cbd419b8edb63b",
+        "windows-x64": "1e9416d179c54cbaf1f8854c764b2bc774a1a15850043160b7e58e63948ffb9d",
     },
 )
 MIN_TOKENS, MIN_LINES = 70, 7
