@@ -1,0 +1,66 @@
+# pr-autoupdate-self -- merge main into the NEXT armed PR in line (a serial queue, below), on every push
+# to main and whenever the ci workflow finishes. The estate's caller shape (trade-data, home-host,
+# edge-host) over ci-kit's reusable pr-autoupdate.yml; ci-kit declares the secrets by its own names,
+# so they are MAPPED below -- `secrets: inherit` only works when the caller's names match.
+# ci-kit's OWN caller (2026-11-14). pr-autoupdate.yml is the public REUSABLE (workflow_call only),
+# so until this file ci-kit ran no updater on itself: its armed PRs were updated by nothing, and
+# mcp pr_reconcile.py -- which reads pr-autoupdate.yml on the default branch as "this repo has an
+# updater" -- left them BEHIND. Same split as tag-version.yml (caller) / version-tag.yml (reusable).
+# It calls the reusable from THIS checkout (main's copy of the YAML; the tool itself is ci-kit@v1).
+#
+# It is what makes "require branches to be up to date" (strict protection) affordable: strict with
+# nothing updating branches stalls every armed PR BEHIND. A conflicting PR gets label `conflict`
+# and one ntfy page if NTFY_URL is set.
+#
+# UNCONFIGURED IS RED: without the PR_UPDATE_TOKEN repository secret the job fails and names it.
+# GITHUB_TOKEN is not a fallback: a push made with it fires no workflow, so every updated PR
+# would wait on checks that never start.
+name: pr-autoupdate-self
+
+on:
+  push:
+    branches: [main]
+  # A PR held because its checks were running (an update would cancel them) or because the queue
+  # was full is reconsidered when the check workflow finishes. Without this a held PR waits for the
+  # next push to main.
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+  workflow_dispatch:
+
+# pull-requests/checks/statuses read: ci-kit reads the open-PR list (with check results)
+# with GITHUB_TOKEN -- GitHub refuses a fine-grained PAT the check runs (2026-10-24)
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  statuses: read
+
+concurrency:
+  # one updater at a time, queued, never cancelled
+  group: pr-autoupdate-self
+  cancel-in-progress: false
+
+jobs:
+  update:
+    # A skipped job takes no runner: main's own CI finishing (the push trigger already ran for that
+    # sha) and a cancelled (superseded) PR run can change nothing in the queue.
+    if: >-
+      github.event_name != 'workflow_run'
+      || (github.event.workflow_run.event == 'pull_request'
+          && github.event.workflow_run.conclusion != 'cancelled')
+    uses: ./.github/workflows/pr-autoupdate.yml
+    with:
+      # SERIAL QUEUE (operator, 2026-11-14: one PR at a time per repo; trade-data's shape since
+      # 2026-10-24): one armed PR tested against current main at a time, lowest PR number first; a
+      # PR whose own required checks are red or running is held. Updating every armed PR on every
+      # push re-ran CI on all of them for one merge -- under strict only ONE PR merges per main sha.
+      # Policy: ci-kit ci_kit/pr_queue.py. `0` restores update-everything.
+      max-in-flight: 1
+      # EXACTLY the branch-protection required contexts (gh api .../branches/main/protection
+      # -q .required_status_checks.contexts), matched by name against the PR's statusCheckRollup.
+      # A context added to protection but not here is ignored by the queue: keep them in step.
+      required-checks: "test,gitleaks (secret scan) / scan"
+    secrets:
+      token: ${{ secrets.PR_UPDATE_TOKEN }}
+      ntfy-url: ${{ secrets.NTFY_URL }}

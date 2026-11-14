@@ -143,6 +143,9 @@ jobs:
       # check names carry spaces ("unit tests"), and the action word-splits `args`: an env var, not a flag
       CI_KIT_REQUIRED_CHECKS: ${{ inputs.required-checks }}
       # JSON: braces and quotes, so an env var too. The push's before/after name an out-of-queue merge.
+      # The scheduler's two FLAGS are passed only with scarce-pools set: ci-kit's own
+      # pr-autoupdate-self runs THIS file from main against the @v1 tool, which lags a merge by the
+      # tag-version + major-tag run, and an older tool refuses a flag it does not know.
       CI_KIT_SCARCE_POOLS: ${{ inputs.scarce-pools }}
       CI_KIT_EVENT: ${{ github.event_name }}
       CI_KIT_BEFORE: ${{ github.event.before }}
@@ -165,7 +168,6 @@ jobs:
             --label ${{ inputs.label }}
             --max-in-flight ${{ inputs.max-in-flight }}
             --rerun-limit ${{ inputs.rerun-limit }}
-            --preempt-after-min ${{ inputs.preempt-after-minutes }}
-            --head-stall-min ${{ inputs.head-stall-minutes }}
+            ${{ inputs.scarce-pools != '' && format('--preempt-after-min {0} --head-stall-min {1}', inputs.preempt-after-minutes, inputs.head-stall-minutes) || '' }}
             ${{ inputs.review-workflow != '' && format('--review-workflow {0}', inputs.review-workflow) || '' }}
             ${{ inputs.relock && '--relock' || '' }}
