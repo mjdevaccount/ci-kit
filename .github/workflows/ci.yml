@@ -65,6 +65,15 @@ jobs:
         uses: ./
         with:
           tool: ci-secret-argv-lint
+      - name: hidden-unicode selftest (through the action; a planted character fires, the escape passes, an unreadable file is 2)
+        uses: ./
+        with:
+          tool: ci-hidden-unicode
+          args: --selftest
+      - name: hidden-unicode gate on ci-kit itself (through the action)
+        uses: ./
+        with:
+          tool: ci-hidden-unicode
       - name: env-reads selftest (through the action)
         uses: ./
         with:
@@ -194,7 +203,7 @@ jobs:
       - name: renovate-config-validator --strict on the preset and this repo's renovate.json
         env:
           # renovate: datasource=npm depName=renovate
-          RENOVATE_VERSION: 44.233.0
+          RENOVATE_VERSION: 44.234.0
         run: npx --yes --package "renovate@${RENOVATE_VERSION}" -- renovate-config-validator --strict --no-global renovate/default.json5 renovate.json
 
   gitleaks:
