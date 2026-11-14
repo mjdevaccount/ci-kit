@@ -111,8 +111,9 @@ class World:
     """The GitHub a pass sees. `bodies` = PR -> (body, last AutoMergeDisabledEvent); records writes."""
 
     def __init__(self, bodies: dict[int, tuple[str, dict | None]], *, refuse_arm: bool = False,
-                 detail_fails: bool = False) -> None:
+                 detail_fails: bool = False, refuse_patch: bool = False) -> None:
         self.bodies, self.refuse_arm, self.detail_fails, self.writes = bodies, refuse_arm, detail_fails, []
+        self.refuse_patch = refuse_patch
 
     def read(self, *a: str) -> subprocess.CompletedProcess:
         if a[:2] == ("api", "graphql") and not any(x.startswith("number=") for x in a):
@@ -136,7 +137,13 @@ class World:
                 return subprocess.CompletedProcess(a, 1, "", "HTTP 403: Resource not accessible by personal access token")
             ok = {"data": {"enablePullRequestAutoMerge": {"pullRequest": {"autoMergeRequest": {"enabledAt": "now"}}}}}
             return subprocess.CompletedProcess(a, 0, json.dumps(ok), "")
+        if "PATCH" in a and self.refuse_patch:
+            return subprocess.CompletedProcess(a, 1, "", "HTTP 403: Resource not accessible by personal access token")
         return subprocess.CompletedProcess(a, 0, "", "")
+
+    def bodies_patched(self) -> dict[int, str]:
+        return {int(w[3].rsplit("/", 1)[1]): next(x for x in w if x.startswith("body="))[5:]
+                for w in self.writes if w[:2] == ("api", "-X") and w[2] == "PATCH"}
 
     def armed(self) -> list[str]:
         return [next(x for x in w if x.startswith("id=")) for w in self.writes
@@ -222,3 +229,43 @@ def test_no_queue_no_arm_renovate_merges_itself_there_must_not_fire(monkeypatch:
     world = World({3103: (ON, None)})
     rc, _ = _run(monkeypatch, [_pr(3103)], world, max_in_flight=0, hold=False)
     assert rc == 0 and world.armed() == []
+
+
+BOX = " - [ ] <!-- rebase-check -->If you want"
+TICKED = " - [x] <!-- rebase-check -->If you want"
+
+
+def test_ticked_ticks_renovates_own_box_once_must_fire() -> None:
+    # dies to: an unanchored tick (a box quoted in upstream notes), or re-ticking an asked PR
+    quoted = _body("Enabled.", notes=BOX + " (quoted upstream)")
+    out = pr_renovate.ticked(quoted)
+    assert out is not None and out.count(TICKED) == 1 and out.count(BOX) == 1
+    assert out.index(TICKED) > out.index("### Configuration\n\n")
+    assert pr_renovate.ticked(out) is None, "an already-asked PR is not asked again"
+    assert pr_renovate.ticked("no config block\n" + BOX) is None
+
+
+def test_a_conflicting_kit_pr_asks_renovate_to_recreate_it_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The preset's kit rule is rebaseWhen "never" in queue repos (the Renovate<->relock ping-pong), so
+    # Renovate never moves a conflicting kit branch by itself and the queue skips an unarmed PR: the
+    # pass ticks the PR's rebase box, Renovate recreates the branch on current main, the next pass arms
+    # it. dies to: dropping the _ask_rebase call (nothing PATCHed), or arming a DIRTY PR
+    world = World({3110: (ON, None), 3111: (OFF, None)})
+    rc, summary = _run(monkeypatch, [_pr(3110, merge="DIRTY"), _pr(3111, merge="DIRTY")], world)
+    assert rc == 0 and world.armed() == []
+    patched = world.bodies_patched()
+    assert list(patched) == [3110], "only an automerge PR is asked; a held (Disabled) one is left alone"
+    assert TICKED in patched[3110] and BOX not in patched[3110]
+    assert any(s.startswith("#3110:") and "rebase box ticked" in s for s in summary)
+    # the next pass, Renovate not yet run: the box is ticked, so nothing is written again
+    world = World({3110: (patched[3110], None)})
+    rc, summary = _run(monkeypatch, [_pr(3110, merge="DIRTY")], world)
+    assert rc == 0 and world.bodies_patched() == {} and any("already ticked" in s for s in summary)
+
+
+def test_a_rebase_box_that_cannot_be_ticked_is_a_red_run_must_fire(monkeypatch: pytest.MonkeyPatch,
+                                                                    capsys: pytest.CaptureFixture) -> None:
+    # TELEMETRY: unticked, a conflicting never-rebased kit PR sits forever. dies to: swallowing the refusal
+    rc, summary = _run(monkeypatch, [_pr(3110, merge="DIRTY")], World({3110: (ON, None)}, refuse_patch=True))
+    assert rc == 1 and "rebase box could not be ticked" in capsys.readouterr().out
+    assert any("NOT ticked" in s for s in summary)

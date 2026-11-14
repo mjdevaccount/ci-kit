@@ -23,7 +23,9 @@ def _rules() -> list[dict]:
 
 
 def _source_rule() -> tuple[int, dict]:
-    found = [(i, r) for i, r in enumerate(_rules()) if "https://github.com/mjdevaccount/**" in r.get("matchSourceUrls", [])]
+    # the any-repo rule; the queue-repo kit rule (rebaseWhen never) shares the URL but holds nothing
+    found = [(i, r) for i, r in enumerate(_rules())
+             if "https://github.com/mjdevaccount/**" in r.get("matchSourceUrls", []) and not r.get("matchRepositories")]
     assert len(found) == 1, f"expected ONE first-party matchSourceUrls rule, found {len(found)}"
     return found[0]
 

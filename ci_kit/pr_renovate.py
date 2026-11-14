@@ -22,7 +22,10 @@ who registered that name is not it), unarmed, same-repo, not a draft, not a trai
       - auto-merge was turned off BY HAND since (the PR's last AutoMergeDisabledEvent has
         reasonCode `manually_disabled`): a session's `gh pr merge --disable-auto` is a hold, as the
         preset documents, and is never undone here. Re-arm by hand to rejoin;
-      - DIRTY or CONFLICTING: Renovate rebases on a conflict (`rebaseWhen: conflicted`); armed after;
+      - DIRTY or CONFLICTING: the pass ticks the PR's rebase box (`ticked`), Renovate recreates the
+        branch on current main, and a later pass arms it. Needed since the preset's kit rule
+        (`rebaseWhen: never` in queue repos, v1.31.0): Renovate never moves that branch by itself.
+        A refused tick is a red run -- untouched, the PR would sit forever;
       - CLEAN / UNSTABLE / HAS_HOOKS: GitHub would merge it the moment it is armed (gh's `--auto`
         merges an UNSTABLE PR at once -- past a red non-required check). Never in a hold repo (an
         unarmed PR's `queue/position` is pending, so it is BLOCKED); elsewhere it is armed once main
@@ -113,6 +116,23 @@ def automerge_verdict(body: str) -> str | None:
     return m.group(1) if m else None
 
 
+# Renovate's own control (its PR body's "rebase/retry" checkbox): ticked, its next run recreates the
+# branch on current main -- the one way to move a `rebaseWhen: "never"` branch (the preset's kit rule)
+_REBASE_BOX = re.compile(r"^([ \t]*- )\[ \]([ \t]*<!-- rebase-check -->)", re.M)
+CONFLICT = "conflicts with its base: Renovate recreates it on current main, and the next pass arms it"
+
+
+def ticked(body: str) -> str | None:
+    """`body` with Renovate's rebase box ticked; None when it has no UNticked box (already asked,
+    or not Renovate's layout). Only after the last `### Configuration`, like the verdict. Pure."""
+    heads = list(_CONFIG.finditer(body or ""))
+    if not heads:
+        return None
+    at = heads[-1].end()
+    tail, k = _REBASE_BOX.subn(r"\1[x]\2", body[at:], count=1)
+    return body[:at] + tail if k else None
+
+
 def verdict(p: dict, body: str, disabled: dict | None) -> tuple[bool, str]:
     """(arm?, why) for one candidate. Pure: the policy the tests pin. `disabled` = the PR's last
     AutoMergeDisabledEvent ({reasonCode, createdAt, actor}) or None."""
@@ -130,7 +150,7 @@ def verdict(p: dict, body: str, disabled: dict | None) -> tuple[bool, str]:
                        "never undone here -- re-arm by hand to rejoin")
     merge = str(p.get("mergeStateStatus") or "UNKNOWN").upper()
     if merge == "DIRTY" or str(p.get("mergeable") or "").upper() == "CONFLICTING":
-        return False, "conflicts with its base: Renovate rebases it on a conflict, and the next pass arms it"
+        return False, CONFLICT
     if merge in _MERGEABLE_NOW:
         return False, (f"mergeable as it stands ({merge}): GitHub would merge it the moment it is armed, past "
                        "the queue; armed once main moves")
@@ -173,6 +193,22 @@ def _arm(p: dict, write: Gh) -> str:
     return "" if got else f"GitHub answered without an autoMergeRequest: {(r.stdout or '')[:200]}"
 
 
+def _ask_rebase(repo: str, n: int, body: str, write: Gh) -> tuple[str, int]:
+    """Tick Renovate's rebase box on a conflicting automerge PR: (why, errors). Kit branches in
+    queue repos are `rebaseWhen: "never"` (the preset), so Renovate itself never moves them, and the
+    queue skips a conflicting PR it has not armed -- unasked, this PR would sit forever."""
+    new = ticked(body)
+    if new is None:
+        return CONFLICT + " (its rebase box is already ticked, or absent)", 0
+    r = write("api", "-X", "PATCH", f"repos/{repo}/pulls/{n}", "-f", f"body={new}")
+    if r.returncode:
+        msg = " ".join((r.stderr or r.stdout or "").split())[-200:]
+        print(f"::error::#{n}: Renovate PR conflicts and its rebase box could not be ticked, so nothing "
+              f"will move it: {msg}")
+        return CONFLICT + f" -- rebase box NOT ticked ({msg})", 1
+    return CONFLICT + " (rebase box ticked this pass)", 0
+
+
 def join(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str]) -> int:
     """Arm every Renovate automerge PR (module doc). Marks each armed row in `prs` so the rest of
     the pass treats it as armed. Returns the errors. Never raises: a look that fails is one error."""
@@ -189,6 +225,9 @@ def join(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str]) ->
             continue
         arm, why = verdict(p, body, disabled)
         if not arm:
+            if why == CONFLICT:
+                why, failed = _ask_rebase(repo, n, body, write)
+                errors += failed
             summary.append(f"#{n}: Renovate PR left out of the queue -- {why}")
             continue
         err = _arm(p, write)

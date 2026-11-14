@@ -40,7 +40,8 @@
 # first ARMS (squash, the GraphQL mutation, pinned to the head it read) every Renovate PR whose body
 # says `**Automerge**: Enabled.` -- in a queue repo Renovate itself never arms or merges. Held, never
 # armed: Automerge Disabled (the database group, majors, `fails-green`), `autoland-off`, a hand
-# `--disable-auto`, a conflict. A refused arm is a red run. Needs nothing new: the `token` already
+# `--disable-auto`, a conflict (its rebase box is ticked, so Renovate recreates it on current main).
+# A refused arm or tick is a red run. Needs nothing new: the `token` already
 # holds Pull requests RW.
 #
 # ARMING STARTS THE QUEUE (v1.31.0): without `pull_request_target: { types: [auto_merge_enabled] }`

@@ -284,7 +284,15 @@
       schedule: ["at any time"],
       minimumReleaseAge: null,
     },
-    { matchManagers: ["pep621", "pip_requirements", "pip-compile"], matchUpdateTypes: ["minor", "patch"], groupName: "python (non-major)" },
+    // By DATASOURCE, not manager (2026-11-14): which manager parses a pyproject is Renovate's call,
+    // not ours. A plain `[project]` file with no lock is read by `poetry`, not `pep621` (renovate
+    // 44 dry-run on trade-portfolio: "Found poetry package files", one branch per package), so the
+    // manager-named group never formed and trade-portfolio got 12 PRs at once. Every Python
+    // manager (pep621, poetry, pip_requirements, pip-compile, pep723, pipenv) looks up `pypi`.
+    // First-party packages leave it through the LATER rules below; majors were never in it.
+    // groupSlug: the name's slug keeps the parentheses (dry-run branch `renovate/python-(non-major)`),
+    // a branch name an unquoted shell line breaks on.
+    { matchDatasources: ["pypi"], matchUpdateTypes: ["minor", "patch"], groupName: "python (non-major)", groupSlug: "python-non-major" },
     { matchManagers: ["npm"], matchUpdateTypes: ["minor", "patch"], groupName: "npm (non-major)" },
     { matchManagers: ["nuget"], matchUpdateTypes: ["minor", "patch"], groupName: "nuget (non-major)" },
     { matchManagers: ["dockerfile"], groupName: "dockerfile base images" },
@@ -578,6 +586,33 @@
       rebaseWhen: "conflicted",
       automergeType: "pr-comment",
       automergeComment: "Renovate does not merge PRs in this repository (ci-kit renovate/default.json5, merge-queue repos): ci-kit pr-autoupdate arms this PR and the merge train / pr-autoupdate queue lands it in PR-number order. `autoland-off` holds it.",
+    },
+    // ---- a first-party kit branch in a queue repo is pushed ONCE (2026-11-14) -----------------
+    // `conflicted` above did not stop the #1 runner waste: trade-data's renovate/ci-kit ran 194 CI
+    // runs / 469 job-min on 11-13 and 96 / 223 on 11-14, and only ~1/6 of it was a release's first
+    // push. The rest was a PING-PONG: Renovate's commit carries pyproject + workflows but no
+    // uv.lock, a relock workflow adds the lock as github-actions[bot] (in gitIgnoredAuthors, so the
+    // branch still reads as Renovate's own), and on its next run Renovate finds the branch differs
+    // from what it would write and recreates it on current main -- `conflicted` does not cover that
+    // path (lib/workers/repository/update/branch/reuse.ts: only `never` returns `skip-update`
+    // before the fingerprint/content check). Each recreate re-ran CI, then the relock re-ran it.
+    // 11-14: re-pushes of an already-pushed version 33 runs / 77 min, relocks 35 / 96; 11-13: 77 /
+    // 149 and 84 / 262. `never` = one push + one relock per PR; the queue (pr-autoupdate) is what
+    // makes it current with main, as for every PR here. A newer release while the PR is open waits
+    // for it to land (the next run opens the next PR; pin-drift's 24h grace covers the gap). A
+    // CONFLICT is not stranded: Renovate never moves this branch by itself, so ci-kit pr-autoupdate
+    // ticks the PR's rebase box (ci_kit/pr_renovate.py) and Renovate recreates it once. Scoped to
+    // the queue repos: elsewhere nothing else updates a branch, and Renovate's own rebase is the updater.
+    {
+      description: "serial-queue repos: a first-party kit branch is never re-pushed by Renovate (no relock ping-pong)",
+      matchRepositories: [
+        "mjdevaccount/trade-data", "mjdevaccount/trade-infra", "mjdevaccount/trade-ui",
+        "mjdevaccount/edge-host", "mjdevaccount/home-host", "mjdevaccount/TradingEdge.Scraper",
+        "mjdevaccount/claude-plugins", "mjdevaccount/local-mcp", "mjdevaccount/mattpc-llm-stack",
+        "mjdevaccount/cred-broker", "mjdevaccount/edge-ci", "mjdevaccount/ci-kit",
+      ],
+      matchSourceUrls: ["https://github.com/mjdevaccount/**"],
+      rebaseWhen: "never",
     },
   ],
 }
