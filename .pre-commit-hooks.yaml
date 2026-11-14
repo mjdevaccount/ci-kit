@@ -6,6 +6,8 @@
 #       - id: doc-refs
 #         args: [--exempt-prefix, "u/"]   # optional
 #       - id: secret-argv                 # repos whose shell reaches into containers
+#       - id: hidden-unicode
+#         args: [--binary-suffix, .age]   # optional: a binary format the kit does not list
 #
 # Both scan the WHOLE tracked tree, not the staged files: a doc goes stale when the file it names
 # is deleted, and that commit touches no markdown at all.
@@ -18,6 +20,12 @@
 - id: secret-argv
   name: no secret expanded into a host-side docker exec / curl / ssh argv
   entry: ci-secret-argv-lint
+  language: python
+  pass_filenames: false
+  always_run: true
+- id: hidden-unicode
+  name: no invisible / bidi / control character in any tracked text file
+  entry: ci-hidden-unicode
   language: python
   pass_filenames: false
   always_run: true

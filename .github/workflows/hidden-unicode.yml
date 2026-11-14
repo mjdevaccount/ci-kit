@@ -1,0 +1,48 @@
+# hidden-unicode -- no invisible / bidi / control character in any tracked text file (ci-hidden-unicode).
+#
+#   jobs:
+#     hidden-unicode:
+#       uses: mjdevaccount/ci-kit/.github/workflows/hidden-unicode.yml@v1
+#       with:
+#         args: --binary-suffix .age   # optional: a binary format the kit's list does not hold
+#
+# Reports as "<caller job> / lint". Born 2026-11-14: Renovate flagged trade-data for hidden
+# Unicode; every hit was benign, and benign is the problem -- a zero-width space and a Trojan
+# Source bidi override look the same in a diff. Every tracked file is read; one it cannot read
+# (not UTF-8, or a NUL under a suffix it does not know) is exit 2, named with its fix.
+name: hidden-unicode
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: >-
+          JSON runs-on labels; '' = the caller's lane (doc-refs.yml's runner input says which).
+        type: string
+        default: ""
+      args:
+        description: extra ci-hidden-unicode flags (--binary-suffix .EXT, repeatable); none by default
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ${{ fromJSON(inputs.runner || vars.CI_RUNNER_LIGHT || vars.CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # the gate first: a selftest-only run would be green while never looking at the tree
+      - name: no invisible / bidi / control character in any tracked text file
+        uses: mjdevaccount/ci-kit@v1
+        with:
+          tool: ci-hidden-unicode
+          args: ${{ inputs.args }}
+      - name: hidden-unicode selftest
+        uses: mjdevaccount/ci-kit@v1
+        with:
+          tool: ci-hidden-unicode
+          args: --selftest
