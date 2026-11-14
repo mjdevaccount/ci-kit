@@ -22,7 +22,7 @@ import os
 import subprocess
 import sys
 
-from ci_kit import pr_hold, pr_list, pr_queue
+from ci_kit import pr_hold, pr_queue
 from ci_kit.pr_sched import MAX_ATTEMPT, PARKED, PARKED_OFF, PRE_JOB, Gh, _tail, active_runs, run_jobs
 
 
@@ -60,13 +60,17 @@ def admit_main(argv: list[str] | None = None) -> int:
         if args.attempt >= MAX_ATTEMPT:
             why = f"attempt {args.attempt}: parked often enough, runs now (no starving)"
         elif args.pool:
-            prs = pr_list.rows(json.loads(read(*pr_list.gh_args(args.repo)).stdout))
+            # no statusCheckRollup: the review gate's GITHUB_TOKEN has no checks/statuses read, and
+            # the GraphQL rollup would be refused (admission would then never park at all)
+            prs = json.loads(read("pr", "list", "-R", args.repo, "--state", "open", "--limit", "200", "--json",
+                                  "number,isDraft,isCrossRepository,headRefName,headRefOid,autoMergeRequest,labels,"
+                                  "baseRefName,mergeStateStatus,mergeable").stdout)
             me = next((p for p in prs if int(p["number"]) == args.pr), {"number": args.pr})
-            # the SAME head as the hold and the scheduler: the lowest armed PR that can land. No
-            # required list here (every check counts) and no machinery verdict: where that differs it
-            # names a LATER head, and a PR ahead of the head is never parked -- it errs toward running
-            parked = frozenset(int(p["number"]) for p in prs if any(lb.get("name") == PARKED for lb in p.get("labels") or []))
-            h = pr_queue.head(prs, pr_queue.blocked(prs, (), parked, pr_hold.default_branch(args.repo, read)))
+            # the hold's head as far as this token can see it: a conflicting or stacked PR is never
+            # the head. A RED lowest PR it cannot see: that one parks later PRs only while it still
+            # has a job queued on the pool (its demand), bounded by MAX_ATTEMPT -- a known gap until
+            # callers grant the review gate checks/statuses read
+            h = pr_queue.head(prs, pr_queue.blocked(prs, base=pr_hold.default_branch(args.repo, read)))
             hn = str(h["number"]) if h else ""
             demand = bool(h) and int(h["number"]) < args.pr and head_demand(args.repo, h, args.pool, read, args.pending)
             defer, why = pr_queue.admit(me, h, demand)

@@ -143,7 +143,8 @@ def test_a_refused_non_head_is_red_but_never_pages(monkeypatch: pytest.MonkeyPat
     assert errors == 1 and not any(w.startswith("pr comment") for w in gh.writes)
 
 
-def test_the_hold_runs_even_when_the_pass_crashes_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("crash", [subprocess.CalledProcessError(1, "gh"), TypeError("a row of the wrong shape")])
+def test_the_hold_runs_even_when_the_pass_crashes_must_fire(monkeypatch: pytest.MonkeyPatch, crash: Exception) -> None:
     order: list[str] = []
     monkeypatch.setattr(pr_autoupdate, "_gh_read", lambda *a: subprocess.CompletedProcess(a, 0, "{}", ""))
     monkeypatch.setattr(pr_autoupdate.pr_list, "rows", lambda raw: [_pr(3082)])
@@ -151,13 +152,13 @@ def test_the_hold_runs_even_when_the_pass_crashes_must_fire(monkeypatch: pytest.
 
     def heal(*a, **k):
         order.append("heal")
-        raise subprocess.CalledProcessError(1, "gh")
+        raise crash
     monkeypatch.setattr(pr_autoupdate.pr_heal, "assess_armed", heal)
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(type(crash)):
         pr_autoupdate.run("o/r", [], [], pr_autoupdate.Options(hold=True))
     assert order == ["heal", "hold"]                                     # the head still gets its success
     order.clear()
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(type(crash)):
         pr_autoupdate.run("o/r", [], [], pr_autoupdate.Options())
     assert order == ["heal"]                                             # off unless the caller turns it on
 
@@ -332,10 +333,41 @@ def test_a_stacked_pr_is_never_the_schedulers_head_either_must_not_fire() -> Non
 def test_a_dead_push_token_pages_at_once_since_no_marker_can_be_left_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
     # 3rd review, finding 1: the PAT that is refused the status is refused the marker comment too;
     # waiting for a marker that can never exist would never page
-    pages: list[str] = []
-    monkeypatch.setattr(pr_hold, "page", lambda title, body, click: pages.append(body) or "published (200)")
-    errors, summary = _pass(Gh(refuse=("statuses/", "pr comment")), [_pr(3082), _pr(3083)])
-    assert errors == 2 and len(pages) == 1 and "marker comment was refused" in pages[0]
+    pages: list[tuple[str, str]] = []
+    monkeypatch.setattr(pr_hold, "page", lambda title, body, click: pages.append((title, body)) or "published (200)")
+    monkeypatch.setattr(pr_hold, "recent", lambda title: any(t == title for t, _ in pages))  # the ntfy topic
+    for _ in range(3):                                  # every pass: a push, a CI completion, the cron
+        errors, summary = _pass(Gh(refuse=("statuses/", "pr comment")), [_pr(3082), _pr(3083)])
+        assert errors == 2
+    assert len(pages) == 1 and "marker comment was refused" in pages[0][1]   # ONE page, not one per pass
+
+
+def test_ntfy_recent_reads_the_topic_and_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ci_kit import ntfy
+
+    class Answer:
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self.body
+    monkeypatch.setenv("NTFY_URL", "https://ntfy.example/topic")
+    urls: list[str] = []
+    monkeypatch.setattr(ntfy.urllib.request, "urlopen", lambda url, timeout: urls.append(url) or Answer(
+        b'{"event":"message","title":"r: queue head #1 cannot merge"}' + bytes([10]) + b'{"event":"keepalive"}'))
+    assert ntfy.recent("r: queue head #1 cannot merge") and not ntfy.recent("other")
+    assert urls[0] == "https://ntfy.example/topic/json?poll=1&since=6h"
+
+    def down(url, timeout):
+        raise OSError("down")
+    monkeypatch.setattr(ntfy.urllib.request, "urlopen", down)
+    assert ntfy.recent("r: queue head #1 cannot merge") is False             # unreadable: the caller pages
 
 
 def test_a_crash_inside_the_hold_is_a_red_run_never_an_exception_must_fire() -> None:

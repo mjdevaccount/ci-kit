@@ -58,7 +58,7 @@ import subprocess
 from collections.abc import Callable
 
 from ci_kit import pr_queue
-from ci_kit.ntfy import page
+from ci_kit.ntfy import page, recent
 
 CONTEXT = "queue/position"
 HEAD = "head of the PR queue: may merge"
@@ -244,11 +244,14 @@ def _escalate(repo: str, p: dict, sha: str, why: str, write: Gh, comments: Calla
         if write("pr", "comment", str(n), "-R", repo, "--body", body).returncode == 0:
             return f"HEAD HELD: #{n} cannot merge ({why}); paged next pass if it still cannot"
         # the marker was refused (a dead push token refuses statuses AND comments): without a
-        # marker no later pass could ever page, so page now -- ntfy needs no GitHub token
+        # marker no later pass could ever page, so page now -- ntfy needs no GitHub token -- and
+        # dedup on the topic itself (every pass would page otherwise: one per CI completion)
         why += " (and the marker comment was refused: the push token)"
+    title = f"{repo.rsplit('/', 1)[-1]}: queue head #{n} cannot merge"
+    if not marks and recent(title):
+        return f"HEAD HELD: #{n} cannot merge ({why}); paged already (ntfy, last 6h)"
     try:
-        note = page(f"{repo.rsplit('/', 1)[-1]}: queue head #{n} cannot merge",
-                    f"two passes: {why}"[:900], str(p.get("url") or ""))
+        note = page(title, f"two passes: {why}"[:900], str(p.get("url") or ""))
     except Exception as e:  # noqa: BLE001 -- page() catches OSError only (a malformed URL is ValueError)
         note = f"push FAILED: {e}"
     write("pr", "comment", str(n), "-R", repo, "--body", HELD.format(sha=sha, paged=" paged") + f"\nPaged: {note}")

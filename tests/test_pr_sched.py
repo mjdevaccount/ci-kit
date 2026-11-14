@@ -369,12 +369,10 @@ def _admit(monkeypatch: pytest.MonkeyPatch, tmp_path, prs: list[dict], *, edit_r
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))
 
     def run(cmd, **_):
-        if cmd[:3] == ["gh", "api", "graphql"]:  # pr_list: the same rows the hold and the scheduler read
-            nodes = [{**p, "baseRefName": p.get("baseRefName", "main"), "labels": {"nodes": p.get("labels") or []},
-                      "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {
-                          "nodes": p.get("statusCheckRollup") or []}}}}]}} for p in prs]
-            answer = {"data": {"repository": {"pullRequests": {"nodes": nodes}}}}
-            return subprocess.CompletedProcess(cmd, 0, json.dumps(answer), "")
+        if cmd[:3] == ["gh", "pr", "list"]:  # no rollup: the review gate's token cannot read check runs
+            assert "statusCheckRollup" not in " ".join(cmd)
+            rows = [{**p, "baseRefName": p.get("baseRefName", "main")} for p in prs]
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(rows), "")
         if cmd[:3] == ["gh", "api", "repos/o/r"]:
             return subprocess.CompletedProcess(cmd, 0, json.dumps({"default_branch": "main"}), "")
         if cmd[:3] == ["gh", "pr", "edit"]:
@@ -394,12 +392,10 @@ def test_admission_parks_a_later_pr_and_labels_it_must_fire(monkeypatch, tmp_pat
     assert got["defer"] == "true" and got["head"] == "3073"
 
 
-def test_admission_shares_the_holds_head_past_a_red_lowest_pr_must_fire(monkeypatch, tmp_path) -> None:
-    # review of the hold, 2nd pass, finding 2: #3070's lint failed fast; the hold and the scheduler
-    # skip it, so #3073 is the head for admission too -- #3080 parks for #3073, never for #3070
-    red = [{"__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "FAILURE"}]
-    got = _admit(monkeypatch, tmp_path, [_pr(3070, statusCheckRollup=red), _pr(3073), _pr(3080)])
-    assert got["head"] == "3073"
+def test_admission_skips_a_conflicting_or_stacked_lowest_pr_like_the_hold_must_fire(monkeypatch, tmp_path) -> None:
+    for low in (_pr(3070, state="DIRTY"), _pr(3070, state="UNKNOWN", mergeable="CONFLICTING"), _pr(3070, baseRefName="b1")):
+        got = _admit(monkeypatch, tmp_path, [low, _pr(3073), _pr(3080)])
+        assert got["head"] == "3073"
 
 
 def test_admission_runs_when_it_cannot_label_or_cannot_look_or_was_parked_enough_must_not_fire(monkeypatch, tmp_path) -> None:
