@@ -6,6 +6,7 @@ fail open: the train step keys on the `train/` prefix and writes is_train before
 is never continue-on-error; on a train, Decide (and so the model) does not run; the Comment and
 the Gate run and read the TRAIN's result, so a train block or BLIND is a red check; and the job's
 `result` output carries it. Each predicate is shown to fire on the mutation it exists for.
+Since v1.29.0 all of that lives in the `decide` job (named `review`), which never runs the model.
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ NOT_TRAIN = "steps.train.outputs.is_train != 'true'"
 
 
 def _job() -> dict:
-    return yaml.safe_load((ROOT / "review-gate.yml").read_text(encoding="utf-8"))["jobs"]["review"]
+    return yaml.safe_load((ROOT / "review-gate.yml").read_text(encoding="utf-8"))["jobs"]["decide"]
 
 
 def _step(job: dict, *, sid: str = "", name: str = "") -> dict:
