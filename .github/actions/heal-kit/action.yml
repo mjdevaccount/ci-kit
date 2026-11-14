@@ -1,6 +1,6 @@
 # heal-kit -- fetch ci-kit at ONE sha into $RUNNER_TEMP/ci-kit for a pr-heal.yml job (and the base sha
 # into the job's checkout, which it can also make). Every heal job runs the ci_kit.pr_* modules from the sha the plan job
-# fixed, never from the PR (PYTHONSAFEPATH keeps a PR-added `ci_kit/` off the path), so the five jobs
+# fixed, never from the PR (PYTHONSAFEPATH keeps a PR-added `ci_kit/` off the path), so the six jobs
 # cannot disagree about the policy they enforce. One copy of the fetch for all of them.
 name: heal-kit
 description: fetch ci-kit at a ref into $RUNNER_TEMP/ci-kit (and the base into the checkout)

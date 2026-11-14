@@ -170,3 +170,25 @@ def test_only_a_bumped_pin_is_rehashed_a_same_version_pin_stays_frozen_must_not_
 def test_heal_commits_are_the_author_renovate_ignores() -> None:
     preset = (Path(__file__).resolve().parents[1] / "renovate" / "default.json5").read_text(encoding="utf-8")
     assert pr_regen.BOT[1] in preset and "gitIgnoredAuthors" in preset
+
+
+TWO = SRC + '''
+OTHER = release_bin.Pin(
+    name="other", version="3.0.0", env="CI_KIT_OTHER",
+    url="https://github.com/o/other/releases/download/v{{v}}/other-{{asset}}.tar.gz",
+    assets={{"linux-x64": "linux"}},
+    sha256={{"linux-x64": "{c}"}},
+)
+DIGEST = "{d}"
+'''
+
+
+def test_the_pusher_fence_moves_only_a_bumped_pins_hashes_must_not_fire() -> None:
+    before = TWO.format(v="1.0.0", a=h("x"), b=h("y"), c=h("z"), d=h("w"))
+    old = before.replace('"1.0.0"', '"1.1.0"')                       # Renovate moved `tool`, not `other`
+    ok = old.replace(h("x"), h("x2")).replace(h("y"), h("y2"))
+    assert pin_rehash.rehashed_only(old, ok, before)
+    assert not pin_rehash.rehashed_only(old, ok.replace(h("z"), h("z2")), before)      # an unbumped pin's hash
+    assert not pin_rehash.rehashed_only(old, ok.replace(h("w"), h("w2")), before)      # a hex outside any Pin
+    assert not pin_rehash.rehashed_only(before, before.replace(h("x"), h("x2")), before)  # nothing bumped
+    assert not pin_rehash.rehashed_only(old, ok, "not python (")                       # unreadable base: refuse

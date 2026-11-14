@@ -139,6 +139,24 @@ def bumped(text: str, before: str | None) -> set[str]:
     return {p.name for p in pins(text) if before is None or old.get(p.name) != p.version}
 
 
+def rehashed_only(old: str, new: str, before: str) -> bool:
+    """The pusher's bound for a rehashed Pin file. Pure. True only when `new` is `old` with sha256
+    literals of BUMPED pins (version moved since `before`, the base's copy) replaced -- and nothing
+    else: not another pin's hashes, not a 64-hex token outside any Pin, not one more character."""
+    if not only_hashes(old, new):
+        return False
+    try:
+        moved = bumped(old, before)
+        now = {p.name: {k: v[0] for k, v in p.hashes.items()} for p in pins(new)}
+        expected = old
+        for p in pins(old):
+            if p.name in moved and p.name in now:
+                expected = rewrite(expected, p, now[p.name])
+    except (ValueError, SyntaxError):
+        return False
+    return expected == new
+
+
 def rehash(path: Path, fetch: Fetch = release_bin.fetch, before: str | None = None) -> list[str]:
     """Rewrite the digests of `path`'s pins whose version moved since `before` (None = all of them).
     Returns what moved (one line per pin)."""

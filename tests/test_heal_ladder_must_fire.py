@@ -251,11 +251,21 @@ def test_the_plan_refuses_a_head_already_healed_must_not_fire(monkeypatch, tmp_p
     assert pr_ladder.outcome(False, out["why"], "", "", "", "", "", "", True)[3] is False
 
 
-def test_an_already_ticked_rebase_box_is_not_an_error() -> None:
+def test_an_already_ticked_rebase_box_is_recorded_so_it_can_page_must_fire() -> None:
     ticked = BODY.replace("[ ]", "[x]")
-    _, errs, _ = pr_ladder.dispatch("o/r", [Candidate(renovate(), "conflict")], ON, lambda r, n: [],
-                                    lambda *a, input_text=None: _Done(out=ticked), [], lambda *a: "x", NOW)
+    calls: list[tuple] = []
+
+    def write(*a, input_text=None):
+        calls.append((a, input_text))
+        return _Done(out=ticked)
+    _, errs, _ = pr_ladder.dispatch("o/r", [Candidate(renovate(), "conflict")], ON, lambda r, n: [], write, [],
+                                    lambda *a: "x", NOW)
     assert errs == 0
+    comments = [t for a, t in calls if a[:2] == ("pr", "comment")]
+    assert len(comments) == 1 and "mode=rebase" in comments[0] and "already ticked" in comments[0]
+    assert not any(a[:2] == ("api", "-X") for a, _ in calls)          # nothing to PATCH
+    # home-host#246: that record is what the stale-minutes page reads, a pass later
+    assert any(h == H1 for h, *_ in pr_ladder.marks(comments, pr_ladder._HEAL))
 
 
 def test_a_conflict_dispatch_does_not_swallow_a_later_machinery_red() -> None:
@@ -277,3 +287,32 @@ def pytest_fail(*a: str):
 
 def test_the_fixer_scrubs_its_credential_from_bash_children() -> None:
     assert pr_fix.env({"CLAUDE_CODE_OAUTH_TOKEN": "o"})["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
+
+
+# ── tier 3's claim: one attempt per head, recorded before Claude runs ───────────────────────────
+def test_the_claim_records_once_then_refuses_must_fire() -> None:
+    posted: list[str] = []
+    out = pr_ladder.claim("o/r", 7, H1, "123", lambda *a, input_text=None: posted.append(input_text) or _Done(),
+                          lambda r, n: [])
+    assert out["claimed"] == "true" and pr_ladder.ATTEMPT.format(head=H1, run="123") in posted[0]
+    again = pr_ladder.claim("o/r", 7, H1, "124", lambda *a, input_text=None: _Done(rc=9),
+                            lambda r, n: posted)
+    assert again["claimed"] == "false" and "run 123" in again["why"]
+    other = pr_ladder.claim("o/r", 7, H2, "125", lambda *a, input_text=None: _Done(), lambda r, n: posted)
+    assert other["claimed"] == "true"                                  # a new head is a new budget
+
+
+def test_a_failed_claim_record_never_runs_claude() -> None:
+    out = pr_ladder.claim("o/r", 7, H1, "1", lambda *a, input_text=None: _Done(rc=1, err="403"), lambda r, n: [])
+    assert out["claimed"] == "false" and "403" in out["why"]
+
+
+def test_a_rerun_of_failed_jobs_reports_refused_never_silent() -> None:
+    state, why = pr_ladder.claimed_fix("", "", "true", "claimed", "1", "2")
+    assert state == "refused" and "attempt 1" in why
+    assert pr_ladder.claimed_fix("", "", "false", "tier 3 already ran", "1", "1") == ("refused", "tier 3 already ran")
+    assert pr_ladder.claimed_fix("fixed", "ok", "true", "claimed", "1", "1") == ("fixed", "ok")
+    assert pr_ladder.claimed_fix("", "", "", "", "", "3") == ("", "")  # no claim job: tier 3 was not wanted
+    o = pr_ladder.outcome(True, "eligible", "uncovered", "x", *pr_ladder.claimed_fix("", "", "false", "ran", "1", "1"),
+                          "", "", True)
+    assert o[1] == "refused" and o[3] is True

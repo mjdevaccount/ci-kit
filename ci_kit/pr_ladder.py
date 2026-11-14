@@ -65,6 +65,8 @@ HEAL = "<!-- smart-merge:heal head={head} mode={mode} claude={claude} at={at} --
 HEALED = "<!-- smart-merge:healed head={head} tier={tier} result={result} -->"
 PAGED = "<!-- smart-merge:paged head={head} why={why} -->"
 _HEAL = re.compile(r"<!-- smart-merge:heal head=([0-9a-f]{40}) mode=([a-z]+) claude=([01]) at=([0-9TZ:+-]+) -->")
+ATTEMPT = "<!-- smart-merge:attempt head={head} tier=claude run={run} -->"
+_ATTEMPT = re.compile(r"<!-- smart-merge:attempt head=([0-9a-f]{40}) tier=claude run=([0-9]+) -->")
 _HEALED = re.compile(r"<!-- smart-merge:healed head=([0-9a-f]{40}) tier=([a-z0-9-]+) result=([a-z-]+) -->")
 _PAGED = re.compile(r"<!-- smart-merge:paged head=([0-9a-f]{40}) why=([a-z-]+) -->")
 RENOVATE = ("renovate", "renovate[bot]", "app/renovate")
@@ -276,14 +278,17 @@ def _rebase(repo: str, pr: dict, write: Write, now: dt.datetime) -> str:
     if r.returncode:
         return f"; NOT asked, its body could not be read: {(r.stderr or '').strip()[:200]}"
     body = tick_rebase(r.stdout or "")
-    if body is None:  # ticked already (by a person, or a pass whose record failed): Renovate's move
-        return "; its rebase box is already ticked or absent -- waiting on Renovate, nothing asked"
+    # ticked already (a person, or a pass whose PATCH failed) or no box: nothing to ask, but the head
+    # is still recorded, so the stale-minutes page fires if Renovate never moves it (home-host#246)
+    did = "ticked Renovate's rebase box" if body is not None else "its rebase box is already ticked or absent"
     mark = HEAL.format(head=head, mode="rebase", claude=0, at=now.strftime("%Y-%m-%dT%H:%M:%SZ"))
     r = write("pr", "comment", str(n), "-R", repo, "--body-file", "-",
-              input_text=f"{mark}\n**heal ladder**: conflicts with main at `{head[:12]}` -- ticked Renovate's rebase "
-                         "box: Renovate rebuilds its own branch. Paged if the head has not moved after stale-minutes.")
+              input_text=f"{mark}\n**heal ladder**: conflicts with main at `{head[:12]}` -- {did}: Renovate rebuilds "
+                         "its own branch. Paged if the head has not moved after stale-minutes.")
     if r.returncode:
         return f"; NOT asked, its record failed: {(r.stderr or '').strip()[:200]}"
+    if body is None:
+        return "; its rebase box is already ticked or absent -- recorded, waiting on Renovate"
     r = write("api", "-X", "PATCH", f"repos/{repo}/pulls/{n}", "--input", "-", input_text=json.dumps({"body": body}))
     return "; rebase box ticked" if not r.returncode else f"; NOT ticked: {(r.stderr or '').strip()[:200]}"
 
@@ -332,6 +337,34 @@ def plan(repo: str, n: int, head: str, claude: bool, runs: list[str], checks: st
     return {"go": str(not why).lower(), "why": why or "eligible", "ref": p["head"]["ref"], "base": base,
             "base-ref": base_ref, "claude": str(tier3).lower(), "title": str(p.get("title") or "")[:200],
             "url": str(p.get("html_url") or "")}
+
+
+def claim(repo: str, n: int, head: str, run: str, write: Write, comments: Comments) -> dict[str, str]:
+    """Tier 3's ONE attempt at this head, recorded BEFORE Claude runs (the fix job holds no token, so
+    this token-only job writes it). A second workflow run at the head -- or a full re-run of this one --
+    finds the record and refuses; a 'Re-run failed jobs' is held by the attempt number (claimed_fix)."""
+    prior = [r for h, r in marks(comments(repo, n), _ATTEMPT) if h == head]
+    if prior:
+        return {"claimed": "false", "why": f"tier 3 already ran at this head (run {prior[0]}): once per head"}
+    r = write("pr", "comment", str(n), "-R", repo, "--body-file", "-",
+              input_text=f"{ATTEMPT.format(head=head, run=run)}\n**heal ladder**: tier 3 (Claude) starting at "
+                         f"`{head[:12]}` -- one attempt per head; the result follows in this run's record.")
+    if r.returncode:
+        return {"claimed": "false", "why": f"the attempt record failed, so tier 3 did not run: {(r.stderr or '').strip()[:200]}"}
+    return {"claimed": "true", "why": "claimed"}
+
+
+def claimed_fix(fix: str, fix_why: str, claimed: str, claim_why: str, attempt: str, run_attempt: str) -> tuple[str, str]:
+    """The fix job's state for the record when the claim held it back. Pure. `claimed` '' = the claim
+    job never ran (tier 3 was not wanted): the fix job's own word stands."""
+    if fix or not claimed:
+        return fix, fix_why
+    if claimed != "true":
+        return "refused", claim_why or "the claim did not record"
+    if attempt != run_attempt:
+        return "refused", (f"tier 3 was claimed in attempt {attempt} of this run; a re-run never runs Claude twice at "
+                           "one head")
+    return fix, fix_why
 
 
 def outcome(go: bool, plan_why: str, regen: str, regen_why: str, fix: str, fix_why: str, push: str, push_why: str,
@@ -394,7 +427,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("plan")
     b = sub.add_parser("report")
-    for x in (a, b):
+    c = sub.add_parser("claim")
+    c.add_argument("--run", required=True)
+    for x in (a, b, c):
         x.add_argument("--repo", required=True)
         x.add_argument("--pr", type=int, required=True)
         x.add_argument("--head", required=True)
@@ -402,7 +437,8 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--claude", default="false")
     a.add_argument("--runs", default="")
     a.add_argument("--context-out", required=True)
-    for k in ("go", "plan-why", "regen", "regen-why", "fix", "fix-why", "push", "push-why", "claude", "url", "run-url"):
+    for k in ("go", "plan-why", "regen", "regen-why", "fix", "fix-why", "push", "push-why", "claude", "url", "run-url",
+              "claimed", "claim-why", "claim-attempt", "run-attempt"):
         b.add_argument(f"--{k}", default="")
     args = ap.parse_args(argv)
     if args.cmd == "plan":
@@ -414,7 +450,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"::error::heal plan could not read #{args.pr}: {e} {(getattr(e, 'stderr', '') or '')[-300:]}")
             output(go="false", why=f"plan could not read the PR: {e}"[:300])
             return 2
-    o = outcome(args.go == "true", args.plan_why, args.regen, args.regen_why, args.fix, args.fix_why, args.push,
+    if args.cmd == "claim":
+        try:
+            output(**claim(args.repo, args.pr, args.head, args.run, write, comments_of))
+            return 0
+        except (subprocess.CalledProcessError, ValueError) as e:
+            output(claimed="false", why=f"the claim could not read the PR's records: {e}"[:300])
+            return 2
+    fix, fix_why = claimed_fix(args.fix, args.fix_why, args.claimed, args.claim_why, args.claim_attempt, args.run_attempt)
+    o = outcome(args.go == "true", args.plan_why, args.regen, args.regen_why, fix, fix_why, args.push,
                 args.push_why, args.claude == "true")
     output(result=o[1], tier=o[0])
     return 1 if report(args.repo, args.pr, args.head, o, args.checks, args.url, args.run_url, write, comments_of, page) \

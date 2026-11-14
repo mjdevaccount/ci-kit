@@ -39,7 +39,7 @@ def faults(jobs: dict) -> list[str]:
             out.append("regen: holds a Claude credential")
     if jobs["fix"].get("runs-on") not in ("ubuntu-latest", SEALED):
         out.append("fix: tier 3 -- hosted or the sealed pool only")
-    for name in ("plan", "push", "report"):
+    for name in ("plan", "claim", "push", "report"):
         if jobs[name].get("runs-on") not in ("ubuntu-latest", SECURE):
             out.append(f"{name}: token-only -- hosted or the secure pool only")
         steps = json.dumps(jobs[name].get("steps", []))
@@ -84,3 +84,11 @@ def test_the_updater_exposes_the_ladder_rows_and_its_knobs() -> None:
     assert "heal" in call["outputs"]
     action = yaml.safe_load((ROOT / "action.yml").read_text(encoding="utf-8"))
     assert "heal" in action["outputs"]
+
+
+def test_tier_3_runs_only_behind_a_claim_made_in_this_attempt() -> None:
+    jobs = _jobs()
+    assert "claim" in jobs["fix"]["needs"]
+    cond = jobs["fix"]["if"]
+    assert "needs.claim.outputs.claimed == 'true'" in cond and "github.run_attempt" in cond
+    assert jobs["claim"]["outputs"]["attempt"] == "${{ github.run_attempt }}"

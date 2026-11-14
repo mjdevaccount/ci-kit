@@ -13,7 +13,7 @@ from those jobs is trusted -- not their merge, not their verdict, not their file
   * SCOPE (`scope`, pure), per tier:
       regen   every file matches the caller's regen map (main's copy, passed as an input), is a
               lockfile of a built-in kind, or changes ONLY sha256 literals (a release-binary pin
-              rehash, ci_kit/pin_rehash.only_hashes, recomputed here against the merge);
+              rehash, ci_kit/pin_rehash.rehashed_only: only a BUMPED pin's hashes, recomputed here);
       claude  every file is one the PR already changes, a conflicted file, or a mapped generated
               file -- the fix may not WIDEN the PR; nothing under `.github/` (this token can push
               workflows); no TEST file unless it was conflicted (a test that must change to pass is
@@ -35,7 +35,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ci_kit.pin_rehash import declares, only_hashes
+from ci_kit.pin_rehash import declares, rehashed_only
 from ci_kit.pr_regen import LOCKFILES, MARKER, git, glob_match, lines, merge, output, parse_map, unmerged
 
 # a test file in any of the estate's stacks (python, js/ts, .NET)
@@ -109,8 +109,8 @@ def apply(root: Path, art: Path, *, head: str, base: str, ref: str, regen_globs:
         return "refused", f"the artifact marks {odd[:6]} as neither write nor delete"
     if m.get("merged") and git(root, "merge-base", "--is-ancestor", base, head, check=False).returncode == 0:
         return "refused", "the artifact claims a merge, but the head already contains the base"
-    mine = sorted(lines(git(root, "diff", "--name-only", "--no-renames", git(root, "merge-base", base, head).stdout.strip(),
-                            head).stdout))
+    fork = git(root, "merge-base", base, head).stdout.strip()
+    mine = sorted(lines(git(root, "diff", "--name-only", "--no-renames", fork, head).stdout))
     merged, conflicted = merge(root, base) if m.get("merged") else (False, [])
     if sorted(conflicted) != sorted(m.get("conflicted") or []):
         return "refused", (f"git's conflicted set {conflicted[:6]} is not the healed one {(m.get('conflicted') or [])[:6]}: "
@@ -121,8 +121,10 @@ def apply(root: Path, art: Path, *, head: str, base: str, ref: str, regen_globs:
             old = git(root, "show", f":{path}", check=False).stdout
             new = (art / "files" / path).read_text(encoding="utf-8", errors="replace")
             changed += count_lines(old, new)
-            # only a Pin file the PR itself changes (a Renovate version bump), never any file's hashes
-            hashes |= {path} if path in mine and declares(old) and only_hashes(old, new) else set()
+            # only a Pin file the PR itself changes, and only the hashes of a pin whose VERSION it moved
+            if path in mine and declares(old):
+                before = git(root, "show", f"{fork}:{path}", check=False).stdout
+                hashes |= {path} if rehashed_only(old, new, before) else set()
     bad = scope(tier, files, conflicted, mine, regen_globs, changed, max_lines, test_globs, frozenset(hashes))
     if bad:
         return "refused", "; ".join(bad)

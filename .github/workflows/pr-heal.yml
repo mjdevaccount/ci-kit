@@ -261,13 +261,44 @@ jobs:
           include-hidden-files: true
           retention-days: 3
 
-  fix:
-    # tier 3: the review gate's harness (the sealed pool, the credential toggle, the pinned CLI).
-    name: fix (tier 3)
+  claim:
+    # tier 3's ONE attempt per head, recorded BEFORE Claude runs (token-only; the fix job holds none)
+    name: claim (tier 3)
     needs: [plan, regen]
     if: >-
       !cancelled() && needs.plan.outputs.go == 'true' && needs.plan.outputs.claude == 'true'
       && needs.regen.outputs.state != 'regen' && needs.regen.outputs.state != 'merge'
+    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
+    timeout-minutes: 5
+    outputs:
+      claimed: ${{ steps.claim.outputs.claimed || 'false' }}
+      why: ${{ steps.claim.outputs.why || 'the claim step did not finish' }}
+      attempt: ${{ github.run_attempt }}
+    steps:
+      - name: Fetch ci-kit (the plan's sha)
+        id: kit
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        with:
+          ref: ${{ needs.plan.outputs.kit-sha }}
+      - name: Record the attempt, or refuse a second one at this head
+        id: claim
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          GH_TOKEN: ${{ secrets.token }}
+          PR: ${{ inputs.pr }}
+          HEAD: ${{ inputs.head }}
+        run: python3 -m ci_kit.pr_ladder claim --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD" --run "$GITHUB_RUN_ID"
+
+  fix:
+    # tier 3: the review gate's harness (the sealed pool, the credential toggle, the pinned CLI).
+    # Only behind a claim made in THIS attempt: 'Re-run failed jobs' reuses the old claim's outputs, and
+    # its attempt number no longer matches, so a re-run never runs Claude twice at one head.
+    name: fix (tier 3)
+    needs: [plan, regen, claim]
+    if: >-
+      !cancelled() && needs.claim.outputs.claimed == 'true'
+      && needs.claim.outputs.attempt == format('{0}', github.run_attempt)
     runs-on: ${{ vars.CI_SEALED_RUNNER && fromJSON('["self-hosted","home-sealed"]') || 'ubuntu-latest' }}
     timeout-minutes: 50
     permissions:
@@ -398,7 +429,7 @@ jobs:
 
   report:
     name: report (tier 4)
-    needs: [plan, regen, fix, push]
+    needs: [plan, regen, claim, fix, push]
     if: always()
     runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
     environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
@@ -429,9 +460,13 @@ jobs:
           PUSH: ${{ needs.push.outputs.result }}
           PUSH_WHY: ${{ needs.push.outputs.why }}
           CLAUDE: ${{ needs.plan.outputs.claude }}
+          CLAIMED: ${{ needs.claim.outputs.claimed }}
+          CLAIM_WHY: ${{ needs.claim.outputs.why }}
+          CLAIM_ATTEMPT: ${{ needs.claim.outputs.attempt }}
           URL: ${{ needs.plan.outputs.url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: >-
           python3 -m ci_kit.pr_ladder report --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD" --checks "$CHECKS"
           --go "$GO" --plan-why "$PLAN_WHY" --regen "$REGEN" --regen-why "$REGEN_WHY" --fix "$FIX" --fix-why "$FIX_WHY"
           --push "$PUSH" --push-why "$PUSH_WHY" --claude "$CLAUDE" --url "$URL" --run-url "$RUN_URL"
+          --claimed "$CLAIMED" --claim-why "$CLAIM_WHY" --claim-attempt "$CLAIM_ATTEMPT" --run-attempt "$GITHUB_RUN_ATTEMPT"
