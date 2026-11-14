@@ -254,18 +254,23 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     # a PARKED PR (the scheduler cancelled or deferred its run) is eligible like a machinery red:
     # nothing in it is the author's to fix, and the update is its fresh run
     parked = frozenset(int(p["number"]) for p in prs if _has(p, pr_sched.PARKED))
-    # the members that cannot land as they stand: never the hold's head (a red head would freeze main)
-    skip = pr_queue.blocked(prs, opts.required, parked)
-    # FIRST, before anything that can fail: the head's `queue/position` success is what lets it merge
-    held = pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of, skip) if opts.hold else 0
-    heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read,
-                                        pr_heal.comments_of, summary)
-    errors += held
+    base = pr_hold.default_branch(repo, _gh_read) if opts.hold or opts.scarce else None
+    try:  # reads only; the hold (the head's `queue/position` success) runs whatever happens here
+        heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read,
+                                            pr_heal.comments_of, summary)
+    except (subprocess.CalledProcessError, ValueError, KeyError):
+        if opts.hold:
+            pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of,
+                         pr_queue.blocked(prs, opts.required, parked, base), base=base,
+                         stale_s=opts.head_stall_min * 120, required=opts.required)
+        raise
     machinery = pr_heal.machinery(heal)
+    # ONE head for the hold, the updater and the scheduler: the lowest armed PR that can land
+    skip = pr_queue.blocked(prs, opts.required, machinery | parked, base)
+    if opts.hold:
+        errors += pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of, skip,
+                               base=base, stale_s=opts.head_stall_min * 120, required=opts.required)
     q = _train_plan(prs, armed, summary, opts, machinery | parked)
-    # the scheduler KEEPS a machinery-red head (its fresh run is the head's own work); the hold skips
-    # it until that run is going, because red it cannot merge. One function, pr_queue.head(skip).
-    skip -= machinery
     head = _head_first(repo, prs, q, opts, summary, skip)
     if opts.max_in_flight > 0:
         summary.append(f"queue: {len(q.in_flight)}/{opts.max_in_flight} in flight "

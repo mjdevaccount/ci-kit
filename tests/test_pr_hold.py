@@ -2,6 +2,7 @@
 behind it cannot auto-merge out of turn. Each guard shown firing on its case, and not on the others."""
 from __future__ import annotations
 
+import datetime as dt
 import json
 import pathlib
 import subprocess
@@ -59,11 +60,20 @@ class Gh:
         return out
 
 
+REQ = ("unit tests",)
+NOW = 1_800_000_000.0
+
+
+def _iso(t: float) -> str:
+    return dt.datetime.fromtimestamp(t, dt.UTC).isoformat().replace("+00:00", "Z")
+
+
 def _pass(gh: Gh, prs: list[dict], comments: dict[int, list[str]] | None = None,
-          eligible: frozenset[int] = frozenset()) -> tuple[int, list[str]]:
+          eligible: frozenset[int] = frozenset(), base: str | None = "main") -> tuple[int, list[str]]:
     summary: list[str] = []
-    skip = pr_queue.blocked(prs, ("unit tests",), eligible)
-    return pr_hold.hold("o/r", prs, gh.read, gh.write, summary, lambda repo, n: (comments or {}).get(n, []), skip), summary
+    skip = pr_queue.blocked(prs, REQ, eligible, base)  # run() passes what it read: None when unread
+    return pr_hold.hold("o/r", prs, gh.read, gh.write, summary, lambda repo, n: (comments or {}).get(n, []), skip,
+                        required=REQ, now=NOW), summary
 
 
 def test_replay_td3083_merged_past_head_3082_is_held_must_fire() -> None:
@@ -133,7 +143,7 @@ def test_a_refused_non_head_is_red_but_never_pages(monkeypatch: pytest.MonkeyPat
     assert errors == 1 and not any(w.startswith("pr comment") for w in gh.writes)
 
 
-def test_the_hold_runs_before_anything_else_can_fail_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_hold_runs_even_when_the_pass_crashes_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
     order: list[str] = []
     monkeypatch.setattr(pr_autoupdate, "_gh_read", lambda *a: subprocess.CompletedProcess(a, 0, "{}", ""))
     monkeypatch.setattr(pr_autoupdate.pr_list, "rows", lambda raw: [_pr(3082)])
@@ -145,7 +155,7 @@ def test_the_hold_runs_before_anything_else_can_fail_must_fire(monkeypatch: pyte
     monkeypatch.setattr(pr_autoupdate.pr_heal, "assess_armed", heal)
     with pytest.raises(subprocess.CalledProcessError):
         pr_autoupdate.run("o/r", [], [], pr_autoupdate.Options(hold=True))
-    assert order == ["hold", "heal"]
+    assert order == ["heal", "hold"]                                     # the head still gets its success
     order.clear()
     with pytest.raises(subprocess.CalledProcessError):
         pr_autoupdate.run("o/r", [], [], pr_autoupdate.Options())
@@ -195,8 +205,12 @@ def test_a_red_or_conflicting_head_is_skipped_so_main_does_not_freeze_must_fire(
 
 def test_a_head_still_running_or_parked_or_red_off_the_required_list_keeps_the_head_must_not_fire() -> None:
     other_red = [{"name": "optional lint", "status": "COMPLETED", "conclusion": "FAILURE"}]
-    for head, eligible in ((_pr(3082, checks=RUNNING), frozenset()), (_pr(3082, checks=RED), frozenset({3082})),
-                           (_pr(3082, checks=other_red), frozenset())):
+    newer_green = [{**RED[0], "startedAt": "2026-11-14T06:00:00Z"},
+                   {"name": "unit tests", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-11-14T06:10:00Z"}]
+    for head, eligible in ((_pr(3082, checks=RUNNING), frozenset()),
+                           (_pr(3082, checks=RED, merge="BEHIND"), frozenset({3082})),   # parked/machinery, behind
+                           (_pr(3082, checks=other_red), frozenset()),
+                           (_pr(3082, checks=newer_green), frozenset())):               # re-run went green
         gh = Gh()
         _pass(gh, [head, _pr(3083)], eligible=eligible)
         assert gh.posted() == {3082: "success", 3083: "pending"}
@@ -211,7 +225,8 @@ def test_a_fixed_head_takes_success_back_from_the_pr_that_stood_in_must_fire() -
 
 def test_default_branch_unread_marks_every_base_head_holds_nothing_and_goes_red_must_fire() -> None:
     gh = Gh(repo_fails=True)
-    errors, summary = _pass(gh, [_pr(3080, base="b3079"), _pr(3082), _pr(3083), _pr(3090, armed=False, branch="train/1")])
+    errors, summary = _pass(gh, [_pr(3080, base="b3079"), _pr(3082), _pr(3083), _pr(3090, armed=False, branch="train/1")],
+                            base=None)
     assert errors == 1 and gh.posted() == {3080: "success", 3082: "success", 3090: "success"}
     assert any("default branch UNREAD" in s for s in summary)
 
@@ -246,3 +261,69 @@ def test_main_reads_queue_hold_from_env(monkeypatch: pytest.MonkeyPatch, env: st
     monkeypatch.setattr(pr_autoupdate, "run", lambda repo, summary, relock, opts: seen.append(opts.hold) or 0)
     pr_autoupdate.main(["--repo", "o/r"])
     assert seen == [on]
+
+
+def test_a_cancelled_required_check_or_a_parked_head_current_with_main_is_skipped_must_fire() -> None:
+    # a timeout-cancelled unit tests is JUDGMENT, never re-run: as head it would hold success forever
+    cancelled = [{"name": "unit tests", "status": "COMPLETED", "conclusion": "CANCELLED"}]
+    for head, eligible in ((_pr(3082, checks=cancelled), frozenset()),
+                           (_pr(3082, checks=RED), frozenset({3082}))):     # parked, but current: no update coming
+        gh = Gh()
+        _pass(gh, [head, _pr(3083)], eligible=eligible)
+        assert gh.posted() == {3082: "pending", 3083: "success"}
+
+
+def test_the_holds_own_pending_never_reads_as_a_running_check_must_not_fire() -> None:
+    held = [{"__typename": "StatusContext", "context": pr_hold.CONTEXT, "state": "PENDING"}]
+    assert pr_queue.check_state(held) == "green"                # required-checks left empty: still no deadlock
+    q = pr_queue.plan([_pr(3082, merge="BEHIND"), _pr(3083, merge="BLOCKED", checks=held)], 1)
+    assert [p["number"] for p in q.update] == [3082] and q.in_flight == []   # 3083 holds no slot
+    assert pr_hold.CONTEXT == pr_queue.QUEUE_STATUS
+
+
+def test_every_pending_is_posted_before_the_success_must_fire() -> None:
+    gh = Gh({f"{3083:040d}": [{"context": pr_hold.CONTEXT, "state": "success"}]})
+    _pass(gh, [_pr(3081), _pr(3083)])
+    statuses = [w for w in gh.writes if "/statuses/" in w]
+    assert "state=pending" in statuses[0] and f"{3083:040d}" in statuses[0] and "state=success" in statuses[1]
+
+
+def test_a_head_holding_success_that_never_merges_pages_on_the_second_pass_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+    # td#2258's shape: a required check never reports; the head is current, green, BLOCKED, and with
+    # the hold on no other merge moves main to shake it loose
+    pages: list[str] = []
+    monkeypatch.setattr(pr_hold, "page", lambda title, body, click: pages.append(body) or "published (200)")
+    done = [{"name": "unit tests", "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": _iso(NOW - 3600)}]
+    head = _pr(3082, merge="BLOCKED", checks=done)
+    ok = {f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "success", "updated_at": _iso(NOW - 3000)}]}
+    errors, summary = _pass(Gh(ok), [head, _pr(3083)])
+    assert errors == 1 and pages == [] and any("HEAD HELD: #3082" in s for s in summary)
+    mark1 = pr_hold.HELD.format(sha=f"{3082:040d}", paged="")
+    errors, _ = _pass(Gh(ok), [head, _pr(3083)], {3082: [mark1]})
+    assert errors == 1 and len(pages) == 1 and "has not merged" in pages[0]
+
+
+def test_a_head_still_inside_the_window_or_behind_or_running_is_not_stuck_must_not_fire() -> None:
+    fresh = [{"name": "unit tests", "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": _iso(NOW - 60)}]
+    old = [{"name": "unit tests", "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": _iso(NOW - 3600)}]
+    since = _iso(NOW - 3600)
+    assert pr_hold.stuck(_pr(1, merge="BLOCKED", checks=fresh), since, REQ, NOW, 1800) == ""
+    assert pr_hold.stuck(_pr(1, merge="BEHIND", checks=old), since, REQ, NOW, 1800) == ""     # the update moves it
+    assert pr_hold.stuck(_pr(1, merge="BLOCKED", checks=RUNNING), since, REQ, NOW, 1800) == ""
+    assert pr_hold.stuck(_pr(1, merge="BLOCKED", checks=old), since, REQ, NOW, 1800) != ""    # must fire
+
+
+def test_one_head_for_the_hold_and_the_scheduler_on_a_machinery_red_behind_main_must_fire() -> None:
+    # review of the hold, finding 3: A machinery-red and BEHIND is the head for BOTH (its update is
+    # the fresh run); B, green, waits -- so B never merges past A's run and pages itself
+    prs = [_pr(3082, checks=RED, merge="BEHIND"), _pr(3083)]
+    skip = pr_queue.blocked(prs, REQ, frozenset({3082}), "main")
+    assert pr_queue.head(prs, skip)["number"] == 3082
+    gh = Gh()
+    _pass(gh, prs, eligible=frozenset({3082}))
+    assert gh.posted() == {3082: "success", 3083: "pending"}
+
+
+def test_a_stacked_pr_is_never_the_schedulers_head_either_must_not_fire() -> None:
+    prs = [_pr(3080, base="b3079"), _pr(3082)]
+    assert pr_queue.head(prs, pr_queue.blocked(prs, REQ, frozenset(), "main"))["number"] == 3082

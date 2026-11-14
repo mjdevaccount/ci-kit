@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ci_kit.redclass import FAIL
+from ci_kit.redclass import FAIL, QUEUE_STATUS, red_checks
 
 _FAIL = FAIL  # the one set (ci_kit/redclass.py)
 _RUNNING_STATUS = {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"}
@@ -57,7 +57,7 @@ def check_state(rollup: list[dict] | None, required: tuple[str, ...] = ()) -> st
     running = False
     for c in rollup or []:
         name = c.get("name") or c.get("context") or ""
-        if required and name not in required:
+        if (required and name not in required) or name == QUEUE_STATUS:  # the hold is order, not a check
             continue
         if c.get("__typename") == "StatusContext" or ("state" in c and "status" not in c):  # commit status
             state = (c.get("state") or "").upper()
@@ -171,19 +171,26 @@ def head(prs: list[dict], skip: frozenset[int] = frozenset()) -> dict | None:
     return min(members, key=landing_order) if members else None
 
 
-def blocked(prs: list[dict], required: tuple[str, ...] = (), eligible: frozenset[int] = frozenset()) -> frozenset[int]:
-    """The members that cannot land AS THEY STAND: DIRTY (a conflict with the base), or a required
-    check failing on the head and the PR not in `eligible` (parked or machinery: its re-run is
-    the queue's own work, not the author's). Pure. WHY: the queue hold (ci_kit/pr_hold.py) gives
-    `queue/position` success to ONE PR; were that a red or conflicting PR, nothing into the base
-    could merge until a human fixed it (review of the hold, finding 1). A skipped PR is the head
-    again the moment its fix (or re-run) leaves it running or green."""
+def blocked(prs: list[dict], required: tuple[str, ...] = (), eligible: frozenset[int] = frozenset(),
+            base: str | None = None) -> frozenset[int]:
+    """The PRs that cannot land AS THEY STAND -- never the head, for the hold, the updater and the
+    scheduler alike (one head, pr_queue.head(prs, skip)). Pure. Blocked:
+      * DIRTY (a conflict with its base);
+      * a required check RED on its head (redclass.red_checks: failing or CANCELLED, newest run per
+        name), unless the PR is `eligible` (parked or machinery-red) AND behind main: then the
+        queue's own update is its fresh run. Current with main, a re-run is owed that this token
+        may not be able to make (no Actions write), so it is skipped until that run is going;
+      * stacked: into a branch other than `base` (the default branch; None = unknown, none).
+    WHY: the queue hold (ci_kit/pr_hold.py) gives `queue/position` success to ONE PR; were that one
+    unable to land, nothing could merge into main (review of the hold, finding 1). A skipped PR is
+    the head again the moment its fix (or re-run) leaves it running or green."""
     out = set()
     for p in prs:
         n = int(p["number"])
-        if (p.get("mergeStateStatus") or "").upper() == "DIRTY":
+        stale = (p.get("mergeStateStatus") or "UNKNOWN").upper() in _STALE_STATES
+        if (p.get("mergeStateStatus") or "").upper() == "DIRTY" or (base and p.get("baseRefName") != base):
             out.add(n)
-        elif n not in eligible and check_state(p.get("statusCheckRollup"), required) == "failing":
+        elif not (n in eligible and stale) and red_checks(p.get("statusCheckRollup"), required):
             out.add(n)
     return frozenset(out)
 

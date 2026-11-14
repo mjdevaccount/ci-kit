@@ -8,18 +8,20 @@ auto-merge landed #3083 first and #3082 had to re-test. pr_sched.out_of_queue PA
 it happened. The hold makes it impossible.
 
 Per pass of pr-autoupdate (every push to main, every last required check, the caller's cron):
-  * the HEAD -> success. The head is pr_queue.head with `skip` = pr_queue.blocked: the
-    lowest-numbered armed same-repo non-draft PR into the default branch that CAN land as it
-    stands -- not DIRTY, no required check failing (a parked PR's cancelled runs do not count:
-    re-running them is the queue's job). A red or conflicting PR as the head would freeze every
-    merge into main until a human fixed it; skipped, it is the head again the moment its fix (or
-    re-run) leaves it running or green, and whatever PR held success then goes back to pending;
+  * the HEAD -> success. The head is pr_queue.head with `skip` = pr_queue.blocked -- the SAME
+    head the updater and the scheduler use: the lowest-numbered armed same-repo non-draft PR into
+    the default branch that CAN land -- not DIRTY, no required check red (failing or cancelled),
+    except a parked or machinery red BEHIND main, whose fresh run is the queue's next update. A
+    red or conflicting PR as the head would freeze every merge into main until a human fixed it;
+    skipped, it is the head again the moment its fix (or re-run) leaves it running or green, and
+    whatever PR held success then goes back to pending;
   * a merge train's PR (`train/...`) -> success: a train IS the queue landing;
   * every other same-repo PR -> pending, saying why (behind the head, skipped, or not in the queue
     at all: a draft or an unarmed PR -- Renovate's, whose preset never arms them, until
     pr_reconcile arms it -- joins by arming). A fork gets nothing: it is never a member.
 A status is posted only when its STATE differs from the commit's current one, so a waiting PR is
-not re-posted every pass. A new head commit (an update, a push) has no status until the next pass,
+not re-posted every pass; every pending goes out BEFORE the success, so a head change never has
+two PRs holding success at once. A new head commit (an update, a push) has no status until the next pass,
 and that pass is due: its own checks finishing trigger one.
 
 FAIL-SAFE, AND WATCHED. The head's success is posted by ANY pass, whatever else that pass does
@@ -29,7 +31,11 @@ base gets success, nothing is posted pending -- this pass holds nothing new -- a
 A post the token is refused is an ERROR (a red run). The head still reading not-success on a
 SECOND pass is a page: the first failing pass leaves a marker comment on the PR
 (`<!-- queue:head-held sha=... -->`, the pr_heal pattern), the second pages ntfy once and marks it
-paged. The run's red streak is what mcp ci-schedule-audit reads.
+paged. The run's red streak is what mcp ci-schedule-audit reads. A head that HAS success, every
+required check green (or never reported), current with main, and still open `stale_s` after its
+last check finished is the same alarm (a required check that never reports, td#2258's shape; a
+merge GitHub refuses for a reason no check shows): with the hold on, no other PR's merge moves
+main to shake it loose, so the hold must say so itself.
 
 KEEP `queue/position` OUT of the merge train's `required-checks` (and pr-autoupdate's): a member
 waiting its turn reads pending, so a train would never collect it. A train's own PR gets success on
@@ -44,6 +50,7 @@ proved it can post.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -58,6 +65,7 @@ HEAD = "head of the PR queue: may merge"
 TRAIN = "a merge train lands for the queue"
 SKIPPED = "skipped by the queue: a conflict or a failing required check; head again once fixed"
 UNREAD = "unread"
+_READ: str | None = "<read it>"  # hold(base=...) default: read the default branch here
 HELD = "<!-- queue:head-held sha={sha}{paged} -->"
 _HELD = re.compile(r"<!-- queue:head-held sha=([0-9a-f]{40})( paged)? -->")
 
@@ -99,15 +107,39 @@ def desired(prs: list[dict], base: str | None, skip: frozenset[int] = frozenset(
     return out
 
 
-def current(repo: str, sha: str, read: Gh) -> str | None:
-    """The commit's `queue/position` state from the COMBINED status (newest per context, however
-    many other statuses the commit carries). None = it has none; UNREAD = the read failed, and
-    then the state is posted anyway: a redundant post costs nothing, a missed one holds a PR."""
+def current(repo: str, sha: str, read: Gh) -> tuple[str | None, str]:
+    """(the commit's `queue/position` state, when it was set) from the COMBINED status (newest per
+    context, however many other statuses the commit carries). None = it has none; UNREAD = the read
+    failed, and then the state is posted anyway: a redundant post costs nothing, a missed one holds a PR."""
     try:
         rows = json.loads(read("api", f"repos/{repo}/commits/{sha}/status").stdout or "{}").get("statuses") or []
     except (subprocess.CalledProcessError, ValueError, AttributeError):
-        return UNREAD
-    return next((str(s.get("state")) for s in rows if isinstance(s, dict) and s.get("context") == CONTEXT), None)
+        return UNREAD, ""
+    s = next((s for s in rows if isinstance(s, dict) and s.get("context") == CONTEXT), None)
+    return (str(s.get("state")), str(s.get("updated_at") or "")) if s else (None, "")
+
+
+def _epoch(s: str) -> float:
+    try:
+        return dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def stuck(p: dict, since: str, required: tuple[str, ...], now: float, stale_s: float) -> str:
+    """'' or why the head, holding success, has not merged and nothing will move it: every required
+    check green or absent (redclass.red_checks empty, nothing running), current with main, and
+    `stale_s` past both its success and its last check finishing. Pure."""
+    rollup = p.get("statusCheckRollup") or []
+    if pr_queue.check_state(rollup, required) != "green" or \
+            (p.get("mergeStateStatus") or "UNKNOWN").upper() in ("BEHIND", "DIRTY", "UNKNOWN"):
+        return ""
+    last = max([_epoch(since)] + [_epoch(str(c.get("completedAt") or c.get("createdAt") or "")) for c in rollup])
+    if not last or now - last < stale_s:
+        return ""
+    return (f"has held `{CONTEXT}` success with its required checks green for {(now - last) / 60:.0f} min and has not "
+            f"merged (merge state {p.get('mergeStateStatus')}): a required check that never reported, or a merge "
+            "GitHub refuses -- nothing else can merge meanwhile")
 
 
 def _post(repo: str, sha: str, state: str, desc: str, write: Gh) -> str:
@@ -125,7 +157,8 @@ def _post(repo: str, sha: str, state: str, desc: str, write: Gh) -> str:
     return msg
 
 
-def _base(repo: str, read: Gh) -> str | None:
+def default_branch(repo: str, read: Gh) -> str | None:
+    """The protected default branch; None when it could not be read."""
     try:
         return json.loads(read("api", f"repos/{repo}").stdout or "{}").get("default_branch") or None
     except (subprocess.CalledProcessError, ValueError, AttributeError):
@@ -133,11 +166,14 @@ def _base(repo: str, read: Gh) -> str | None:
 
 
 def hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
-         comments: Callable[[str, int], list[str]], skip: frozenset[int] = frozenset()) -> int:
-    """One hold pass; `skip` = pr_queue.blocked(...). Returns the errors. Raises nothing: the
-    caller runs it FIRST, so a crash after it cannot cost the head its success."""
+         comments: Callable[[str, int], list[str]], skip: frozenset[int] = frozenset(), *,
+         base: str | None = _READ, stale_s: float = 1800, required: tuple[str, ...] = (),
+         now: float | None = None) -> int:
+    """One hold pass; `skip` = pr_queue.blocked(...). Returns the errors. Raises nothing: the caller
+    runs it even when the pass around it crashes, so a crash cannot cost the head its success."""
     errors = 0
-    base = _base(repo, read)
+    now = dt.datetime.now(dt.UTC).timestamp() if now is None else now
+    base = default_branch(repo, read) if base == _READ else base
     if base is None:
         errors += 1
         print(f"::error::{CONTEXT}: could not read {repo}'s default branch -- every base's head marked, nothing held")
@@ -146,13 +182,19 @@ def hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
     by_n = {int(p["number"]): p for p in prs}
     posted: list[str] = []
     unread = 0
-    for n, (state, desc) in sorted(want.items()):
+    # every pending before any success: a head change never leaves two PRs holding success
+    for n, (state, desc) in sorted(want.items(), key=lambda kv: (kv[1][0] == "success", kv[0])):
         sha = str(by_n[n].get("headRefOid") or "")
         if len(sha) != 40:
             continue
-        was = current(repo, sha, read)
+        was, since = current(repo, sha, read)
         unread += was == UNREAD
         if was == state:
+            why = stuck(by_n[n], since, required, now, stale_s) if desc == HEAD else ""
+            if why:
+                errors += 1
+                print(f"::error::queue head #{n} {why}")
+                summary.append(_escalate(repo, by_n[n], sha, why, write, comments))
             continue
         err = _post(repo, sha, state, desc, write)
         if not err:
@@ -161,7 +203,7 @@ def hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
         errors += 1
         print(f"::error::{CONTEXT} on #{n} ({state}) was refused: {err}")
         if desc == HEAD:
-            summary.append(_escalate(repo, by_n[n], sha, err, write, comments))
+            summary.append(_escalate(repo, by_n[n], sha, f"`{CONTEXT}` success was refused: {err}", write, comments))
     heads = sorted(n for n, (_, d) in want.items() if d == HEAD)
     summary.append(f"hold ({CONTEXT}): head #{', #'.join(map(str, heads))}" if heads else f"hold ({CONTEXT}): no queue head")
     skipped = sorted(n for n, (_, d) in want.items() if d == SKIPPED)
@@ -174,25 +216,25 @@ def hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
     return errors
 
 
-def _escalate(repo: str, p: dict, sha: str, err: str, write: Gh, comments: Callable[[str, int], list[str]]) -> str:
-    """The head could not be given success. First pass: a marker comment. Second: ONE page. A
-    comment that cannot be read counts as no marker: at worst one extra comment, never a lost page."""
+def _escalate(repo: str, p: dict, sha: str, why: str, write: Gh, comments: Callable[[str, int], list[str]]) -> str:
+    """The head cannot merge (`why`). First pass: a marker comment. Second: ONE page. A comment
+    that cannot be read counts as no marker: at worst one extra comment, never a lost page."""
     n = int(p["number"])
     try:
         marks = [m for body in comments(repo, n) for m in _HELD.findall(body) if m[0] == sha]
     except (subprocess.CalledProcessError, ValueError, OSError):
         marks = []
     if any(paged for _, paged in marks):
-        return f"HEAD HELD: #{n} still not mergeable ({CONTEXT}); paged already"
+        return f"HEAD HELD: #{n} still cannot merge ({CONTEXT}); paged already"
     if not marks:
-        body = (HELD.format(sha=sha, paged="") + f"\nThe PR queue could not mark this PR, its head, mergeable "
-                f"(`{CONTEXT}` success was refused: {err}). The next pass retries and pages if it fails again.")
+        body = (HELD.format(sha=sha, paged="") + f"\nThe PR queue's head cannot merge: {why}. "
+                "The next pass looks again and pages if it still cannot.")
         write("pr", "comment", str(n), "-R", repo, "--body", body)
-        return f"HEAD HELD: #{n} could not be marked mergeable ({CONTEXT}); retried next pass, paged if it fails again"
+        return f"HEAD HELD: #{n} cannot merge ({why}); paged next pass if it still cannot"
     try:
         note = page(f"{repo.rsplit('/', 1)[-1]}: queue head #{n} cannot merge",
-                    f"{CONTEXT} success refused on two passes: {err}", str(p.get("url") or ""))
+                    f"two passes: {why}"[:900], str(p.get("url") or ""))
     except ValueError as e:  # a malformed NTFY_URL: page() catches OSError only
         note = f"push FAILED: {e}"
     write("pr", "comment", str(n), "-R", repo, "--body", HELD.format(sha=sha, paged=" paged") + f"\nPaged: {note}")
-    return f"HEAD HELD: #{n} not mergeable for 2 passes ({CONTEXT}); page {note}"
+    return f"HEAD HELD: #{n} cannot merge for 2 passes ({why}); page {note}"
