@@ -154,18 +154,38 @@ def member(p: dict) -> bool:
     gives no way to tell a self-merging one from a major bump left for a human. Counted by author
     or branch, that bump left open a week would be the head all week, and the PR the operator is
     waiting on would never get the head's priority. So Renovate's merges are watched, not ordered:
-    one landing past an in-flight head is paged (pr_sched.out_of_queue). Arm them (Renovate
-    `platformAutomerge: true`) and they join the queue with no change here."""
+    one landing past an in-flight head is paged (pr_sched.out_of_queue). Arm them (pr_reconcile
+    does, hourly; or Renovate `platformAutomerge: true`) and they join the queue in number order,
+    like any PR. With the queue hold on (ci_kit/pr_hold.py) an UNARMED one reads `queue/position`
+    pending, so Renovate's own merge waits for that arming (td#3079, 06:49Z 11-14)."""
     branch = str(p.get("headRefName") or "")
     return (not p.get("isCrossRepository") and not p.get("isDraft") and not branch.startswith("train/")
             and bool(p.get("autoMergeRequest")))
 
 
-def head(prs: list[dict]) -> dict | None:
-    """THE queue head: the lowest-numbered member (landing_order). Pure. A head blocked on its own
-    red holds no runner -- it has no demand -- so it costs the rest nothing (work-conserving)."""
-    members = [p for p in prs if member(p)]
+def head(prs: list[dict], skip: frozenset[int] = frozenset()) -> dict | None:
+    """THE queue head: the lowest-numbered member (landing_order) not in `skip`. Pure. A head blocked
+    on its own red holds no runner -- it has no demand -- so it costs the rest nothing
+    (work-conserving). `skip` = `blocked(...)`: the members that cannot land as they stand."""
+    members = [p for p in prs if member(p) and int(p["number"]) not in skip]
     return min(members, key=landing_order) if members else None
+
+
+def blocked(prs: list[dict], required: tuple[str, ...] = (), eligible: frozenset[int] = frozenset()) -> frozenset[int]:
+    """The members that cannot land AS THEY STAND: DIRTY (a conflict with the base), or a required
+    check failing on the head and the PR not in `eligible` (parked or machinery: its re-run is
+    the queue's own work, not the author's). Pure. WHY: the queue hold (ci_kit/pr_hold.py) gives
+    `queue/position` success to ONE PR; were that a red or conflicting PR, nothing into the base
+    could merge until a human fixed it (review of the hold, finding 1). A skipped PR is the head
+    again the moment its fix (or re-run) leaves it running or green."""
+    out = set()
+    for p in prs:
+        n = int(p["number"])
+        if (p.get("mergeStateStatus") or "").upper() == "DIRTY":
+            out.add(n)
+        elif n not in eligible and check_state(p.get("statusCheckRollup"), required) == "failing":
+            out.add(n)
+    return frozenset(out)
 
 
 @dataclass(frozen=True)

@@ -341,6 +341,16 @@ def test_the_heads_own_landing_a_train_or_a_stale_head_does_not_page_must_not_fi
     assert _oq([3080], behind_by=3) == ""   # the head was not in flight against the old main
 
 
+
+def test_a_skipped_red_head_hands_the_watch_to_the_pr_that_can_land_must_fire() -> None:
+    # #3073 red (skipped by the hold): #3080 is the head in flight, and #3085 landing past it pages
+    gh = Gh({"repos/o/r/commits/sha1/pulls": [{"number": 3085, "merged_at": "x", "head": {"ref": "b3085"},
+                                                "user": {"login": "agent"}}],
+             "repos/o/r/compare/": {"behind_by": 0}})
+    prs = [_pr(3073), _pr(3080), _pr(3085)]
+    assert "#3085" in pr_sched.out_of_queue("o/r", prs, "b" * 40, "sha1", gh.read, frozenset({3073}))
+    assert pr_queue.head(prs, frozenset({3073}))["number"] == 3080
+
 # ── the review gate's admission CLI ───────────────────────────────────────────────────────────
 def _admit(monkeypatch: pytest.MonkeyPatch, tmp_path, prs: list[dict], *, edit_rc: int = 0, demand: bool = True,
            argv: tuple[str, ...] = (), label: str | None = "PR queue: parked") -> dict[str, str]:

@@ -220,7 +220,7 @@ def rerun(repo: str, r: dict, write: Gh) -> str:
     return "" if got.returncode == 0 else _grant((got.stderr or got.stdout or "").strip()[-300:])
 
 
-def out_of_queue(repo: str, prs: list[dict], before: str, sha: str, read: Gh) -> str:
+def out_of_queue(repo: str, prs: list[dict], before: str, sha: str, read: Gh, skip: frozenset[int] = frozenset()) -> str:
     """'' or the page body: the push `before..sha` merged a PR OUTSIDE the queue while the head was
     in flight (current with `before`, no failing check) -- only an in-flight head was hurt. Outside
     = numbered after the head (the head was passed over), or Renovate's own merge whatever its
@@ -231,7 +231,7 @@ def out_of_queue(repo: str, prs: list[dict], before: str, sha: str, read: Gh) ->
         return ""
     merged = _json(read, "api", f"repos/{repo}/commits/{sha}/pulls")
     # a train landing IS the queue (ci_kit/merge_train); anything else merged past an in-flight head is not
-    h = pr_queue.head(prs)
+    h = pr_queue.head(prs, skip)
     if h is None:
         return ""
     nums = [int(m["number"]) for m in merged or [] if isinstance(m, dict) and m.get("merged_at")
@@ -252,14 +252,16 @@ def out_of_queue(repo: str, prs: list[dict], before: str, sha: str, read: Gh) ->
 
 def pass_(repo: str, prs: list[dict], capacity: dict[str, int], read: Gh, write: Gh, summary: list[str],
           *, preempt_after_s: float, stall_s: float, behind: Callable[[dict], bool],
-          before: str = "", sha: str = "", now: float | None = None, updated: frozenset[int] = frozenset()) -> int:
+          before: str = "", sha: str = "", now: float | None = None, updated: frozenset[int] = frozenset(),
+          skip: frozenset[int] = frozenset()) -> int:
     """One scheduler pass (see the module doc). `updated` = PRs this run merged main into: their
-    push starts fresh runs, so nothing of theirs is re-run here. Returns the errors."""
+    push starts fresh runs, so nothing of theirs is re-run here. `skip` = members that cannot land
+    as they stand (pr_queue.blocked): never the head. Returns the errors."""
     now = dt.datetime.now(dt.UTC).timestamp() if now is None else now
     errors = 0
     same = [p for p in prs if not p.get("isCrossRepository")]
     by_branch = {str(p.get("headRefName")): int(p["number"]) for p in same}
-    h = pr_queue.head(same)
+    h = pr_queue.head(same, skip)
     hn = int(h["number"]) if h else None
     off = can_act(repo, read, write) if capacity else ""
     if off:
@@ -271,7 +273,7 @@ def pass_(repo: str, prs: list[dict], capacity: dict[str, int], read: Gh, write:
     elif capacity and not ensure_label(repo, write):
         errors += 1  # the review gate's admission can only park a labelled PR: until this lands it runs all
         print(f"::error::{repo}: could not create the `{PARKED}` label; admission parks nothing until it exists")
-    oq = out_of_queue(repo, same, before, sha, read)
+    oq = out_of_queue(repo, same, before, sha, read, skip)
     if oq:
         summary.append(f"OUT-OF-QUEUE MERGE: {oq}; page " + page(f"{repo.rsplit('/', 1)[-1]}: out-of-queue merge", oq,
                                                                  str(h.get("url") or "") if h else ""))

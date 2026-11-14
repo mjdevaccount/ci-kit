@@ -251,16 +251,22 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout))
     armed = [p for p in prs if p.get("autoMergeRequest") and not p.get("isCrossRepository")]
     summary.append(f"{len(armed)} armed PR(s) of {len(prs)} open")
-    # FIRST, before anything that can fail: the head's `queue/position` success is what lets it merge
-    held = pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of) if opts.hold else 0
-    heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read,
-                                        pr_heal.comments_of, summary)
-    errors += held
     # a PARKED PR (the scheduler cancelled or deferred its run) is eligible like a machinery red:
     # nothing in it is the author's to fix, and the update is its fresh run
     parked = frozenset(int(p["number"]) for p in prs if _has(p, pr_sched.PARKED))
-    q = _train_plan(prs, armed, summary, opts, pr_heal.machinery(heal) | parked)
-    head = _head_first(repo, prs, q, opts, summary)
+    # the members that cannot land as they stand: never the hold's head (a red head would freeze main)
+    skip = pr_queue.blocked(prs, opts.required, parked)
+    # FIRST, before anything that can fail: the head's `queue/position` success is what lets it merge
+    held = pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of, skip) if opts.hold else 0
+    heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read,
+                                        pr_heal.comments_of, summary)
+    errors += held
+    machinery = pr_heal.machinery(heal)
+    q = _train_plan(prs, armed, summary, opts, machinery | parked)
+    # the scheduler KEEPS a machinery-red head (its fresh run is the head's own work); the hold skips
+    # it until that run is going, because red it cannot merge. One function, pr_queue.head(skip).
+    skip -= machinery
+    head = _head_first(repo, prs, q, opts, summary, skip)
     if opts.max_in_flight > 0:
         summary.append(f"queue: {len(q.in_flight)}/{opts.max_in_flight} in flight "
                        f"[{', '.join('#' + str(p['number']) for p in q.in_flight)}], {len(q.update)} to attempt, "
@@ -297,7 +303,7 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
             repo, prs, dict(opts.scarce), _gh_read, pr_heal.write, summary,
             preempt_after_s=opts.preempt_after_min * 60, stall_s=opts.head_stall_min * 60,
             behind=lambda p: (p.get("mergeStateStatus") or "UNKNOWN").upper() in ("BEHIND", "UNKNOWN"),
-            before=opts.before, sha=opts.sha, updated=frozenset(int(n) for n in updated))
+            before=opts.before, sha=opts.sha, updated=frozenset(int(n) for n in updated), skip=skip)
     errors += unlabel_resolved(repo, prs, attempted, opts, summary)
     return 1 if errors else 0
 
@@ -306,13 +312,14 @@ def _has(p: dict, label: str) -> bool:
     return any(lb.get("name") == label for lb in p.get("labels") or [])
 
 
-def _head_first(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, summary: list[str]) -> int | None:
+def _head_first(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, summary: list[str],
+                skip: frozenset[int] = frozenset()) -> int | None:
     """Update the queue HEAD the moment it is safe, ahead of the slot count: BEHIND main, armed, not
     red on its own checks, and no review run still owes a verdict (`pr_sched.review_settled`) -- the
     gate's tail is not a reason to wait (td#3073, 03:58Z 11-14: verdict recorded, update held for the
     tail job, then the sealed runner went to another PR). Returns the head's number when it was moved
     up (so the loop does not skip it for that tail), else None. Off unless the scheduler is on."""
-    h = pr_queue.head(prs)
+    h = pr_queue.head(prs, skip)
     if not opts.scarce or h is None or not h.get("autoMergeRequest"):
         return None
     queued = any(p is h for p in q.update)
