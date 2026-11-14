@@ -431,8 +431,8 @@ def _train(n: int = 3090, *, age_min: float = 5, merge: str = "BLOCKED", checks:
     return {**_pr(n, armed=False, branch=f"train/{n}", merge=merge, checks=checks), "createdAt": _iso(NOW - age_min * 60)}
 
 
-def test_replay_td3096_head_is_held_while_a_live_train_is_open_must_fire() -> None:
-    # 11-14: #3096's train opened, a human PR (the head) landed 3.4 min later -> train stale, CI thrown away
+def test_the_head_is_held_while_a_live_train_is_open_must_fire() -> None:
+    # a train opened, the head (a human PR) landed 3.4 min later -> train stale, its CI thrown away
     gh = Gh({f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "success"}]})
     errors, summary = _pass(gh, [_pr(3082), _pr(3083), _train()])
     assert errors == 0 and gh.posted() == {3082: "pending", 3083: "pending", 3090: "success"}

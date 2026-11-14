@@ -43,7 +43,7 @@
 #
 # THE TRAIN OWNS THE LANE (v1.35.0, with `queue-hold`): while a live train is open the queue head
 # reads `queue/position` pending ("held for merge train #M"), so it cannot land under the train and
-# throw its CI away (trade-data 11-14: all 5 unlanded trains died "stale: main moved"). Bounded by
+# throw its CI away (measured: every unlanded train in a day died "stale: main moved"). Bounded by
 # `train-stale-minutes` (set it to the train's `stale-minutes`): a red, BEHIND/DIRTY or older train
 # releases the lane and its update hold, named in the summary (`hold: lane RELEASED ...`).
 #

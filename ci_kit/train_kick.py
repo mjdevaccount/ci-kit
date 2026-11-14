@@ -17,7 +17,7 @@ WHEN, pure (`decide`). Dispatch the caller's train workflow only when ALL hold:
     UNSTABLE) -- a candidate OR NOT (v1.35.0: an ejected or opted-out head is no candidate and lands
     all the same): its merge to main is a push, and the next pass decides again. A train woken
     beside it would either hold a head that is seconds from landing for a whole train CI cycle, or
-    be composed on a base already about to move (td#3115: a lock-maintenance PR landed during a
+    be composed on a base already about to move (a lock-maintenance PR once landed during a
     6-minute compose). The rest of the race is CLOSED elsewhere (v1.35.0): the composer takes the
     lane before it opens a train and aborts if main moved meanwhile (merge_train.phases), and the
     queue hold keeps the head pending while a live train is open (pr_hold.live_train);

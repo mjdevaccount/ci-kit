@@ -759,8 +759,8 @@ jobs:
     # is not needed (train, skip, finish, defer); in mode `review` it must have run and passed.
     #
     # ONE BOOT, NOT THREE (v1.35.0). `review deferred` and `record verdict` were jobs of their own:
-    # each a single-use secure-pool runner for a few seconds of shell (trade-data 2026-11-14: 33
-    # `record verdict` + 3 `review deferred` boots in 15 hours). They are STEPS here now. The trust
+    # each a single-use secure-pool runner for a few seconds of shell (measured: 33
+    # `record verdict` + 3 `review deferred` boots in 15 hours on one repo). They are STEPS here now. The trust
     # boundary is unchanged: this job, like both of those, never checks the PR out and never runs PR
     # code, on the same secure pool; `record` held no secret and still needs none (upload-artifact
     # uses the runner's own token, not `permissions:`); `review deferred` held none either. The

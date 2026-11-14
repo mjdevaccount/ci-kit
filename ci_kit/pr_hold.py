@@ -38,9 +38,9 @@ merge GitHub refuses for a reason no check shows): with the hold on, no other PR
 main to shake it loose, so the hold must say so itself.
 
 THE TRAIN OWNS THE LANE (v1.35.0). While a merge train PR is open and LIVE, the single-lane head is
-HELD too: pending, its description naming the train (TRAIN_HELD). trade-data 2026-11-14: all 5
-unlanded trains closed "stale: main moved" because the head held success beside an open train and
-landed (#3096: 3.4 min after the train opened; #3100: a Renovate bump 4 min after) -- the train's
+HELD too: pending, its description naming the train (TRAIN_HELD). Measured: every unlanded train
+in a day closed "stale: main moved" because the head held success beside an open train and
+landed (one 3.4 min after the train opened; a Renovate bump 4 min after another) -- the train's
 whole CI thrown away, and its riders recomposed. The train never waits on the head (its own
 `queue/position` is TRAIN success, and the train reads no `queue/position`), so this cannot
 deadlock. BOUNDED (`live_train`): a train that is red, BEHIND/DIRTY (main moved anyway), or open
