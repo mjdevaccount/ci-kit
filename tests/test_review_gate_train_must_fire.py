@@ -6,6 +6,7 @@ fail open: the train step keys on the `train/` prefix and writes is_train before
 is never continue-on-error; on a train, Decide (and so the model) does not run; the Comment and
 the Gate run and read the TRAIN's result, so a train block or BLIND is a red check; and the job's
 `result` output carries it. Each predicate is shown to fire on the mutation it exists for.
+Since v1.29.0 all of that lives in the `decide` job (named `review`), which never runs the model.
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ NOT_TRAIN = "steps.train.outputs.is_train != 'true'"
 
 
 def _job() -> dict:
-    return yaml.safe_load((ROOT / "review-gate.yml").read_text(encoding="utf-8"))["jobs"]["review"]
+    return yaml.safe_load((ROOT / "review-gate.yml").read_text(encoding="utf-8"))["jobs"]["decide"]
 
 
 def _step(job: dict, *, sid: str = "", name: str = "") -> dict:
@@ -50,8 +51,8 @@ def faults(job: dict) -> list[str]:
         out.append("the Gate does not run on a train")
     if "steps.train.outputs.result" not in str((gate.get("env") or {}).get("RESULT", "")):
         out.append("the Gate does not read the train's result")
-    if IS_TRAIN not in str(_step(job, name="Comment on the PR").get("if", "")):
-        out.append("no comment on a train")
+    if IS_TRAIN not in str(_step(job, name="Hand the verdict on").get("if", "")):
+        out.append("no comment on a train (its verdict is never handed to the commenting job)")
     if "steps.train.outputs.result" not in str((job.get("outputs") or {}).get("result", "")):
         out.append("the job's result output drops the train's")
     return out
@@ -79,7 +80,7 @@ def test_each_fault_fires() -> None:
     assert any("train's result" in f for f in _mutated(
         lambda j: _step(j, name="Gate")["env"].update({"RESULT": "${{ steps.verdict.outputs.result }}"})))
     assert any("comment" in f for f in _mutated(
-        lambda j: _step(j, name="Comment on the PR").update({"if": "steps.decide.outputs.required == 'true'"})))
+        lambda j: _step(j, name="Hand the verdict on").update({"if": "steps.decide.outputs.required == 'true'"})))
     assert any("output" in f for f in _mutated(
         lambda j: j["outputs"].update({"result": "${{ steps.verdict.outputs.result }}"})))
 

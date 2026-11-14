@@ -47,6 +47,11 @@ from dataclasses import dataclass, field
 from ci_kit import redclass
 from ci_kit.merge_train import RIDING, TRAIN_PREFIX
 
+# the PR scheduler's label (ci_kit/pr_sched.PARKED, kept literal: pr_sched imports pr_autoupdate,
+# which imports this): a PARKED PR's red is the scheduler's to re-run, in queue order -- never a
+# machinery rerun here (it would jump the queue) and never a judgment comment (nothing to fix)
+PARKED = "queue:parked"
+
 RERUN = "<!-- smart-merge:rerun head={head} runs={runs} -->"
 EXHAUSTED = "<!-- smart-merge:exhausted head={head} -->"
 JUDGED = "<!-- smart-merge:judgment head={head} kind={kind} -->"
@@ -55,7 +60,6 @@ _EXHAUSTED = re.compile(r"<!-- smart-merge:exhausted head=([0-9a-f]{40}) -->")
 _JUDGED = re.compile(r"<!-- smart-merge:judgment head=([0-9a-f]{40}) kind=([a-z]+) -->")
 _JOB_URL = re.compile(r"/actions/runs/(\d+)/job/(\d+)")
 LIMIT = 2
-_CANCELLED = {"CANCELLED"}
 
 # `read` RAISES CalledProcessError when GitHub will not answer (pr_autoupdate._gh_read: the job's
 # read token first, then the PAT); `write` never raises and is judged by its return code.
@@ -84,30 +88,13 @@ class Verdict:
     def kind(self) -> str:
         if self.unrunnable or any(r.cls == redclass.JUDGMENT for r in self.reds):
             return redclass.JUDGMENT
+        if any(r.cls == redclass.PARKED for r in self.reds):
+            return redclass.PARKED
         return redclass.MACHINERY if self.reds else "none"
 
 
 # ── pure ──────────────────────────────────────────────────────────────────────────────────────
-def red_checks(rollup: list[dict] | None, required: tuple[str, ...] = ()) -> list[str]:
-    """The required checks red at a head: FAILING, or CANCELLED (a cancelled required check blocks
-    a merge forever and no author's push is owed for it). A name reported twice takes its newest
-    answer: GraphQL lists the latest check run per name per suite. Pure."""
-    out: list[str] = []
-    newest: dict[str, dict] = {}
-    for c in rollup or []:  # two runs of one workflow at one head are two suites: keep the later
-        name = c.get("name") or c.get("context") or ""
-        if name not in newest or str(c.get("startedAt") or "") >= str(newest[name].get("startedAt") or ""):
-            newest[name] = c
-    for name, c in newest.items():
-        if required and name not in required:
-            continue
-        if c.get("__typename") == "StatusContext" or ("state" in c and "status" not in c):
-            if (c.get("state") or "").upper() in redclass.FAIL:
-                out.append(name)
-        elif (c.get("status") or "").upper() == "COMPLETED" and \
-                (c.get("conclusion") or "").upper() in redclass.FAIL | _CANCELLED:
-            out.append(name)
-    return sorted(set(out))
+red_checks = redclass.red_checks  # the one definition (the queue hold's head reads it too)
 
 
 def spent(bodies: list[str], head: str, attempts: list[int]) -> int:
@@ -123,10 +110,13 @@ def marked(bodies: list[str], pattern: re.Pattern[str], head: str) -> bool:
 
 def decide(v: Verdict, bodies: list[str], behind: bool, limit: int) -> tuple[str, str]:
     """(action, why) for one assessed PR. Pure: the policy the tests pin.
-    action: none | update (the queue's) | rerun | exhausted | judgment | quiet (already said)."""
+    action: none | update (the queue's) | rerun | exhausted | judgment | quiet (already said) | park."""
     kind = v.kind
     if kind == "none":
         return "none", ""
+    if kind == redclass.PARKED:  # assessed only when its label is gone: give it back, the scheduler re-runs it
+        return ("update", "parked and behind main: the queue's update is its fresh run") if behind else \
+            ("park", f"parked by the PR queue with no `{PARKED}` label: label restored so the scheduler re-runs it")
     if kind == redclass.JUDGMENT:
         if marked(bodies, _JUDGED, v.head):
             return "quiet", "judgment already named at this head"
@@ -268,14 +258,14 @@ def write(*args: str, input_text: str | None = None) -> subprocess.CompletedProc
 
 
 def machinery(heal: Heal) -> frozenset[int]:
-    """The assessed PRs whose red is machinery only: pr_queue counts them eligible when BEHIND."""
-    return frozenset(n for n, (v, _, _) in heal.items() if v.kind == redclass.MACHINERY)
+    """The assessed PRs whose red is machinery (or parked) only: pr_queue counts them eligible when BEHIND."""
+    return frozenset(n for n, (v, _, _) in heal.items() if v.kind in (redclass.MACHINERY, redclass.PARKED))
 
 
 def assess_armed(repo: str, armed: list[dict], required: tuple[str, ...], limit: int, read: Gh,
                  comments: Callable[[str, int], list[str]], summary: list[str]) -> tuple[Heal, int]:
     """A verdict for every armed PR red at its head, and the errors. Skipped: a train or a rider
-    (the train judges those), a DIRTY PR (the conflict path), and a head whose judgment or spent
+    (the train judges those), a PARKED PR (the scheduler re-runs it), a DIRTY PR (the conflict path), and a head whose judgment or spent
     budget is already named on the PR. A PR GitHub would not explain is an ERROR, left as it was --
     never guessed machinery."""
     out: Heal = {}
@@ -285,7 +275,7 @@ def assess_armed(repo: str, armed: list[dict], required: tuple[str, ...], limit:
     for p in armed:
         if (str(p.get("headRefName") or "").startswith(TRAIN_PREFIX)
                 or (p.get("mergeStateStatus") or "").upper() == "DIRTY"
-                or any(lb.get("name") == RIDING for lb in p.get("labels") or [])
+                or any(lb.get("name") in (RIDING, PARKED) for lb in p.get("labels") or [])
                 or not red_checks(p.get("statusCheckRollup"), required)):
             continue
         n, head = int(p["number"]), str(p.get("headRefOid") or "")
@@ -338,6 +328,11 @@ def act(repo: str, heal: Heal, updated: set[int], limit: int, write: Gh, summary
             print(f"::error::#{n}: still red on machinery after {limit} rerun(s) at {v.head[:12]}")
             if not say(n, exhausted_comment(v, limit)):
                 line += "; its comment FAILED"
+        elif action == "park":
+            from ci_kit.pr_autoupdate import add_label  # lazy: pr_autoupdate imports this module
+            if not add_label(repo, n, PARKED)[0]:
+                errors += 1
+                line += f"; `{PARKED}` could NOT be added"
         elif action == "judgment" and not say(n, judgment_comment(v)):
             errors += 1
             line += "; its comment FAILED"

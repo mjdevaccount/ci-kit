@@ -31,24 +31,30 @@ def unsafe_steps(job: dict) -> list[str]:
     return out
 
 
-def _review_job() -> dict:
-    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["review"]
+def _review_job(name: str = "review") -> dict:
+    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"][name]
+
+
+# both jobs that check the PR out and run ci_kit (v1.29.0: `decide` runs the tier, carry and admission)
+JOBS = ("decide", "review")
 
 
 def test_every_ci_kit_step_is_safepath() -> None:
-    job = _review_job()
-    assert sum("ci_kit" in s.get("run", "") for s in job["steps"]) >= 5, "the steps this guards are gone"
-    assert unsafe_steps(job) == []
+    for name in JOBS:
+        job = _review_job(name)
+        assert sum("-m ci_kit" in s.get("run", "") for s in job["steps"]) >= 2, f"{name}: the steps this guards are gone"
+        assert unsafe_steps(job) == [], name
 
 
 def test_the_predicate_fires_when_the_job_loses_it() -> None:
-    job = _review_job()
-    del job["env"]["PYTHONSAFEPATH"]
-    assert len(unsafe_steps(job)) >= 5
+    for name in JOBS:
+        job = _review_job(name)
+        del job["env"]["PYTHONSAFEPATH"]
+        assert len(unsafe_steps(job)) >= 2, name
 
 
 def test_the_predicate_fires_when_a_step_clears_it() -> None:
-    job = _review_job()
+    job = _review_job("decide")
     victim = next(s for s in job["steps"] if "-m ci_kit.review.tier" in s.get("run", ""))
     victim["env"]["PYTHONSAFEPATH"] = ""
     assert unsafe_steps(job) == [victim["name"]]
