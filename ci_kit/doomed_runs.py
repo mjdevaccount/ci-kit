@@ -174,7 +174,7 @@ class Canceller:
                 self._error(f"{self.repo}#{n}: cancel of run {run['id']} ({wf}) REFUSED ({err})")
                 continue
             done = " (had already finished)" if c.returncode else ""
-            hit = True
+            hit = hit or not c.returncode  # a 409 (finished meanwhile) wakes the next pass itself
             self.done.add(run.get("id"))
             self.summary.append(f"doomed runs: {self.repo}#{n}: cancelled run {run['id']} ({wf}) at {sha[:12]}"
                                 f"{done} -- {why}")
