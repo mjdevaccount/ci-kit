@@ -551,8 +551,8 @@
     // current with main while #3073, the queue's one in-flight PR, was mid-review; #3072 landed
     // at 03:53:47Z and #3073/#3075/#3076 all went BEHIND. So in these repos a Renovate branch is
     // rebased only on a CONFLICT, merged by nothing of its own, and becomes current with main
-    // only when the queue picks it (mcp pr_reconcile arms it and dispatches the updater, and
-    // never lands a CLEAN one while another is in flight). A repo that adds pr-autoupdate.yml with
+    // only when the queue picks it (ci-kit pr-autoupdate ARMS it on its next pass,
+    // ci_kit/pr_renovate.py since v1.31.0 -- no hand step; mcp pr_reconcile is the outside witness). A repo that adds pr-autoupdate.yml with
     // max-in-flight joins this list (tests/test_renovate_merge_queue.py pins it).
     // trade-data runs ci-kit's merge train + serial pr-autoupdate, which land armed PRs lowest
     // number first, one heavy CI run at a time. Renovate's own merge sees none of it:
@@ -563,9 +563,9 @@
     // whose branch is green still calls platform.mergePr itself, and reattemptPlatformAutomerge
     // re-arms a PR a human disarmed. So here Renovate's merge step is `pr-comment`: when green it
     // only posts the comment below. `automerge` stays true, so the PR body still reads
-    // "**Automerge**: Enabled" -- the verdict mcp scripts/pr_reconcile.py reads to ARM it (squash,
-    // --auto); the queue then lands it like any armed PR, and `--disable-auto` / `autoland-off`
-    // hold it. The every-check gate the header describes becomes the REQUIRED checks here, the
+    // "**Automerge**: Enabled" -- the verdict ci_kit/pr_renovate.py reads to ARM it (squash, the
+    // GraphQL arm); the queue then lands it like any armed PR, and `--disable-auto` / `autoland-off`
+    // hold it. `automerge: false` (database images, majors, `fails-green`) reads Disabled: never armed. The every-check gate the header describes becomes the REQUIRED checks here, the
     // standard every other PR in the repo already merges under.
     {
       description: "serial-queue repos: Renovate never merges or rebases on behind; the estate arms, the queue lands",
@@ -577,7 +577,7 @@
       ],
       rebaseWhen: "conflicted",
       automergeType: "pr-comment",
-      automergeComment: "Renovate does not merge PRs in this repository (ci-kit renovate/default.json5, merge-queue repos): mcp pr_reconcile arms this PR and the merge train / pr-autoupdate queue lands it in PR-number order. `autoland-off` holds it.",
+      automergeComment: "Renovate does not merge PRs in this repository (ci-kit renovate/default.json5, merge-queue repos): ci-kit pr-autoupdate arms this PR and the merge train / pr-autoupdate queue lands it in PR-number order. `autoland-off` holds it.",
     },
   ],
 }

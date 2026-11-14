@@ -35,6 +35,13 @@
 # re-run in full and every required check still passes at the merging head. Pair it with the
 # review gate's `queue-priority: true`. The `token` then needs Actions: Read and write.
 #
+# RENOVATE JOINS THE QUEUE (v1.31.0, ci_kit/pr_renovate.py). With `max-in-flight` set, each pass
+# first ARMS (squash, the GraphQL mutation, pinned to the head it read) every Renovate PR whose body
+# says `**Automerge**: Enabled.` -- in a queue repo Renovate itself never arms or merges. Held, never
+# armed: Automerge Disabled (the database group, majors, `fails-green`), `autoland-off`, a hand
+# `--disable-auto`, a conflict. A refused arm is a red run. Needs nothing new: the `token` already
+# holds Pull requests RW.
+#
 # UNCONFIGURED IS RED: with no `token` the job fails naming it. GITHUB_TOKEN is NOT a fallback --
 # a push made with it fires no workflow, so every updated PR would wait on checks that never
 # start, which looks exactly like "CI pending".

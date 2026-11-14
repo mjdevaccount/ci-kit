@@ -33,7 +33,7 @@ def test_renovate_never_merges_in_a_merge_queue_repo_must_fire() -> None:
     at, rule = queue[0]
     assert set(rule["matchRepositories"]) == QUEUE_REPOS
     # the merge step only comments; automerge itself is NOT turned off, so the PR body still says
-    # "**Automerge**: Enabled", which is what mcp pr_reconcile reads before it arms the PR
+    # "**Automerge**: Enabled", which is what ci_kit/pr_renovate.py reads before it arms the PR
     assert rule["automergeType"] == "pr-comment" and rule["automergeComment"].strip()
     assert "automerge" not in rule
     # Renovate is not a second updater: a branch made current with main by Renovate's own rebase

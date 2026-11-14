@@ -24,8 +24,10 @@ OPTIONS. `--review-workflow` (skip a PR whose review gate is running; empty = th
 lockfile-only conflicts, so the page says so), `--label` (the conflict label; `conflict`), and
 `--max-in-flight N` + `--required-checks a,b` (a serial queue: at most N armed PRs tested against
 current main at once, lowest PR number first; 0 = every armed PR. The policy and the measurement
-behind it: ci_kit/pr_queue.py). A PR the queue picked but skipped for a running review hands its
-slot to the next eligible PR (`Plan.spare`), so one long review does not idle the queue.
+behind it: ci_kit/pr_queue.py). With a queue, every pass first ARMS each Renovate PR whose preset
+verdict is automerge (ci_kit/pr_renovate.py, v1.31.0): Renovate never arms or merges in a queue
+repo. A PR the queue picked but skipped for a running review hands its slot to the next eligible PR
+(`Plan.spare`), so one long review does not idle the queue.
 
 CONFLICT = TRANSITION-ONLY PAGE. The conflict label is the dedup state: a PR that conflicts and
 is not labelled gets the label AND one ntfy push (env `NTFY_URL`; unset = no push) naming the PR
@@ -52,7 +54,7 @@ import sys
 import urllib.parse
 from dataclasses import dataclass
 
-from ci_kit import pr_heal, pr_hold, pr_list, pr_queue, pr_sched
+from ci_kit import pr_heal, pr_hold, pr_list, pr_queue, pr_renovate, pr_sched
 from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
 from ci_kit.ntfy import page  # noqa: F401 -- re-exported: _update_one pages through this name
 
@@ -249,6 +251,9 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
 
 def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout))
+    # Renovate's automerge PRs JOIN the serial queue (ci_kit/pr_renovate.py): armed here, so no
+    # session arms them by hand. Only with a queue: without one Renovate merges itself, on EVERY check
+    joined = pr_renovate.join(repo, prs, _gh_read, pr_heal.write, summary) if opts.max_in_flight > 0 else 0
     armed = [p for p in prs if p.get("autoMergeRequest") and not p.get("isCrossRepository")]
     summary.append(f"{len(armed)} armed PR(s) of {len(prs)} open")
     # a PARKED PR (the scheduler cancelled or deferred its run) is eligible like a machinery red:
@@ -264,6 +269,7 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
                          pr_queue.blocked(prs, opts.required, parked, base), base=base,
                          stale_s=opts.head_stall_min * 120, required=opts.required)
         raise
+    errors += joined
     machinery = pr_heal.machinery(heal)
     # ONE head for the hold, the updater and the scheduler: the lowest armed PR that can land
     skip = pr_queue.blocked(prs, opts.required, machinery | parked, base)
