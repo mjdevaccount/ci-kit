@@ -131,8 +131,8 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = (),
 # the exact head that merges -- a parked job is re-run, never skipped, and a parked check is red.
 #
 #   HEAD       the lowest-numbered same-repo, non-draft queue member: auto-merge ARMED (`member`). A
-#              train is never one. Renovate merges itself (platformAutomerge off), so it is no
-#              member; its landing past an in-flight head is paged instead (pr_sched.out_of_queue).
+#              train is never one. A Renovate PR is one once armed: ci_kit/pr_renovate.py arms its
+#              automerge PRs (v1.32.0), and in a queue repo Renovate never merges itself.
 #   DEMAND     the head has a job QUEUED on a scarce pool (`capacity`, from the caller's config).
 #   WORK-CONSERVING: a non-head job is parked only while the head has demand on ITS pool; with none
 #              it runs, so an idle pool never waits for the head.
@@ -149,15 +149,13 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = (),
 def member(p: dict) -> bool:
     """A PR the queue orders: same-repo, not a draft, not a train, and ARMED. Pure.
 
-    Renovate's PRs are members only when armed. ci-kit's preset sets `platformAutomerge: false`:
-    Renovate merges ITSELF once every check passes, so its PRs are never armed -- and the list
-    gives no way to tell a self-merging one from a major bump left for a human. Counted by author
-    or branch, that bump left open a week would be the head all week, and the PR the operator is
-    waiting on would never get the head's priority. So Renovate's merges are watched, not ordered:
-    one landing past an in-flight head is paged (pr_sched.out_of_queue). Arm them (pr_reconcile
-    does, hourly; or Renovate `platformAutomerge: true`) and they join the queue in number order,
-    like any PR. With the queue hold on (ci_kit/pr_hold.py) an UNARMED one reads `queue/position`
-    pending, so Renovate's own merge waits for that arming (td#3079, 06:49Z 11-14)."""
+    Renovate's PRs are members only when armed. Counted by author or branch, a major bump left
+    open a week for a human would be the head all week, and the PR the operator is waiting on would
+    never get the head's priority. In a queue repo Renovate never arms or merges (the preset's
+    `pr-comment` merge step), so pr-autoupdate ARMS each one whose own verdict is automerge
+    (ci_kit/pr_renovate.py, v1.32.0) and it joins the queue in number order, like any PR; a held
+    one (Automerge Disabled, `autoland-off`, disarmed by hand) stays out. With the queue hold on
+    (ci_kit/pr_hold.py) an UNARMED one reads `queue/position` pending (td#3079, 06:49Z 11-14)."""
     branch = str(p.get("headRefName") or "")
     return (not p.get("isCrossRepository") and not p.get("isDraft") and not branch.startswith("train/")
             and bool(p.get("autoMergeRequest")))

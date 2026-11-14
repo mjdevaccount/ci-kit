@@ -9,17 +9,15 @@ pr_autoupdate and the merge train (ci_kit/merge_train) read them unchanged.
 """
 from __future__ import annotations
 
-RENOVATE_AUTOMERGE = "**Automerge**: Enabled"
-
 QUERY = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     pullRequests(states: OPEN, first: 100, orderBy: {field: CREATED_AT, direction: ASC}) {
       nodes {
-        number title url isCrossRepository headRefOid headRefName mergeStateStatus
+        id number title url isCrossRepository headRefOid headRefName mergeStateStatus
         isDraft mergeable baseRefName createdAt
+        author { __typename login }
         autoMergeRequest { enabledAt }
-        author { login }
         body
         labels(first: 30) { nodes { name } }
         commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
@@ -41,6 +39,7 @@ def gh_args(repo: str) -> list[str]:
 
 def rows(answer: dict) -> list[dict]:
     """GraphQL answer -> `gh pr list --json`-shaped rows. Pure: the shape the tests pin."""
+    from ci_kit.pr_renovate import automerge_enabled  # here: an import cycle at load
     if answer.get("errors"):
         raise ValueError(f"GraphQL errors: {answer['errors']}")
     out = []
@@ -48,14 +47,15 @@ def rows(answer: dict) -> list[dict]:
         commits = (n.get("commits") or {}).get("nodes") or []
         rollup = (commits[0]["commit"].get("statusCheckRollup") or {}) if commits else {}
         out.append({
-            **{k: n.get(k) for k in ("number", "title", "url", "isCrossRepository", "headRefOid",
+            **{k: n.get(k) for k in ("id", "number", "title", "url", "isCrossRepository", "headRefOid",
                                      "headRefName", "mergeStateStatus", "autoMergeRequest",
-                                     "isDraft", "mergeable", "baseRefName", "createdAt")},
+                                     "isDraft", "mergeable", "baseRefName", "createdAt", "author")},
             "labels": (n.get("labels") or {}).get("nodes") or [],
             "author": n.get("author") or {},
-            # Renovate merges its own PRs (platformAutomerge off), so they are never ARMED; its body
-            # says whether it will. Only the flag travels: bodies stay out of the rows.
-            "renovateAutomerge": RENOVATE_AUTOMERGE in (n.get("body") or ""),
+            # Renovate merges its own PRs (platformAutomerge off), so in a repo with no queue they are
+            # never ARMED; its config block says whether it will (pr_renovate's reader, never a first
+            # match: changelogs come first). Only the flag travels: bodies stay out of the rows.
+            "renovateAutomerge": automerge_enabled(n.get("body") or ""),
             "statusCheckRollup": ((rollup.get("contexts") or {}).get("nodes")) or [],
         })
     return out

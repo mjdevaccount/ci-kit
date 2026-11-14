@@ -26,6 +26,14 @@ on:
   workflow_run:
     workflows: [ci]
     types: [completed]
+  # ARMING STARTS THE QUEUE (v1.32.0). Arming auto-merge changes the queue (a new member) but is
+  # neither a push to main nor a CI run, so an armed PR waited for the next one -- or a hand
+  # dispatch (Scraper#161, home-host#245, trade-infra#888, 2026-11-14). pull_request_target runs
+  # the BASE branch's copy of this file with the base's secrets and checks out NO PR code (the job
+  # below runs ci-kit@v1 against the API only), so a PR cannot change what runs. Only someone with
+  # write access can arm auto-merge; the job guard also refuses a fork's PR.
+  pull_request_target:
+    types: [auto_merge_enabled]
   workflow_dispatch:
 
 # pull-requests/checks/statuses read: ci-kit reads the open-PR list (with check results)
@@ -44,11 +52,15 @@ concurrency:
 jobs:
   update:
     # A skipped job takes no runner: main's own CI finishing (the push trigger already ran for that
-    # sha) and a cancelled (superseded) PR run can change nothing in the queue.
+    # sha) and a cancelled (superseded) PR run can change nothing in the queue. A fork's PR never
+    # gets the token job (pull_request_target hands it the base's secrets).
     if: >-
-      github.event_name != 'workflow_run'
-      || (github.event.workflow_run.event == 'pull_request'
+      (github.event_name != 'workflow_run' && github.event_name != 'pull_request_target')
+      || (github.event_name == 'workflow_run'
+          && github.event.workflow_run.event == 'pull_request'
           && github.event.workflow_run.conclusion != 'cancelled')
+      || (github.event_name == 'pull_request_target'
+          && github.event.pull_request.head.repo.full_name == github.repository)
     uses: ./.github/workflows/pr-autoupdate.yml
     with:
       # SERIAL QUEUE (operator, 2026-11-14: one PR at a time per repo; trade-data's shape since

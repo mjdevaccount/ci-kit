@@ -58,7 +58,6 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ci_kit import pr_list
 from ci_kit.merge_train import OPT_OUT
 
 HEAL = "<!-- smart-merge:heal head={head} mode={mode} claude={claude} at={at} -->"
@@ -72,7 +71,6 @@ _PAGED = re.compile(r"<!-- smart-merge:paged head=([0-9a-f]{40}) why=([a-z-]+) -
 RENOVATE = ("renovate", "renovate[bot]", "app/renovate")
 MAJOR_TITLE = re.compile(r"\bto v?\d+(\.x)?\s*(\(|$)", re.I)
 DB_LABEL = "dba"
-REBASE_BOX = re.compile(r"^(\s*-\s*)\[ \](\s*<!-- rebase-check -->)", re.M)
 
 Comments = Callable[[str, int], list[str]]
 Write = Callable[..., subprocess.CompletedProcess]
@@ -117,12 +115,6 @@ def armed(pr: dict) -> bool:
     """Armed for auto-merge, or a Renovate PR Renovate will merge itself (pr_list's flag). Pure."""
     return bool(pr.get("autoMergeRequest") or pr.get("auto_merge")
                 or (is_renovate(pr) and pr.get("renovateAutomerge")))
-
-
-def tick_rebase(body: str) -> str | None:
-    """Renovate's PR body with its rebase/retry checkbox ticked; None = no unticked box. Pure."""
-    new, n = REBASE_BOX.subn(r"\1[x]\2", body or "", count=1)
-    return new if n else None
 
 
 def blocked(pr: dict) -> str:
@@ -277,7 +269,8 @@ def _rebase(repo: str, pr: dict, write: Write, now: dt.datetime) -> str:
     r = write("pr", "view", str(n), "-R", repo, "--json", "body", "-q", ".body")
     if r.returncode:
         return f"; NOT asked, its body could not be read: {(r.stderr or '').strip()[:200]}"
-    body = tick_rebase(r.stdout or "")
+    from ci_kit.pr_renovate import ticked  # here: pr_renovate -> pr_sched -> pr_heal -> this module
+    body = ticked(r.stdout or "")
     # ticked already (a person, or a pass whose PATCH failed) or no box: nothing to ask, but the head
     # is still recorded, so the stale-minutes page fires if Renovate never moves it (home-host#246)
     did = "ticked Renovate's rebase box" if body is not None else "its rebase box is already ticked or absent"
@@ -302,11 +295,12 @@ def _gh(*args: str) -> str:
 def plan(repo: str, n: int, head: str, claude: bool, runs: list[str], checks: str, ctx_out: str) -> dict[str, str]:
     """Re-check everything at run time (the pass's word is a request, not a licence), fix the base
     sha every later job merges, and gather what tier 3 reads: the failed jobs' log tails."""
+    from ci_kit.pr_renovate import automerge_enabled  # here, like `ticked`
     p = json.loads(_gh("api", f"repos/{repo}/pulls/{n}"))
     pr = {"number": n, "title": p.get("title"), "labels": p.get("labels"), "user": p.get("user"),
           "auto_merge": p.get("auto_merge"), "draft": p.get("draft"), "headRefName": p["head"]["ref"],
           "isCrossRepository": (p["head"].get("repo") or {}).get("full_name") != repo,
-          "renovateAutomerge": pr_list.RENOVATE_AUTOMERGE in (p.get("body") or "")}
+          "renovateAutomerge": automerge_enabled(p.get("body") or "")}
     why = "closed" if p.get("state") != "open" else blocked(pr)
     if not why and p["head"]["sha"] != head:
         why = f"head moved to {p['head']['sha'][:12]} (a new head is a new budget)"

@@ -13,7 +13,7 @@ import datetime as dt
 import json
 
 import ci_kit.pr_autoupdate as upd
-from ci_kit import pr_fix, pr_heal, pr_ladder, pr_list
+from ci_kit import pr_fix, pr_heal, pr_ladder, pr_list, pr_renovate
 from ci_kit.pr_ladder import Candidate, Config
 
 NOW = dt.datetime(2026, 11, 14, 18, 0, tzinfo=dt.UTC)
@@ -121,7 +121,9 @@ def test_a_spent_pr_is_paged_once() -> None:
 
 
 # ── Renovate ──────────────────────────────────────────────────────────────────────────────────
-BODY = "x\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n"
+# Renovate's layout: changelogs, THEN the config block (pr_renovate reads only after the last heading)
+CONFIG = "### Configuration\n\n\U0001f6a6 **Automerge**: Enabled.\n"
+BODY = ("x\n\n" + CONFIG + "\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n")
 
 
 def test_a_conflicted_renovate_pr_gets_its_rebase_box_ticked_once_must_fire() -> None:
@@ -148,14 +150,17 @@ def test_a_conflicted_renovate_pr_gets_its_rebase_box_ticked_once_must_fire() ->
 
 def test_a_red_renovate_pr_takes_the_ladder_like_any_other() -> None:
     assert pr_ladder.decide(renovate(), [], ON, 1, NOW, "red")[:2] == ("dispatch", True)
-    assert pr_ladder.tick_rebase("no box here") is None
-    assert pr_ladder.tick_rebase(BODY.replace("[ ]", "[x]")) is None     # already ticked: nothing to ask
+    assert pr_renovate.ticked("no box here") is None                    # the one ticker: pr_renovate's
+    assert pr_renovate.ticked(BODY.replace("[ ]", "[x]")) is None       # already ticked: nothing to ask
 
 
 def test_pr_list_carries_renovates_automerge_flag_not_its_body() -> None:
-    node = {"number": 1, "body": "🚦 **Automerge**: Enabled.", "labels": {"nodes": []}, "commits": {"nodes": []}}
-    rows = pr_list.rows({"data": {"repository": {"pullRequests": {"nodes": [node, {**node, "body": "Disabled"}]}}}})
-    assert [r["renovateAutomerge"] for r in rows] == [True, False] and "body" not in rows[0]
+    node = {"number": 1, "body": BODY, "labels": {"nodes": []}, "commits": {"nodes": []}}
+    # an upstream changelog that SAYS Enabled, ahead of a config block that says Disabled: never armed
+    spoof = "- \U0001f6a6 **Automerge**: Enabled.\n" + CONFIG.replace("Enabled.", "Disabled by config.")
+    nodes = [node, {**node, "body": "Disabled"}, {**node, "body": spoof}]
+    rows = pr_list.rows({"data": {"repository": {"pullRequests": {"nodes": nodes}}}})
+    assert [r["renovateAutomerge"] for r in rows] == [True, False, False] and "body" not in rows[0]
 
 
 def test_the_updater_offers_renovate_prs_only_with_the_ladder_on() -> None:
@@ -233,7 +238,7 @@ def _plan(monkeypatch, pr_json: dict, bodies: list[str], tmp_path) -> dict:
 
 RENOVATE_REST = {"state": "open", "title": "chore(deps): update dependency kucherenko/jscpd to v5.4.3", "labels": [],
                  "user": {"login": "renovate[bot]"}, "auto_merge": None, "draft": False,
-                 "body": "\U0001f6a6 **Automerge**: Enabled.", "html_url": "u",
+                 "body": BODY, "html_url": "u",
                  "head": {"ref": "renovate/jscpd", "sha": H1, "repo": {"full_name": "o/r"}}, "base": {"ref": "main"}}
 
 

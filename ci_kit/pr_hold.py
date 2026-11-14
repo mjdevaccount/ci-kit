@@ -17,8 +17,8 @@ Per pass of pr-autoupdate (every push to main, every last required check, the ca
     whatever PR held success then goes back to pending;
   * a merge train's PR (`train/...`) -> success: a train IS the queue landing;
   * every other same-repo PR -> pending, saying why (behind the head, skipped, or not in the queue
-    at all: a draft or an unarmed PR -- Renovate's, whose preset never arms them, until
-    pr_reconcile arms it -- joins by arming). A fork gets nothing: it is never a member.
+    at all: a draft or an unarmed PR -- joins by arming; a Renovate automerge PR is armed by the
+    same pass before this runs, ci_kit/pr_renovate.py). A fork gets nothing: it is never a member.
 A status is posted only when its STATE differs from the commit's current one, so a waiting PR is
 not re-posted every pass; every pending goes out BEFORE the success, so a head change never has
 two PRs holding success at once. A new head commit (an update, a push) has no status until the next pass,
