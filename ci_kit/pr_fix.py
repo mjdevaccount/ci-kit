@@ -123,15 +123,7 @@ def judge(stdout: str, stderr: str, code: int | str) -> tuple[str, str, str]:
 
 
 def run_cli(model: str, commands: tuple[str, ...], text: str, root: Path) -> tuple[str, str, str]:
-    try:
-        p = subprocess.run(argv(model, commands), input=text, cwd=root, env=env(dict(os.environ)), capture_output=True,
-                           text=True, encoding="utf-8", errors="replace", timeout=CLI_TIMEOUT)
-        stdout, stderr, code = p.stdout, p.stderr, p.returncode
-    except subprocess.TimeoutExpired as e:
-        stdout = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        stderr, code = f"timed out after {CLI_TIMEOUT}s", "timeout"
-    except OSError as e:
-        stdout, stderr, code = "", f"{type(e).__name__}: {e}", "not-run"
+    stdout, stderr, code = cli.run(argv(model, commands), text, root, env(dict(os.environ)), CLI_TIMEOUT)
     print(cli._usage(stdout).replace("reviewer", "fixer"))
     return judge(stdout, stderr, code)
 

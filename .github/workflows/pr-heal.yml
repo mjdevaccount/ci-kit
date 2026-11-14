@@ -152,13 +152,15 @@ permissions:
   pull-requests: read
   actions: read
 
+# every job runs ci_kit from $RUNNER_TEMP, never a `ci_kit/` the PR adds to the checkout
+env:
+  PYTHONSAFEPATH: "1"
+
 jobs:
   plan:
     name: plan
     runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
-    env:
-      PYTHONSAFEPATH: "1"
     outputs:
       go: ${{ steps.plan.outputs.go }}
       why: ${{ steps.plan.outputs.why }}
@@ -172,16 +174,9 @@ jobs:
     steps:
       - name: Fetch ci-kit at kit-ref
         id: kit
-        env:
-          KIT_REF: ${{ inputs.kit-ref }}
-        run: |
-          set -euo pipefail
-          kit="$RUNNER_TEMP/ci-kit"
-          git init -q "$kit"
-          git -C "$kit" fetch -q --depth 1 https://github.com/mjdevaccount/ci-kit.git "$KIT_REF"
-          git -C "$kit" checkout -q --detach FETCH_HEAD
-          echo "sha=$(git -C "$kit" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "dir=$kit" >> "$GITHUB_OUTPUT"
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        with:
+          ref: ${{ inputs.kit-ref }}
       - name: Plan
         id: plan
         env:
@@ -214,27 +209,11 @@ jobs:
     outputs:
       state: ${{ steps.collect.outputs.state || steps.prepare.outputs.state || 'failed' }}
       why: ${{ steps.run.outputs.failed || steps.prepare.outputs.uncovered }}
-    env:
-      PYTHONSAFEPATH: "1"
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.head }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Fetch ci-kit (the plan's sha) and the base
+      - name: Check out the PR, fetch the base and ci-kit (the plan's sha)
         id: kit
-        env:
-          KIT_SHA: ${{ needs.plan.outputs.kit-sha }}
-          BASE: ${{ needs.plan.outputs.base }}
-        run: |
-          set -euo pipefail
-          kit="$RUNNER_TEMP/ci-kit"
-          git init -q "$kit"
-          git -C "$kit" fetch -q --depth 1 https://github.com/mjdevaccount/ci-kit.git "$KIT_SHA"
-          git -C "$kit" checkout -q --detach FETCH_HEAD
-          echo "dir=$kit" >> "$GITHUB_OUTPUT"
-          git fetch -q --no-tags origin "$BASE"
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        with: {checkout: "${{ inputs.head }}", ref: "${{ needs.plan.outputs.kit-sha }}", base: "${{ needs.plan.outputs.base }}"}
       - name: Prepare (merge the base, resolve what the map covers)
         id: prepare
         env:
@@ -256,38 +235,17 @@ jobs:
         if: steps.prepare.outputs.state == 'regen' && (steps.prepare.outputs.dotnet == 'true' || inputs.dotnet-version != '')
         with:
           dotnet-version: ${{ inputs.dotnet-version || '10.0.x' }}
-      - name: Load the git ssh key (no PR code runs here)
-        id: gitssh
-        if: steps.prepare.outputs.state == 'regen' && inputs.git-ssh-repos != ''
-        env:
-          KIT: ${{ steps.kit.outputs.dir }}
-          CI_KIT_GIT_SSH_REPOS: ${{ inputs.git-ssh-repos }}
-          CI_KIT_GIT_SSH_KEY: ${{ secrets.git-ssh-key }}
-        run: bash "$KIT/ci_kit/git_ssh.sh" load "$GITHUB_OUTPUT"
-      - name: Install + regenerate (PR code)
+      - name: Install + regenerate (PR code; a deploy key only in its own load step)
         id: run
         if: steps.prepare.outputs.state == 'regen'
         continue-on-error: true
-        env:
-          KIT: ${{ steps.kit.outputs.dir }}
-          PYTHONPATH: ${{ steps.kit.outputs.dir }}
-          INSTALL: ${{ inputs.install }}
-          PYTHONSAFEPATH: ""
-          CI_KIT_GIT_SSH_SOCK: ${{ steps.gitssh.outputs.sock }}
-          CI_KIT_GIT_SSH_KNOWN_HOSTS: ${{ steps.gitssh.outputs.known-hosts }}
-          CI_KIT_GIT_SSH_CONFIG: ${{ steps.gitssh.outputs.ssh-config }}
-          CI_KIT_GIT_SSH_REPOS: ${{ inputs.git-ssh-repos }}
-        run: |
-          set -euo pipefail
-          if [ -n "$CI_KIT_GIT_SSH_SOCK" ]; then export SSH_AUTH_SOCK="$CI_KIT_GIT_SSH_SOCK"; . "$KIT/ci_kit/git_ssh.sh" route; fi
-          if [ -n "$INSTALL" ]; then eval "$INSTALL" || { echo "failed=install: $INSTALL" >> "$GITHUB_OUTPUT"; exit 1; }; fi
-          python3 -m ci_kit.pr_regen run --state-file "$RUNNER_TEMP/regen.json"
-      - name: Stop the git ssh agent
-        if: always() && steps.gitssh.outputs.pid != ''
-        env:
-          KIT: ${{ steps.kit.outputs.dir }}
-          AGENT_PID: ${{ steps.gitssh.outputs.pid }}
-        run: bash "$KIT/ci_kit/git_ssh.sh" kill "$AGENT_PID"
+        uses: mjdevaccount/ci-kit/.github/actions/heal-install@v1
+        with:
+          kit: ${{ steps.kit.outputs.dir }}
+          install: ${{ inputs.install }}
+          then: PYTHONSAFEPATH=1 python3 -m ci_kit.pr_regen run --state-file "$RUNNER_TEMP/regen.json"
+          git-ssh-repos: ${{ inputs.git-ssh-repos }}
+          git-ssh-key: ${{ secrets.git-ssh-key }}
       - name: Collect
         id: collect
         if: steps.prepare.outputs.state == 'regen' || steps.prepare.outputs.state == 'merge'
@@ -318,27 +276,11 @@ jobs:
     outputs:
       state: ${{ steps.fix.outputs.state || 'failed' }}
       why: ${{ steps.fix.outputs.why || 'the fix step did not finish' }}
-    env:
-      PYTHONSAFEPATH: "1"
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.head }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Fetch ci-kit (the plan's sha) and the base
+      - name: Check out the PR, fetch the base and ci-kit (the plan's sha)
         id: kit
-        env:
-          KIT_SHA: ${{ needs.plan.outputs.kit-sha }}
-          BASE: ${{ needs.plan.outputs.base }}
-        run: |
-          set -euo pipefail
-          kit="$RUNNER_TEMP/ci-kit"
-          git init -q "$kit"
-          git -C "$kit" fetch -q --depth 1 https://github.com/mjdevaccount/ci-kit.git "$KIT_SHA"
-          git -C "$kit" checkout -q --detach FETCH_HEAD
-          echo "dir=$kit" >> "$GITHUB_OUTPUT"
-          git fetch -q --no-tags origin "$BASE"
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        with: {checkout: "${{ inputs.head }}", ref: "${{ needs.plan.outputs.kit-sha }}", base: "${{ needs.plan.outputs.base }}"}
       - uses: actions/download-artifact@v8
         with:
           name: heal-context-${{ inputs.pr }}
@@ -362,34 +304,14 @@ jobs:
         if: inputs.dotnet-version != ''
         with:
           dotnet-version: ${{ inputs.dotnet-version }}
-      - name: Load the git ssh key (no PR code runs here)
-        id: gitssh
-        if: inputs.git-ssh-repos != ''
-        env:
-          KIT: ${{ steps.kit.outputs.dir }}
-          CI_KIT_GIT_SSH_REPOS: ${{ inputs.git-ssh-repos }}
-          CI_KIT_GIT_SSH_KEY: ${{ secrets.git-ssh-key }}
-        run: bash "$KIT/ci_kit/git_ssh.sh" load "$GITHUB_OUTPUT"
-      - name: Install
+      - name: Install the project (a deploy key only in its own load step)
         continue-on-error: true
-        env:
-          KIT: ${{ steps.kit.outputs.dir }}
-          INSTALL: ${{ inputs.install }}
-          PYTHONSAFEPATH: ""
-          CI_KIT_GIT_SSH_SOCK: ${{ steps.gitssh.outputs.sock }}
-          CI_KIT_GIT_SSH_KNOWN_HOSTS: ${{ steps.gitssh.outputs.known-hosts }}
-          CI_KIT_GIT_SSH_CONFIG: ${{ steps.gitssh.outputs.ssh-config }}
-          CI_KIT_GIT_SSH_REPOS: ${{ inputs.git-ssh-repos }}
-        run: |
-          set -euo pipefail
-          if [ -n "$CI_KIT_GIT_SSH_SOCK" ]; then export SSH_AUTH_SOCK="$CI_KIT_GIT_SSH_SOCK"; . "$KIT/ci_kit/git_ssh.sh" route; fi
-          if [ -n "$INSTALL" ]; then eval "$INSTALL"; fi
-      - name: Stop the git ssh agent
-        if: always() && steps.gitssh.outputs.pid != ''
-        env:
-          KIT: ${{ steps.kit.outputs.dir }}
-          AGENT_PID: ${{ steps.gitssh.outputs.pid }}
-        run: bash "$KIT/ci_kit/git_ssh.sh" kill "$AGENT_PID"
+        uses: mjdevaccount/ci-kit/.github/actions/heal-install@v1
+        with:
+          kit: ${{ steps.kit.outputs.dir }}
+          install: ${{ inputs.install }}
+          git-ssh-repos: ${{ inputs.git-ssh-repos }}
+          git-ssh-key: ${{ secrets.git-ssh-key }}
       - name: Install Claude Code
         continue-on-error: true
         env:
@@ -451,27 +373,11 @@ jobs:
       result: ${{ steps.apply.outputs.result || 'failed' }}
       why: ${{ steps.apply.outputs.why || 'the push step did not finish' }}
       sha: ${{ steps.apply.outputs.sha }}
-    env:
-      PYTHONSAFEPATH: "1"
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.plan.outputs.ref }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Fetch ci-kit (the plan's sha) and the base
+      - name: Check out the PR, fetch the base and ci-kit (the plan's sha)
         id: kit
-        env:
-          KIT_SHA: ${{ needs.plan.outputs.kit-sha }}
-          BASE: ${{ needs.plan.outputs.base }}
-        run: |
-          set -euo pipefail
-          kit="$RUNNER_TEMP/ci-kit"
-          git init -q "$kit"
-          git -C "$kit" fetch -q --depth 1 https://github.com/mjdevaccount/ci-kit.git "$KIT_SHA"
-          git -C "$kit" checkout -q --detach FETCH_HEAD
-          echo "dir=$kit" >> "$GITHUB_OUTPUT"
-          git fetch -q --no-tags origin "$BASE"
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        with: {checkout: "${{ needs.plan.outputs.ref }}", ref: "${{ needs.plan.outputs.kit-sha }}", base: "${{ needs.plan.outputs.base }}"}
       - uses: actions/download-artifact@v8
         with:
           name: ${{ needs.fix.outputs.state == 'fixed' && format('heal-fix-{0}', inputs.pr) || format('heal-regen-{0}', inputs.pr) }}
@@ -498,20 +404,12 @@ jobs:
     timeout-minutes: 5
     outputs:
       result: ${{ steps.report.outputs.result }}
-    env:
-      PYTHONSAFEPATH: "1"
     steps:
       - name: Fetch ci-kit
         id: kit
-        env:
-          KIT_REF: ${{ needs.plan.outputs.kit-sha || inputs.kit-ref }}
-        run: |
-          set -euo pipefail
-          kit="$RUNNER_TEMP/ci-kit"
-          git init -q "$kit"
-          git -C "$kit" fetch -q --depth 1 https://github.com/mjdevaccount/ci-kit.git "$KIT_REF"
-          git -C "$kit" checkout -q --detach FETCH_HEAD
-          echo "dir=$kit" >> "$GITHUB_OUTPUT"
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        with:
+          ref: ${{ needs.plan.outputs.kit-sha || inputs.kit-ref }}
       - name: Record, and page once per head when nothing was pushed
         id: report
         env:

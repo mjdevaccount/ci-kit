@@ -1,0 +1,47 @@
+# heal-kit -- fetch ci-kit at ONE sha into $RUNNER_TEMP/ci-kit for a pr-heal.yml job (and the base sha
+# into the job's checkout, which it can also make). Every heal job runs the ci_kit.pr_* modules from the sha the plan job
+# fixed, never from the PR (PYTHONSAFEPATH keeps a PR-added `ci_kit/` off the path), so the five jobs
+# cannot disagree about the policy they enforce. One copy of the fetch for all of them.
+name: heal-kit
+description: fetch ci-kit at a ref into $RUNNER_TEMP/ci-kit (and the base into the checkout)
+inputs:
+  ref:
+    description: the ci-kit ref or sha to fetch
+    required: true
+  checkout:
+    description: a ref of the CALLER's repo to check out first (full history, no persisted credentials; '' = none)
+    required: false
+    default: ""
+  base:
+    description: a base sha to fetch into the checkout ('' = none)
+    required: false
+    default: ""
+outputs:
+  dir:
+    description: the kit's directory (PYTHONPATH)
+    value: ${{ steps.kit.outputs.dir }}
+  sha:
+    description: the kit's sha
+    value: ${{ steps.kit.outputs.sha }}
+runs:
+  using: composite
+  steps:
+    - if: inputs.checkout != ''
+      uses: actions/checkout@v7
+      with:
+        ref: ${{ inputs.checkout }}
+        fetch-depth: 0
+        persist-credentials: false
+    - id: kit
+      shell: bash
+      env:
+        KIT_REF: ${{ inputs.ref }}
+        BASE: ${{ inputs.base }}
+      run: |
+        set -euo pipefail
+        kit="$RUNNER_TEMP/ci-kit"
+        rm -rf "$kit" && git init -q "$kit"
+        git -C "$kit" fetch -q --depth 1 https://github.com/mjdevaccount/ci-kit.git "$KIT_REF"
+        git -C "$kit" checkout -q --detach FETCH_HEAD
+        { echo "sha=$(git -C "$kit" rev-parse HEAD)"; echo "dir=$kit"; } >> "$GITHUB_OUTPUT"
+        if [ -n "$BASE" ]; then git fetch -q --no-tags origin "$BASE"; fi
