@@ -5,6 +5,7 @@
 #
 #   on:
 #     push: { branches: [main] }
+#     pull_request_target: { types: [auto_merge_enabled] }   # arming starts a pass (v1.32.0)
 #     workflow_run:                                 # a held PR is reconsidered when its checks finish
 #       workflows: [CI, review-gate]                # only workflows that can finish LAST on a PR head
 #       types: [completed]
@@ -59,6 +60,20 @@
 # `head-stall-minutes` while a non-head job held its pool. ORDER and TIMING only: a parked run is
 # re-run in full and every required check still passes at the merging head. Pair it with the
 # review gate's `queue-priority: true`. The `token` then needs Actions: Read and write.
+#
+# RENOVATE JOINS THE QUEUE (v1.32.0, ci_kit/pr_renovate.py). With `max-in-flight` set, each pass
+# first ARMS (squash, the GraphQL mutation, pinned to the head it read) every Renovate PR whose body
+# says `**Automerge**: Enabled.` -- in a queue repo Renovate itself never arms or merges. Held, never
+# armed: Automerge Disabled (the database group, majors, `fails-green`), `autoland-off`, a hand
+# `--disable-auto`, a conflict (its rebase box is ticked, so Renovate recreates it on current main).
+# A refused arm or tick is a red run. Needs nothing new: the `token` already
+# holds Pull requests RW.
+#
+# ARMING STARTS THE QUEUE (v1.32.0): without `pull_request_target: { types: [auto_merge_enabled] }`
+# in the caller's `on:`, a newly armed PR waits for the next push to main or check-workflow run --
+# arming is neither. pull_request_target runs the BASE copy of the caller with its secrets; this
+# workflow checks out no PR code, so that is safe. Guard the caller's job against a fork's PR:
+#   if: github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository
 #
 # UNCONFIGURED IS RED: with no `token` the job fails naming it. GITHUB_TOKEN is NOT a fallback --
 # a push made with it fires no workflow, so every updated PR would wait on checks that never

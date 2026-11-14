@@ -284,7 +284,15 @@
       schedule: ["at any time"],
       minimumReleaseAge: null,
     },
-    { matchManagers: ["pep621", "pip_requirements", "pip-compile"], matchUpdateTypes: ["minor", "patch"], groupName: "python (non-major)" },
+    // By DATASOURCE, not manager (2026-11-14): which manager parses a pyproject is Renovate's call,
+    // not ours. A plain `[project]` file with no lock is read by `poetry`, not `pep621` (renovate
+    // 44 dry-run on trade-portfolio: "Found poetry package files", one branch per package), so the
+    // manager-named group never formed and trade-portfolio got 12 PRs at once. Every Python
+    // manager (pep621, poetry, pip_requirements, pip-compile, pep723, pipenv) looks up `pypi`.
+    // First-party packages leave it through the LATER rules below; majors were never in it.
+    // groupSlug: the name's slug keeps the parentheses (dry-run branch `renovate/python-(non-major)`),
+    // a branch name an unquoted shell line breaks on.
+    { matchDatasources: ["pypi"], matchUpdateTypes: ["minor", "patch"], groupName: "python (non-major)", groupSlug: "python-non-major" },
     { matchManagers: ["npm"], matchUpdateTypes: ["minor", "patch"], groupName: "npm (non-major)" },
     { matchManagers: ["nuget"], matchUpdateTypes: ["minor", "patch"], groupName: "nuget (non-major)" },
     { matchManagers: ["dockerfile"], groupName: "dockerfile base images" },
@@ -416,6 +424,10 @@
 
     // Langfuse is STATEFUL: it runs Prisma and ClickHouse migrations at startup, so a bump is
     // a one-way schema change. One PR for the four images it moves with, read before merging.
+    // `held-deploy`, NOT `deploys-on-merge` (2026-11-14): edge-host scripts/infra_config.py POLICY
+    // gives langfuse-web/-worker/-redis NO entry (= manual) and langfuse-clickhouse `manual,
+    // recreate_ok=False`, so a merge recreates nothing; the bump needs a deliberate recreate under
+    // `held-deploy.sh --run`. The label must say what the merge DOES, not what a deploy might.
     {
       matchPackageNames: [
         "langfuse/langfuse",
@@ -426,7 +438,7 @@
       matchUpdateTypes: ["minor", "patch", "digest"],
       groupName: "langfuse stack",
       automerge: false,
-      labels: ["deps", "deploys-on-merge", "stateful"],
+      labels: ["deps", "held-deploy", "stateful"],
     },
     // ---- ghcr.io images: no release timestamp, so no END to the age wait (2026-11-11) ---------
     // Renovate reads no release timestamp from ghcr.io, and minimumReleaseAgeBehaviour's default
@@ -451,6 +463,30 @@
       groupName: "windmill",
       automerge: false,
       labels: ["deps", "held-deploy"],
+    },
+    // The rest of trade-infra's compose images that edge-host scripts/infra_config.py does NOT let
+    // a merge recreate (2026-11-14, checked service by service against its POLICY): caddy is
+    // `manual, recreate_ok=False` (the blue/green colour lives in the reload process), crawl4ai
+    // (mid-research calls) and valkey (litellm's cache) are unpolicied = manual. In "compose images"
+    // they were labelled `deploys-on-merge` and merging recreated nothing. Their OWN group, because
+    // Renovate unions every upgrade's labels into its PR (workers/repository/updates/generate.ts),
+    // so inside "compose images" the PR would carry both labels. Merge policy is unchanged (the
+    // compose rules above decide automerge); infra_config's `manual` finding is the sweep WARN that
+    // names the recreate still owed. Majors keep their own PRs (groupName null above), relabelled.
+    // database images (pg-batch, langfuse-pg/-db, pgai), windmill, langfuse and minio have rules.
+    {
+      matchRepositories: ["mjdevaccount/trade-infra"],
+      matchManagers: ["docker-compose"],
+      matchPackageNames: ["caddy", "unclecode/crawl4ai", "valkey/valkey"],
+      labels: ["deps", "held-deploy"],
+    },
+    {
+      matchRepositories: ["mjdevaccount/trade-infra"],
+      matchManagers: ["docker-compose"],
+      matchPackageNames: ["caddy", "unclecode/crawl4ai", "valkey/valkey"],
+      matchUpdateTypes: ["minor", "patch", "digest", "pin", "pinDigest"],
+      groupName: "compose images (held-deploy)",
+      groupSlug: "compose-images-held-deploy",
     },
     // A Python base-image bump changes the interpreter under every image built on it (#608:
     // python:3.14 auto-merged and wedged deploy-reconcile for 13h). Its own PR, read first.
@@ -483,7 +519,9 @@
     // no auto-merge (minio holds langfuse's event store, a data volume; a `latest` move can be a
     // minio release, same reasoning as the litellm floating-tag rule), its own PR (in "compose
     // images" it would stop that whole group auto-merging), opened in the weekend window and NOT
-    // re-pushed between windows, so the reviewed digest is the one that lands. A session merges it.
+    // re-pushed between windows, so the reviewed digest is the one that lands. A session merges it,
+    // then recreates under `held-deploy.sh --run`: infra_config.py POLICY names neither
+    // langfuse-minio nor langfuse-minio-ilm (= manual), so the merge alone recreates nothing.
     {
       matchDatasources: ["docker"],
       matchPackageNames: ["cgr.dev/chainguard/minio"],
@@ -492,7 +530,7 @@
       minimumReleaseAge: null,
       automerge: false,
       updateNotScheduled: false,
-      labels: ["deps", "deploys-on-merge", "floating-tag", "stateful"],
+      labels: ["deps", "held-deploy", "floating-tag", "stateful"],
     },
     // A pgbouncer PATCH lands on green: CI runs scripts/test_pgbouncer_lan.sh against the
     // image, so a broken patch is a red check. After "database images" so it wins for patches.
@@ -551,8 +589,8 @@
     // current with main while #3073, the queue's one in-flight PR, was mid-review; #3072 landed
     // at 03:53:47Z and #3073/#3075/#3076 all went BEHIND. So in these repos a Renovate branch is
     // rebased only on a CONFLICT, merged by nothing of its own, and becomes current with main
-    // only when the queue picks it (mcp pr_reconcile arms it and dispatches the updater, and
-    // never lands a CLEAN one while another is in flight). A repo that adds pr-autoupdate.yml with
+    // only when the queue picks it (ci-kit pr-autoupdate ARMS it on its next pass,
+    // ci_kit/pr_renovate.py since v1.32.0 -- no hand step; mcp pr_reconcile is the outside witness). A repo that adds pr-autoupdate.yml with
     // max-in-flight joins this list (tests/test_renovate_merge_queue.py pins it).
     // trade-data runs ci-kit's merge train + serial pr-autoupdate, which land armed PRs lowest
     // number first, one heavy CI run at a time. Renovate's own merge sees none of it:
@@ -563,9 +601,9 @@
     // whose branch is green still calls platform.mergePr itself, and reattemptPlatformAutomerge
     // re-arms a PR a human disarmed. So here Renovate's merge step is `pr-comment`: when green it
     // only posts the comment below. `automerge` stays true, so the PR body still reads
-    // "**Automerge**: Enabled" -- the verdict mcp scripts/pr_reconcile.py reads to ARM it (squash,
-    // --auto); the queue then lands it like any armed PR, and `--disable-auto` / `autoland-off`
-    // hold it. The every-check gate the header describes becomes the REQUIRED checks here, the
+    // "**Automerge**: Enabled" -- the verdict ci_kit/pr_renovate.py reads to ARM it (squash, the
+    // GraphQL arm); the queue then lands it like any armed PR, and `--disable-auto` / `autoland-off`
+    // hold it. `automerge: false` (database images, majors, `fails-green`) reads Disabled: never armed. The every-check gate the header describes becomes the REQUIRED checks here, the
     // standard every other PR in the repo already merges under.
     {
       description: "serial-queue repos: Renovate never merges or rebases on behind; the estate arms, the queue lands",
@@ -577,7 +615,34 @@
       ],
       rebaseWhen: "conflicted",
       automergeType: "pr-comment",
-      automergeComment: "Renovate does not merge PRs in this repository (ci-kit renovate/default.json5, merge-queue repos): mcp pr_reconcile arms this PR and the merge train / pr-autoupdate queue lands it in PR-number order. `autoland-off` holds it.",
+      automergeComment: "Renovate does not merge PRs in this repository (ci-kit renovate/default.json5, merge-queue repos): ci-kit pr-autoupdate arms this PR and the merge train / pr-autoupdate queue lands it in PR-number order. `autoland-off` holds it.",
+    },
+    // ---- a first-party kit branch in a queue repo is pushed ONCE (2026-11-14) -----------------
+    // `conflicted` above did not stop the #1 runner waste: trade-data's renovate/ci-kit ran 194 CI
+    // runs / 469 job-min on 11-13 and 96 / 223 on 11-14, and only ~1/6 of it was a release's first
+    // push. The rest was a PING-PONG: Renovate's commit carries pyproject + workflows but no
+    // uv.lock, a relock workflow adds the lock as github-actions[bot] (in gitIgnoredAuthors, so the
+    // branch still reads as Renovate's own), and on its next run Renovate finds the branch differs
+    // from what it would write and recreates it on current main -- `conflicted` does not cover that
+    // path (lib/workers/repository/update/branch/reuse.ts: only `never` returns `skip-update`
+    // before the fingerprint/content check). Each recreate re-ran CI, then the relock re-ran it.
+    // 11-14: re-pushes of an already-pushed version 33 runs / 77 min, relocks 35 / 96; 11-13: 77 /
+    // 149 and 84 / 262. `never` = one push + one relock per PR; the queue (pr-autoupdate) is what
+    // makes it current with main, as for every PR here. A newer release while the PR is open waits
+    // for it to land (the next run opens the next PR; pin-drift's 24h grace covers the gap). A
+    // CONFLICT is not stranded: Renovate never moves this branch by itself, so ci-kit pr-autoupdate
+    // ticks the PR's rebase box (ci_kit/pr_renovate.py) and Renovate recreates it once. Scoped to
+    // the queue repos: elsewhere nothing else updates a branch, and Renovate's own rebase is the updater.
+    {
+      description: "serial-queue repos: a first-party kit branch is never re-pushed by Renovate (no relock ping-pong)",
+      matchRepositories: [
+        "mjdevaccount/trade-data", "mjdevaccount/trade-infra", "mjdevaccount/trade-ui",
+        "mjdevaccount/edge-host", "mjdevaccount/home-host", "mjdevaccount/TradingEdge.Scraper",
+        "mjdevaccount/claude-plugins", "mjdevaccount/local-mcp", "mjdevaccount/mattpc-llm-stack",
+        "mjdevaccount/cred-broker", "mjdevaccount/edge-ci", "mjdevaccount/ci-kit",
+      ],
+      matchSourceUrls: ["https://github.com/mjdevaccount/**"],
+      rebaseWhen: "never",
     },
   ],
 }
