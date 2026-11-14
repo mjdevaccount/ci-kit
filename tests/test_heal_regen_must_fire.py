@@ -11,6 +11,7 @@ is never pushed over; a lockfile whose manifest also conflicts is not "lockfile-
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -82,11 +83,15 @@ def push_clone(bare: Path, tmp: Path, head: str, art: Path, regen_map: str = MAP
     d = heal_clone(bare, tmp, "push", head)
     g(d, "checkout", "-qB", "pr", head)
     globs = [x for e in pr_regen.parse_map(regen_map) for x in (*e.paths, *e.touches)]
-    result, why = pr_apply.apply(d, art, head=head, ref="pr", regen_globs=globs, max_lines=kw.get("max_lines", 300))
+    result, why = pr_apply.apply(d, art, head=head, base=_base(art), ref="pr", regen_globs=globs, max_lines=kw.get("max_lines", 300))
     if result == "ready":
         ok, said = _push_local(d, bare)
         result, why = ("pushed", why) if ok else ("moved", said)
     return result, why, d
+
+
+def _base(art: Path) -> str:
+    return json.loads((art / "manifest.json").read_text())["base"]
 
 
 def _push_local(d: Path, bare: Path) -> tuple[bool, str]:
@@ -179,11 +184,11 @@ def test_a_moved_head_is_never_pushed_over_must_not_fire(origin, tmp_path) -> No
     moved = commit(work, {"src/d.txt": "d"}, "the author pushed")
     g(work, "push", "-q", "origin", "pr")
     d = heal_clone(bare, tmp_path, "push", moved)
-    assert pr_apply.apply(d, art, head=head, ref="pr", regen_globs=["gen.txt"], max_lines=300)[0] == "moved"
+    assert pr_apply.apply(d, art, head=head, base=base, ref="pr", regen_globs=["gen.txt"], max_lines=300)[0] == "moved"
     # and a remote that moved AFTER the check refuses the fast-forward push: nothing is forced
     d2 = heal_clone(bare, tmp_path, "push2", head)
     g(d2, "checkout", "-qB", "pr", head)
-    assert pr_apply.apply(d2, art, head=head, ref="pr", regen_globs=["gen.txt"], max_lines=300)[0] == "ready"
+    assert pr_apply.apply(d2, art, head=head, base=base, ref="pr", regen_globs=["gen.txt"], max_lines=300)[0] == "ready"
     ok, said = _push_local(d2, bare)
     assert not ok and g(bare, "rev-parse", "pr") == moved
 
@@ -283,3 +288,57 @@ def test_globs() -> None:
     m = pr_regen.glob_match
     assert m("docs/**", "docs/a/b.md") and m("**/test_*.py", "test_x.py") and m("**/test_*.py", "a/b/test_x.py")
     assert not m("docs/*.md", "docs/a/b.md") and not m("gen.txt", "sub/gen.txt")
+
+
+# ── review 2026-11-14: the pusher's own inputs, red mode on a covered conflict ──────────────────
+def test_the_pusher_trusts_the_plans_base_never_the_artifacts_must_not_fire(origin, tmp_path) -> None:
+    bare, work = origin
+    base, head = branch_pair(work, {"src/b.txt": "b", "gen.txt": "a\nb\n"}, {"src/c.txt": "c", "gen.txt": "a\nc\n"})
+    art = tmp_path / "art"
+    run_regen(heal_clone(bare, tmp_path, "regen", head), "conflict", base, out=art)
+    d = heal_clone(bare, tmp_path, "push", head)
+    g(d, "checkout", "-qB", "pr", head)
+    other = g(d, "rev-parse", "origin/main~1")
+    assert pr_apply.apply(d, art, head=head, base=other, ref="pr", regen_globs=["gen.txt"], max_lines=300)[0] == "refused"
+    m = json.loads((art / "manifest.json").read_text())
+    m["files"]["gen.txt"] = "w"                                        # an unknown `how` skips the line count
+    (art / "manifest.json").write_text(json.dumps(m))
+    result, why = pr_apply.apply(d, art, head=head, base=base, ref="pr", regen_globs=["gen.txt"], max_lines=300)
+    assert result == "refused" and "neither write nor delete" in why
+
+
+def test_only_a_moved_branch_is_moved_any_other_refusal_pages() -> None:
+    assert pr_apply.pushed_over("! [rejected] HEAD -> pr (non-fast-forward)") == "moved"
+    assert pr_apply.pushed_over("! [rejected] HEAD -> pr (fetch first)") == "moved"
+    assert pr_apply.pushed_over("! [remote rejected] HEAD -> pr (push declined due to repository rule violations)") \
+        == "failed"
+    assert pr_apply.pushed_over("! [remote rejected] HEAD -> pr (protected branch hook declined)") == "failed"
+
+
+def test_red_mode_regenerates_a_covered_conflict_never_keeps_mains_side_alone(origin, tmp_path) -> None:
+    bare, work = origin
+    conflict_only = json.dumps([{"paths": ["gen.txt"], "run": f'"{PY}" gen.py', "on": ["conflict"]}])
+    base, head = branch_pair(work, {"src/b.txt": "b", "gen.txt": "a\nb\n"}, {"src/c.txt": "c", "gen.txt": "a\nc\n"})
+    art = tmp_path / "art"
+    p, state = run_regen(heal_clone(bare, tmp_path, "regen", head), "red", base, conflict_only, out=art)
+    assert p.commands and state == "regen"
+    assert (art / "files" / "gen.txt").read_text() == "a\nb\nc\n"      # both sides, regenerated
+
+
+def test_the_install_is_not_the_generators_change(origin, tmp_path) -> None:
+    bare, work = origin
+    base, head = branch_pair(work, {"src/b.txt": "b", "gen.txt": "a\nb\n"}, {"src/c.txt": "c", "gen.txt": "a\nc\n"})
+    d = heal_clone(bare, tmp_path, "regen", head)
+    state_file = tmp_path / "state.json"
+    old = Path.cwd()
+    os.chdir(d)
+    try:
+        os.environ["CI_KIT_REGEN_MAP"] = MAP
+        assert pr_regen.main(["prepare", "--mode", "conflict", "--base", base, "--state-file", str(state_file)]) == 0
+        (d / "hand.md").write_text("an install rewrote me\n")             # the caller's install, before `run`
+        assert pr_regen.main(["run", "--state-file", str(state_file)]) == 0
+        p = pr_regen.Prepared(**json.loads(state_file.read_text()))
+        assert pr_regen.collect(d, p, tmp_path / "art") == "regen"       # not `strayed`
+    finally:
+        os.chdir(old)
+        os.environ.pop("CI_KIT_REGEN_MAP", None)

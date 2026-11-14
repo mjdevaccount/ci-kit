@@ -389,10 +389,11 @@ jobs:
           CI_KIT_PUSH_TOKEN: ${{ secrets.token }}
           CI_KIT_REGEN_MAP: ${{ inputs.regen }}
           HEAD: ${{ inputs.head }}
+          BASE: ${{ needs.plan.outputs.base }}
           REF: ${{ needs.plan.outputs.ref }}
           MAX_LINES: ${{ inputs.max-fix-lines }}
         run: >-
-          python3 -m ci_kit.pr_apply --artifact "$RUNNER_TEMP/heal" --head "$HEAD" --ref "$REF"
+          python3 -m ci_kit.pr_apply --artifact "$RUNNER_TEMP/heal" --head "$HEAD" --base "$BASE" --ref "$REF"
           --repo "$GITHUB_REPOSITORY" --max-lines "$MAX_LINES"
 
   report:

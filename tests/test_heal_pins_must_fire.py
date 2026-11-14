@@ -122,26 +122,49 @@ def test_the_pusher_takes_a_sha256_only_pin_change_and_nothing_wider(tmp_path) -
         return a
 
     rehashed = bumped.replace(h("x"), h("x2"))
-    assert pr_apply.apply(d, art("ok", {"tool.py": rehashed}), head=head, ref="main", regen_globs=[], max_lines=300)[0] \
-        == "ready"
+    kw = {"head": head, "base": base, "ref": "main", "regen_globs": [], "max_lines": 300}
+    assert pr_apply.apply(d, art("ok", {"tool.py": rehashed}), **kw)[0] == "ready"
     g("reset", "-q", "--hard", head)
     wider = rehashed.replace('env="CI_KIT_TOOL"', 'env="CI_KIT_OTHER"')
-    result, why = pr_apply.apply(d, art("wide", {"tool.py": wider}), head=head, ref="main", regen_globs=[], max_lines=300)
+    result, why = pr_apply.apply(d, art("wide", {"tool.py": wider}), **kw)
     assert result == "refused" and "tool.py" in why
     other = (d / "other.py").read_text(encoding="utf-8").replace(h("x"), h("evil"))
-    result, why = pr_apply.apply(d, art("other", {"other.py": other}), head=head, ref="main", regen_globs=[], max_lines=300)
+    result, why = pr_apply.apply(d, art("other", {"other.py": other}), **kw)
     assert result == "refused" and "other.py" in why                         # not a file the PR changes
 
 
-def test_a_red_pr_touching_a_pin_file_gets_the_builtin_generator(tmp_path) -> None:
+def test_a_red_pr_bumping_a_pin_version_gets_the_builtin_generator_must_fire(tmp_path) -> None:
+    d = tmp_path / "r"
+    (d / "ci_kit").mkdir(parents=True)
+    g = lambda *a: subprocess.run(["git", "-C", str(d), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa: E731
+                                  check=True, capture_output=True, text=True).stdout.strip()
+    g("init", "-q", "-b", "main")
+    src = Path(dup_code.__file__).read_text(encoding="utf-8")
+    (d / "ci_kit" / "dup_code.py").write_text(src, encoding="utf-8")
+    (d / "README.md").write_text("Pin( in prose is not python\n", encoding="utf-8")
+    g("add", "-A")
+    g("commit", "-qm", "init")
+    base = g("rev-parse", "HEAD")
     files = ["ci_kit/dup_code.py", "README.md"]
-    (tmp_path / "ci_kit").mkdir()
-    (tmp_path / "ci_kit" / "dup_code.py").write_text(Path(dup_code.__file__).read_text(encoding="utf-8"), encoding="utf-8")
-    (tmp_path / "README.md").write_text("Pin( in prose is not python\n", encoding="utf-8")
-    assert pr_regen.pinned(tmp_path, files) == ["ci_kit/dup_code.py"]
-    e = pr_regen.pin_entry("ci_kit/dup_code.py")
-    assert e.on == frozenset({pr_regen.RED}) and e.run.startswith("PYTHONSAFEPATH=1 python3 -m ci_kit.pin_rehash ")
+    (d / "ci_kit" / "dup_code.py").write_text(src.replace("MIN_TOKENS, MIN_LINES = 70", "MIN_TOKENS, MIN_LINES = 71"),
+                                              encoding="utf-8")
+    assert pr_regen.pinned(d, files, base) == []        # touched, version unchanged: the hashes stay frozen
+    bumped = src.replace(f'JSCPD_VERSION = "{dup_code.JSCPD_VERSION}"', 'JSCPD_VERSION = "9.9.9"')
+    (d / "ci_kit" / "dup_code.py").write_text(bumped, encoding="utf-8")
+    assert pr_regen.pinned(d, files, base) == ["ci_kit/dup_code.py"]
+    e = pr_regen.pin_entry("ci_kit/dup_code.py", base)
+    assert e.on == frozenset({pr_regen.RED}) and e.run.startswith(f"PYTHONSAFEPATH=1 python3 -m ci_kit.pin_rehash --since {base} ")
     assert pr_regen.CONFLICT not in e.on         # a conflicted pin file is a judgment, not a rehash
+
+
+def test_only_a_bumped_pin_is_rehashed_a_same_version_pin_stays_frozen_must_not_fire(tmp_path) -> None:
+    old = SRC.format(v="1.0.0", a=h("x"), b=h("y"))
+    assert pin_rehash.bumped(old, old) == set() and pin_rehash.bumped(old, None) == {"tool"}
+    assert pin_rehash.bumped(old.replace('"1.0.0"', '"1.1.0"'), old) == {"tool"} and pin_rehash.bumped(old, "") == {"tool"}
+    f = tmp_path / "tool.py"
+    f.write_text(old, encoding="utf-8")
+    calls: list[str] = []
+    assert pin_rehash.rehash(f, fake_fetch(calls), before=old) == [] and calls == []
 
 
 def test_heal_commits_are_the_author_renovate_ignores() -> None:

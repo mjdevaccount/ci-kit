@@ -48,7 +48,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ci_kit.pin_rehash import declares, only_hashes
+from ci_kit.pin_rehash import bumped, declares, only_hashes
 
 CONFLICT, RED = "conflict", "red"
 SNAPSHOT_MSG = "heal: local merge snapshot (never pushed)"
@@ -175,19 +175,30 @@ def red_entries(entries: list[Entry], pr_files: list[str], tracked: list[str]) -
     return out
 
 
-def pin_entry(path: str) -> Entry:
+def pin_entry(path: str, base: str) -> Entry:
     """The built-in red-mode generator for a file declaring a release_bin.Pin (ci_kit/pin_rehash.py).
     PYTHONSAFEPATH: the kit's own module (PYTHONPATH), never one the PR added."""
-    return Entry((path,), f"PYTHONSAFEPATH=1 python3 -m ci_kit.pin_rehash {shlex.quote(path)}", frozenset({RED}))
+    run = f"PYTHONSAFEPATH=1 python3 -m ci_kit.pin_rehash --since {shlex.quote(base)} {shlex.quote(path)}"
+    return Entry((path,), run, frozenset({RED}))
 
 
-def pinned(root: Path, files: list[str]) -> list[str]:
-    """The PR's own Python files that declare a release-binary Pin (a Renovate bump moves its version)."""
+def pinned(root: Path, files: list[str], base: str) -> list[str]:
+    """The PR's own Python files whose release-binary Pin VERSION differs from the base's copy (a
+    Renovate bump). A Pin file the PR touched elsewhere keeps its frozen hashes."""
     out = []
     for f in files:
         fp = root / f
-        if f.endswith(".py") and fp.is_file() and declares(fp.read_text(encoding="utf-8", errors="replace")):
-            out.append(f)
+        if not (f.endswith(".py") and fp.is_file()):
+            continue
+        text = fp.read_text(encoding="utf-8", errors="replace")
+        if not declares(text):
+            continue
+        r = git(root, "show", f"{base}:{f}", check=False)
+        try:
+            if bumped(text, r.stdout if r.returncode == 0 else ""):
+                out.append(f)
+        except (ValueError, SyntaxError):
+            out.append(f)          # unreadable: pin_rehash itself fails loudly, never a quiet skip
     return out
 
 
@@ -325,9 +336,10 @@ def prepare(root: Path, mode: str, base: str, entries: list[Entry]) -> Prepared:
     if mode == RED:
         tracked = lines(git(root, "ls-files").stdout)
         mine = pr_files(root, base, head)
-        used = red_entries(entries, mine, tracked)
-        p.hash_only = pinned(root, mine)
-        used += [pin_entry(f) for f in p.hash_only]
+        # a covered conflict took main's side above: its generator must run in red mode too
+        used = list(dict.fromkeys([*red_entries(entries, mine, tracked), *covered.values()]))
+        p.hash_only = pinned(root, mine, base)
+        used += [pin_entry(f, base) for f in p.hash_only]
     else:
         used = list(dict.fromkeys(covered.values()))
     p.commands = commands(used)
@@ -427,6 +439,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         p = Prepared(**json.loads(Path(args.state_file).read_text(encoding="utf-8")))
         if args.cmd == "run":
+            # the caller's install ran since prepare: whatever IT changed is not the generators'
+            p.snapshot = snapshot(root)
+            Path(args.state_file).write_text(json.dumps(p.__dict__), encoding="utf-8")
             bad = run(root, p.commands)
             output(failed=bad.replace("\n", " ")[:300])
             return 1 if bad else 0

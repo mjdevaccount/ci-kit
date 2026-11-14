@@ -285,7 +285,9 @@ def assess_armed(repo: str, armed: list[dict], required: tuple[str, ...], limit:
             bodies = comments(repo, n)
             behind = (p.get("mergeStateStatus") or "UNKNOWN").upper() in ("BEHIND", "UNKNOWN")
             # an EXHAUSTED head that fell BEHIND is assessed again: its update is free and needs no grant
-            if ladder and marked(bodies, pr_ladder._HEAL, head):
+            # only a RED dispatch: a head the ladder took for a conflict (or a Renovate rebase) that
+            # is red now is classified afresh, so a machinery red there still gets its rerun
+            if ladder and any(h == head and m == "red" for h, m, *_ in pr_ladder.marks(bodies, pr_ladder._HEAL)):
                 out[n] = (Verdict(n, head, laddered=True), bodies, p)
                 continue
             if marked(bodies, _JUDGED, head) or (marked(bodies, _EXHAUSTED, head) and not behind):

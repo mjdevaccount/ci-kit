@@ -89,17 +89,26 @@ def count_lines(old: str, new: str) -> int:
                if d[:1] in "+-" and not d.startswith(("+++", "---")))
 
 
-def apply(root: Path, art: Path, *, head: str, ref: str, regen_globs: list[str], max_lines: int,
+def apply(root: Path, art: Path, *, head: str, base: str, ref: str, regen_globs: list[str], max_lines: int,
           test_globs: tuple[str, ...] = TEST_GLOBS) -> tuple[str, str]:
-    """Redo the merge, check scope, write, commit. (result, why); result 'ready' = committed, push next."""
+    """Redo the merge, check scope, write, commit. (result, why); result 'ready' = committed, push next.
+    `base` is the PLAN's sha (a job without PR code): the artifact's own base and merge flag are only
+    checked against it, never trusted -- a manifest written beside PR code could name any commit."""
     m = json.loads((art / "manifest.json").read_text(encoding="utf-8"))
-    tier, base = str(m.get("tier") or ""), str(m.get("base") or "")
+    tier = str(m.get("tier") or "")
     files: dict[str, str] = {str(k): str(v) for k, v in (m.get("files") or {}).items()}
     now = git(root, "rev-parse", "HEAD").stdout.strip()
     if now != head or m.get("head") != head:
         return "moved", f"the PR head is {now[:12]}, the heal was for {head[:12]} (manifest {str(m.get('head'))[:12]})"
     if tier not in ("regen", "claude"):
         return "refused", f"unknown tier {tier!r} in the manifest"
+    if m.get("base") != base:
+        return "refused", f"the artifact names base {str(m.get('base'))[:12]}, the plan fixed {base[:12]}"
+    odd = sorted(k for k, v in files.items() if v not in ("write", "delete"))
+    if odd:
+        return "refused", f"the artifact marks {odd[:6]} as neither write nor delete"
+    if m.get("merged") and git(root, "merge-base", "--is-ancestor", base, head, check=False).returncode == 0:
+        return "refused", "the artifact claims a merge, but the head already contains the base"
     mine = sorted(lines(git(root, "diff", "--name-only", "--no-renames", git(root, "merge-base", base, head).stdout.strip(),
                             head).stdout))
     merged, conflicted = merge(root, base) if m.get("merged") else (False, [])
@@ -150,10 +159,17 @@ def push(root: Path, ref: str, repo: str) -> tuple[bool, str]:
     return r.returncode == 0, (r.stderr or r.stdout).strip()[-300:]
 
 
+def pushed_over(said: str) -> str:
+    """A refused push -> 'moved' ONLY when the branch moved under it (non-fast-forward / fetch first);
+    any other refusal -- a ruleset, a protected-branch hook, auth -- is 'failed', which pages. Pure."""
+    return "moved" if ("non-fast-forward" in said or "(fetch first)" in said) else "failed"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m ci_kit.pr_apply", description=__doc__.split("\n", 1)[0])
     ap.add_argument("--artifact", required=True)
     ap.add_argument("--head", required=True)
+    ap.add_argument("--base", required=True, help="the plan job's base sha (never the artifact's)")
     ap.add_argument("--ref", required=True)
     ap.add_argument("--repo", required=True)
     ap.add_argument("--max-lines", type=int, default=300)
@@ -162,13 +178,13 @@ def main(argv: list[str] | None = None) -> int:
     root = Path.cwd()
     try:
         regen = [g for e in parse_map(os.environ.get("CI_KIT_REGEN_MAP", "")) for g in (*e.paths, *e.touches)]
-        result, why = apply(root, Path(a.artifact), head=a.head, ref=a.ref, regen_globs=regen, max_lines=a.max_lines)
+        result, why = apply(root, Path(a.artifact), head=a.head, base=a.base, ref=a.ref, regen_globs=regen,
+                            max_lines=a.max_lines)
         sha = ""
         if result == "ready":
             sha = git(root, "rev-parse", "HEAD").stdout.strip()
             ok, said = (True, "dry run") if a.dry_run else push(root, a.ref, a.repo)
-            result, why = ("pushed", why) if ok else ("moved" if "non-fast-forward" in said or "rejected" in said
-                                                      else "failed", f"push refused: {said}")
+            result, why = ("pushed", why) if ok else (pushed_over(said), f"push refused: {said}")
     except (subprocess.CalledProcessError, RuntimeError, ValueError, OSError, KeyError) as e:
         result, why, sha = "failed", f"{e} {(getattr(e, 'stderr', '') or '').strip()[-200:]}", ""
     if result in ("refused", "failed"):

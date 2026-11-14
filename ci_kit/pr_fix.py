@@ -107,6 +107,9 @@ def env(environ: dict[str, str]) -> dict[str, str]:
         e[cli.CRED] = environ[cli.CRED]
     elif environ.get("ANTHROPIC_API_KEY"):
         e["ANTHROPIC_API_KEY"] = environ["ANTHROPIC_API_KEY"]
+    # the CLI holds the credential; its Bash tool runs PR code (`uv run`, `make`), which must not:
+    # the CLI strips Anthropic and cloud credentials from every subprocess it starts
+    e["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"
     return e
 
 
@@ -171,6 +174,7 @@ def main(argv_: list[str] | None = None) -> int:
             output(conflicted=",".join(p.conflicted)[:500])
             return 0
         p = Prepared(**json.loads(Path(args.state_file).read_text(encoding="utf-8")))
+        p.snapshot = snapshot(root)   # the install ran since prepare: what IT changed is not the fix
         regen_text = os.environ.get("CI_KIT_REGEN_MAP", "")
         regen_globs = [g for e in parse_map(regen_text) for g in (*e.paths, *e.touches)]
         commands = tuple(c.strip() for c in os.environ.get("CI_KIT_FIX_COMMANDS", "").splitlines() if c.strip()) \

@@ -58,6 +58,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ci_kit import pr_list
 from ci_kit.merge_train import OPT_OUT
 
 HEAL = "<!-- smart-merge:heal head={head} mode={mode} claude={claude} at={at} -->"
@@ -272,9 +273,11 @@ def _rebase(repo: str, pr: dict, write: Write, now: dt.datetime) -> str:
     """Tick a conflicted Renovate PR's rebase box, recorded first. The summary suffix ('NOT' = an error)."""
     n, head = int(pr["number"]), str(pr.get("headRefOid") or "")
     r = write("pr", "view", str(n), "-R", repo, "--json", "body", "-q", ".body")
-    body = tick_rebase(r.stdout or "") if not r.returncode else None
-    if body is None:
-        return "; NOT asked: " + ("its body could not be read" if r.returncode else "no unticked rebase checkbox in its body")
+    if r.returncode:
+        return f"; NOT asked, its body could not be read: {(r.stderr or '').strip()[:200]}"
+    body = tick_rebase(r.stdout or "")
+    if body is None:  # ticked already (by a person, or a pass whose record failed): Renovate's move
+        return "; its rebase box is already ticked or absent -- waiting on Renovate, nothing asked"
     mark = HEAL.format(head=head, mode="rebase", claude=0, at=now.strftime("%Y-%m-%dT%H:%M:%SZ"))
     r = write("pr", "comment", str(n), "-R", repo, "--body-file", "-",
               input_text=f"{mark}\n**heal ladder**: conflicts with main at `{head[:12]}` -- ticked Renovate's rebase "
@@ -297,10 +300,15 @@ def plan(repo: str, n: int, head: str, claude: bool, runs: list[str], checks: st
     p = json.loads(_gh("api", f"repos/{repo}/pulls/{n}"))
     pr = {"number": n, "title": p.get("title"), "labels": p.get("labels"), "user": p.get("user"),
           "auto_merge": p.get("auto_merge"), "draft": p.get("draft"), "headRefName": p["head"]["ref"],
-          "isCrossRepository": (p["head"].get("repo") or {}).get("full_name") != repo}
+          "isCrossRepository": (p["head"].get("repo") or {}).get("full_name") != repo,
+          "renovateAutomerge": pr_list.RENOVATE_AUTOMERGE in (p.get("body") or "")}
     why = "closed" if p.get("state") != "open" else blocked(pr)
     if not why and p["head"]["sha"] != head:
         why = f"head moved to {p['head']['sha'][:12]} (a new head is a new budget)"
+    if not why:
+        from ci_kit.pr_heal import comments_of  # here: pr_heal imports this module
+        if any(h == head for h, *_ in marks(comments_of(repo, n), _HEALED)):
+            why = "already healed at this head (a re-run of a finished heal is not a new budget)"
     base_ref = p["base"]["ref"]
     base = json.loads(_gh("api", f"repos/{repo}/git/ref/heads/{base_ref}"))["object"]["sha"]
     parts = [f"PR #{n}: {p.get('title')}", f"Red required checks: {checks or '(a conflict with main)'}", ""]

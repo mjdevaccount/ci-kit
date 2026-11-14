@@ -216,3 +216,64 @@ def test_the_outcome_pages_whenever_nothing_was_pushed() -> None:
     assert pr_ladder.outcome(True, "", "regen", "", "", "", "refused", "tests/x.py", True)[3] is True
     assert pr_ladder.outcome(False, "", "", "", "", "", "", "", True)[1] == "failed"      # a plan that never ran
     assert pr_ladder.outcome(False, "head moved", "", "", "", "", "", "", True)[1:2] == ("skipped",)
+
+
+# ── review 2026-11-14: the plan re-reads Renovate's flag; a finished head is not healed twice ────
+def _plan(monkeypatch, pr_json: dict, bodies: list[str], tmp_path) -> dict:
+    def gh(*a: str) -> str:
+        if a[1].endswith("/pulls/9"):
+            return json.dumps(pr_json)
+        if "/git/ref/heads/" in a[1]:
+            return json.dumps({"object": {"sha": "c" * 40}})
+        raise AssertionError(a)
+    monkeypatch.setattr(pr_ladder, "_gh", gh)
+    monkeypatch.setattr(pr_heal, "comments_of", lambda r, n: bodies)
+    return pr_ladder.plan("o/r", 9, H1, True, [], "selftest", str(tmp_path / "ctx.md"))
+
+
+RENOVATE_REST = {"state": "open", "title": "chore(deps): update dependency kucherenko/jscpd to v5.4.3", "labels": [],
+                 "user": {"login": "renovate[bot]"}, "auto_merge": None, "draft": False,
+                 "body": "\U0001f6a6 **Automerge**: Enabled.", "html_url": "u",
+                 "head": {"ref": "renovate/jscpd", "sha": H1, "repo": {"full_name": "o/r"}}, "base": {"ref": "main"}}
+
+
+def test_the_plan_takes_a_renovate_automerge_pr_must_fire(monkeypatch, tmp_path) -> None:
+    out = _plan(monkeypatch, RENOVATE_REST, [], tmp_path)
+    assert out["go"] == "true" and out["claude"] == "true"
+    off = {**RENOVATE_REST, "body": "Automerge: Disabled by config"}
+    assert _plan(monkeypatch, off, [], tmp_path)["why"] == "not armed"
+
+
+def test_the_plan_refuses_a_head_already_healed_must_not_fire(monkeypatch, tmp_path) -> None:
+    done = pr_ladder.HEALED.format(head=H1, tier="regen", result="pushed")
+    out = _plan(monkeypatch, RENOVATE_REST, [done], tmp_path)
+    assert out["go"] == "false" and "already healed" in out["why"]
+    assert pr_ladder.outcome(False, out["why"], "", "", "", "", "", "", True)[3] is False
+
+
+def test_an_already_ticked_rebase_box_is_not_an_error() -> None:
+    ticked = BODY.replace("[ ]", "[x]")
+    _, errs, _ = pr_ladder.dispatch("o/r", [Candidate(renovate(), "conflict")], ON, lambda r, n: [],
+                                    lambda *a, input_text=None: _Done(out=ticked), [], lambda *a: "x", NOW)
+    assert errs == 0
+
+
+def test_a_conflict_dispatch_does_not_swallow_a_later_machinery_red() -> None:
+    bodies = [heal_mark(H1, mode="conflict")]
+    heal, _ = pr_heal.assess_armed("o/r", [pr(statusCheckRollup=[{"name": "ci", "status": "COMPLETED",
+                                                                    "conclusion": "FAILURE"}], mergeStateStatus="BLOCKED")],
+                                   ("ci",), 2, lambda *a: (_ for _ in ()).throw(ValueError("classified")),
+                                   lambda r, n: bodies, [], ladder=True)
+    assert heal == {}                                   # it went to classification (the stub refused), not `laddered`
+    heal, _ = pr_heal.assess_armed("o/r", [pr(statusCheckRollup=[{"name": "ci", "status": "COMPLETED",
+                                                                    "conclusion": "FAILURE"}], mergeStateStatus="BLOCKED")],
+                                   ("ci",), 2, pytest_fail, lambda r, n: [heal_mark(H1)], [], ladder=True)
+    assert heal[7][0].laddered
+
+
+def pytest_fail(*a: str):
+    raise AssertionError("a red-dispatched head must not be classified again")
+
+
+def test_the_fixer_scrubs_its_credential_from_bash_children() -> None:
+    assert pr_fix.env({"CLAUDE_CODE_OAUTH_TOKEN": "o"})["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"

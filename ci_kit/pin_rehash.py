@@ -18,7 +18,8 @@ after merge the hash is frozen again, so a release re-tagged later is still refu
 (pure) is what the heal pusher holds such a file to: same lines, every change a 64-hex token.
 
 THE HEAL WIRING (ci_kit/pr_regen.py). A red PR whose own diff changes a file that declares a Pin
-gets `python3 -m ci_kit.pin_rehash <file>` as a built-in red-mode generator, no caller map needed.
+gets `python3 -m ci_kit.pin_rehash --since <base> <file>` as a built-in red-mode generator, no caller
+map needed; only the pins whose version differs from the base's copy are touched (`bumped`).
 
 EXIT 0 = every pin current (rewritten or already right); 2 = an asset could not be fetched
 (`release_bin.blind`: did not finish looking); 1 = a file names a Pin this cannot read.
@@ -29,6 +30,7 @@ import argparse
 import ast
 import hashlib
 import re
+import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -129,11 +131,21 @@ def digests(pin: Found, fetch: Fetch = release_bin.fetch) -> dict[str, str]:
     return out
 
 
-def rehash(path: Path, fetch: Fetch = release_bin.fetch) -> list[str]:
-    """Rewrite `path`'s pins to their versions' digests. Returns what moved (one line per pin)."""
+def bumped(text: str, before: str | None) -> set[str]:
+    """The pins in `text` whose version differs from `before`'s copy (None = no copy: every pin). Pure.
+    Only those are rehashed: a pin whose version did NOT move keeps its frozen hashes, so a release
+    re-tagged under the same version is still refused by the gate, never "healed" into the pin."""
+    old = {p.name: p.version for p in pins(before)} if before else {}
+    return {p.name for p in pins(text) if before is None or old.get(p.name) != p.version}
+
+
+def rehash(path: Path, fetch: Fetch = release_bin.fetch, before: str | None = None) -> list[str]:
+    """Rewrite the digests of `path`'s pins whose version moved since `before` (None = all of them).
+    Returns what moved (one line per pin)."""
     text = path.read_text(encoding="utf-8")
     moved: list[str] = []
-    for pin in pins(text):
+    todo = bumped(text, before)
+    for pin in [p for p in pins(text) if p.name in todo]:
         new = digests(pin, fetch)
         changed = sorted(p for p, h in new.items() if pin.hashes[p][0] != h)
         if changed:
@@ -147,11 +159,16 @@ def rehash(path: Path, fetch: Fetch = release_bin.fetch) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m ci_kit.pin_rehash", description=__doc__.split("\n", 1)[0])
     ap.add_argument("files", nargs="+")
+    ap.add_argument("--since", default="", help="a git rev: rehash only pins whose version differs from its copy")
     a = ap.parse_args(argv)
     rc = 0
     for f in a.files:
         try:
-            said = rehash(Path(f))
+            before = None
+            if a.since:
+                r = subprocess.run(["git", "show", f"{a.since}:{f}"], capture_output=True, text=True, encoding="utf-8")
+                before = r.stdout if r.returncode == 0 else ""      # a file new since then: every pin moved
+            said = rehash(Path(f), before=before)
         except (ValueError, SyntaxError, OSError) as e:
             print(f"{GATE}: {f}: {e}", file=sys.stderr)
             rc = 1
