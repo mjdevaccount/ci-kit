@@ -544,6 +544,16 @@
     },
 
     // ---- a repo with a MERGE QUEUE: Renovate never merges (2026-11-12) ----------------------
+    // EVERY SERIAL-QUEUE REPO, and Renovate never REBASES on behind either (2026-11-14). The queue
+    // is ci-kit's pr-autoupdate with max-in-flight 1 (+ merge-train in trade-data): one armed PR
+    // made current with main at a time, lowest number first. Renovate was a SECOND updater beside
+    // it: its own rebase (rebaseWhen auto = behind-base-branch under strict) made trade-data#3072
+    // current with main while #3073, the queue's one in-flight PR, was mid-review; #3072 landed
+    // at 03:53:47Z and #3073/#3075/#3076 all went BEHIND. So in these repos a Renovate branch is
+    // rebased only on a CONFLICT, merged by nothing of its own, and becomes current with main
+    // only when the queue picks it (mcp pr_reconcile arms it; it also refuses to land a CLEAN
+    // one while another armed PR is in flight). A repo that adds pr-autoupdate.yml with
+    // max-in-flight joins this list (tests/test_renovate_merge_queue.py pins it).
     // trade-data runs ci-kit's merge train + serial pr-autoupdate, which land armed PRs lowest
     // number first, one heavy CI run at a time. Renovate's own merge sees none of it:
     // trade-data#2995 was merged BY RENOVATE at 03:21:47Z, two minutes after a session ran
@@ -556,11 +566,16 @@
     // "**Automerge**: Enabled" -- the verdict mcp scripts/pr_reconcile.py reads to ARM it (squash,
     // --auto); the queue then lands it like any armed PR, and `--disable-auto` / `autoland-off`
     // hold it. The every-check gate the header describes becomes the REQUIRED checks here, the
-    // standard every other PR in the repo already merges under. Another repo that adopts
-    // merge-train.yml joins this list.
+    // standard every other PR in the repo already merges under.
     {
-      description: "merge-queue repos: Renovate never merges; the estate arms, the queue lands",
-      matchRepositories: ["mjdevaccount/trade-data"],
+      description: "serial-queue repos: Renovate never merges or rebases on behind; the estate arms, the queue lands",
+      matchRepositories: [
+        "mjdevaccount/trade-data", "mjdevaccount/trade-infra", "mjdevaccount/trade-ui",
+        "mjdevaccount/edge-host", "mjdevaccount/home-host", "mjdevaccount/TradingEdge.Scraper",
+        "mjdevaccount/claude-plugins", "mjdevaccount/local-mcp", "mjdevaccount/mattpc-llm-stack",
+        "mjdevaccount/cred-broker", "mjdevaccount/edge-ci", "mjdevaccount/ci-kit",
+      ],
+      rebaseWhen: "conflicted",
       automergeType: "pr-comment",
       automergeComment: "Renovate does not merge PRs in this repository (ci-kit renovate/default.json5, merge-queue repos): mcp pr_reconcile arms this PR and the merge train / pr-autoupdate queue lands it in PR-number order. `autoland-off` holds it.",
     },
