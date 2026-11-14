@@ -86,7 +86,9 @@ on:
         type: number
         default: 2
       stale-minutes:
-        description: a train whose checks are still pending after this long is closed and recomposed
+        description: >-
+          a train whose checks are still pending after this long is closed and recomposed; also the bound on how
+          long an open train holds the queue head (v1.35.0): set pr-autoupdate's `train-stale-minutes` to the same value
         type: number
         default: 90
       review-workflow:

@@ -55,6 +55,8 @@ def test_never_a_pass_before_is_a_wake() -> None:
     ([pr(1), pr(2, autoMergeRequest=None)], "fewer than 2"),
     ([pr(1), pr(2), pr(5, headRefName="train/77")], "train #5 is open"),
     ([pr(1, mergeStateStatus="CLEAN"), pr(2)], "#1 is landing on its own"),
+    # v1.35.0: a head that is NO candidate (ejected) still lands on its own: never wake a train beside it
+    ([pr(1), pr(2), pr(3, mergeStateStatus="CLEAN", labels=[{"name": EJECTED}])], "#3 is landing on its own"),
 ])
 def test_no_work_for_a_train_is_no_wake(prs: list[dict], want: str) -> None:
     go, why = train_kick.decide(prs, REQ, "main", [])
@@ -251,3 +253,10 @@ def test_main_reads_the_train_workflow_from_the_environment(monkeypatch: pytest.
     monkeypatch.setenv("CI_KIT_TRAIN_MIN_BATCH", "")
     upd.main(["--repo", "o/r"])
     assert got[1].train_workflow == "" and got[1].train_min_batch == train_kick.MIN_BATCH
+
+
+def test_a_clean_pr_that_is_unarmed_or_a_fork_or_stacked_lands_nothing_so_still_wakes() -> None:
+    for other in (pr(3, mergeStateStatus="CLEAN", autoMergeRequest=None),
+                  pr(3, mergeStateStatus="CLEAN", isCrossRepository=True),
+                  pr(3, mergeStateStatus="CLEAN", baseRefName="b1")):
+        assert train_kick.decide([pr(1), pr(2), other], REQ, "main", [])[0], other

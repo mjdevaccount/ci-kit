@@ -569,3 +569,94 @@ def test_a_pr_retargeted_after_its_review_does_not_board_must_fire(world: tuple[
     assert cli.run(_opts(), p) == 0, p.summary
     assert fake.prs[100]["title"] == "merge train: #1 #2" and RIDING not in fake.prs[7]["labels"]
     assert any(s.startswith("#7: not riding") and "base branch was changed" in s for s in p.summary)
+
+
+# ---- v1.35.0: the composer takes the lane, re-reads main, and gives the lane back
+def _queue(state: str, desc: str) -> dict:
+    return {"__typename": "StatusContext", "context": "queue/position", "state": state, "description": desc}
+
+
+def _statuses(fake: FakeGH) -> list[tuple[str, str, str]]:
+    """(sha, state, description) of every `queue/position` post, in order."""
+    out = []
+    for c in fake.calls:
+        if c[:3] == ("api", "-X", "POST") and "/statuses/" in c[3]:
+            f = dict(x.split("=", 1) for x in c if "=" in x and not x.startswith("repos/"))
+            out.append((c[3].rsplit("/", 1)[1], f["state"], f["description"]))
+    return out
+
+
+def test_compose_holds_the_queue_head_before_the_train_opens_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    from ci_kit import pr_hold
+    repo, fake = world
+    _riders(repo, fake, 2)
+    head = repo.pr(5, {"h.txt": "5\n"})
+    fake.add(5, head, statusCheckRollup=[*GREEN[:1], _queue("SUCCESS", pr_hold.HEAD)])   # not reviewed: no rider
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 0, p.summary
+    held = [(s, d) for sha, s, d in _statuses(fake) if sha == head]
+    # pending BEFORE the train (no number yet), then re-posted naming it; never success meanwhile
+    assert [s for s, _ in held] == ["pending", "pending"] and "composing on" in held[0][1] and "#100" in held[1][1]
+    assert all(d.startswith(pr_hold.TRAIN_HELD) for _, d in held)
+    push_at = next(i for i, c in enumerate(fake.calls) if c[:2] == ("pr", "create"))
+    first_hold = next(i for i, c in enumerate(fake.calls) if "/statuses/" + head in " ".join(map(str, c)))
+    assert first_hold < push_at and any("#5: queue head held" in s for s in p.summary)
+
+
+def test_main_moving_while_composing_opens_no_train_and_gives_the_lane_back_must_fire(
+        world: tuple[Repo, FakeGH], monkeypatch: pytest.MonkeyPatch) -> None:
+    # td#3115: a lock-maintenance PR landed during a 6-minute compose; the train opened stale at birth
+    from ci_kit import pr_hold
+    repo, fake = world
+    _riders(repo, fake, 2)
+    head = repo.pr(5, {"h.txt": "5\n"})
+    fake.add(5, head, statusCheckRollup=[*GREEN[:1], _queue("SUCCESS", pr_hold.HEAD)])
+    real = tgit.compose
+
+    def racing(*a, **k):
+        got = real(*a, **k)
+        repo.advance_main({"lock.txt": "relocked\n"})
+        return got
+    monkeypatch.setattr(tgit, "compose", racing)
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 0, p.summary
+    assert not fake.wrote("create") and 100 not in fake.prs
+    assert not git(repo.origin, "for-each-ref", "refs/heads/train/")            # nothing pushed
+    assert [s for sha, s, _ in _statuses(fake) if sha == head] == ["pending", "success"]   # taken, given back
+    assert any("main moved" in s and "no train opened" in s for s in p.summary)
+
+
+def test_main_unmoved_composes_as_before_must_not_fire(world: tuple[Repo, FakeGH]) -> None:
+    repo, fake = world
+    _riders(repo, fake, 2)
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 0 and fake.prs[100]["state"] == "open"
+    assert not any("main moved" in s for s in p.summary)
+
+
+def test_a_closed_train_with_none_after_it_releases_the_held_head_at_once_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    from ci_kit import pr_hold
+    repo, fake = world
+    _riders(repo, fake, 2)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    head = repo.pr(5, {"h.txt": "5\n"})
+    fake.add(5, head, statusCheckRollup=[*GREEN[:1], _queue("PENDING", pr_hold.held_for("#100"))])
+    fake.prs[100]["statusCheckRollup"] = [{**GREEN[0], "conclusion": "FAILURE"}, GREEN[1]]   # red: both ejected
+    fake.calls.clear()
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 0, p.summary
+    assert fake.prs[100]["state"] == "closed" and 101 not in fake.prs
+    assert [(s, d) for sha, s, d in _statuses(fake) if sha == head] == [("success", pr_hold.HEAD)]
+    assert any("#5: lane released" in s for s in p.summary)
+
+
+def test_an_open_pending_train_keeps_the_head_held_must_not_fire(world: tuple[Repo, FakeGH]) -> None:
+    from ci_kit import pr_hold
+    repo, fake = world
+    _riders(repo, fake, 2)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    head = repo.pr(5, {"h.txt": "5\n"})
+    fake.add(5, head, statusCheckRollup=[*GREEN[:1], _queue("PENDING", pr_hold.held_for("#100"))])
+    fake.calls.clear()
+    assert cli.run(_opts(), cli.Pass()) == 0
+    assert not [c for c in _statuses(fake) if c[0] == head]

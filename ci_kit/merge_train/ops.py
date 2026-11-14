@@ -152,6 +152,69 @@ def close_train(o: Opts, p: Pass, train: dict) -> bool:
     return True
 
 
+def _status(o: Opts, sha: str, state: str, desc: str) -> str:
+    """Post `queue/position` on `sha`; '' or what GitHub said."""
+    from ci_kit.pr_hold import CONTEXT  # lazy: pr_hold -> merge_train.policy
+    r = github.gh("api", "-X", "POST", f"repos/{o.repo}/statuses/{sha}", "-f", f"state={state}",
+                  "-f", f"context={CONTEXT}", "-f", f"description={desc[:140]}", check=False)
+    return (r.stderr or r.stdout or "").strip()[:200] if r.returncode else ""
+
+
+def take_lane(o: Opts, p: Pass, prs: list[dict], train: str) -> list[tuple[dict, str, str]]:
+    """THE TRAIN TAKES THE LANE (v1.35.0): every PR holding `queue/position` (pr_hold.lane: the head's
+    success, or a hold for an older train) goes pending, held for `train`, BEFORE the train opens --
+    so the queue head cannot land between composing and pr-autoupdate's next pass (td#3096: 3.4 min).
+    Returns what was taken, for give_back. A refused post is an ERROR (a red run): that head may land
+    under the train, the exact waste this exists to stop -- but the train still opens, no worse than
+    before."""
+    from ci_kit.pr_hold import held_for, lane
+    taken = lane(prs, o.base)
+    for pr, _, _ in taken:
+        n, sha = int(pr["number"]), str(pr.get("headRefOid") or "")
+        if o.dry_run:
+            p.say(f"(dry run) would hold #{n} for the train")
+            continue
+        err = _status(o, sha, "pending", held_for(train, o.stale_minutes))
+        if err:
+            p.error(f"#{n}: could not hold the queue head for the train ({err}): it may land under it")
+        else:
+            p.say(f"#{n}: queue head held for merge train {train}")
+    return taken
+
+
+def give_back(o: Opts, p: Pass, taken: list[tuple[dict, str, str]], why: str) -> None:
+    """Undo take_lane: each PR's `queue/position` as it was. A refused post is an ERROR: a head left
+    held for a train that never opened waits for pr-autoupdate's next pass."""
+    for pr, state, desc in taken:
+        if o.dry_run:
+            continue
+        err = _status(o, str(pr.get("headRefOid") or ""), state, desc)
+        if err:
+            p.error(f"#{pr['number']}: could not give the lane back ({err})")
+        else:
+            p.say(f"#{pr['number']}: lane given back ({state}): {why}")
+
+
+def release_lane(o: Opts, p: Pass, prs: list[dict]) -> None:
+    """No train is open after this pass: a PR still held for one (pending, pr_hold.TRAIN_HELD) gets
+    the head's success back NOW, not on pr-autoupdate's next pass (a closed train starts none). At most
+    one PR carries that hold (the head when it was taken); pr-autoupdate's next pass re-derives the
+    head either way. A refused post is an ERROR: that head waits for the next pass."""
+    from ci_kit.pr_hold import HEAD, lane
+    for pr, state, _ in lane(prs, o.base):
+        if state != "pending":
+            continue
+        n = int(pr["number"])
+        if o.dry_run:
+            p.say(f"(dry run) would release #{n} from its train hold")
+            continue
+        err = _status(o, str(pr.get("headRefOid") or ""), "success", HEAD)
+        if err:
+            p.error(f"#{n}: could not release the lane ({err}); pr-autoupdate's next pass does")
+        else:
+            p.say(f"#{n}: lane released, no train open -- the queue head lands on its own")
+
+
 def comments_of(repo: str, n: int) -> list[str]:
     """EVERY comment body, oldest first. Paginated: the release/rerun markers counted from these
     are budgets, and a first-page-only read silently reset one past 100 comments."""

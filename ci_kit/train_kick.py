@@ -13,11 +13,14 @@ WHEN, pure (`decide`). Dispatch the caller's train workflow only when ALL hold:
   * at least `min_batch` CANDIDATES by the train's own rule (ci_kit/merge_train/policy.candidates:
     armed, green, not conflicting, not ejected, not a draft, not opted out) -- one definition, so
     this can never call a PR ready that the train would not take;
-  * none of them is about to LAND ON ITS OWN (mergeStateStatus CLEAN / HAS_HOOKS / UNSTABLE): its
-    merge to main is a push, the next pass decides again. This narrows the race, it does not close
-    it: the queue head still in CI is no candidate, but its landing a minute after a train is
-    composed makes that train stale, and a green rider held only by `queue/position` can turn
-    CLEAN as the new head and land beside the train -- the same races the cron pass already had;
+  * no armed PR into the base is about to LAND ON ITS OWN (mergeStateStatus CLEAN / HAS_HOOKS /
+    UNSTABLE) -- a candidate OR NOT (v1.35.0: an ejected or opted-out head is no candidate and lands
+    all the same): its merge to main is a push, and the next pass decides again. A train woken
+    beside it would either hold a head that is seconds from landing for a whole train CI cycle, or
+    be composed on a base already about to move (td#3115: a lock-maintenance PR landed during a
+    6-minute compose). The rest of the race is CLOSED elsewhere (v1.35.0): the composer takes the
+    lane before it opens a train and aborts if main moved meanwhile (merge_train.phases), and the
+    queue hold keeps the head pending while a live train is open (pr_hold.live_train);
   * no PASS of the train workflow is queued or running (its concurrency group would only stack it);
   * the newest PASS was created before the newest candidate became ready (`ready_at`: the last
     required check completing, or auto-merge being armed). A pass created after already judged
@@ -105,7 +108,8 @@ def decide(prs: list[dict], required: tuple[str, ...], base: str, runs: list[dic
     if len(cands) < min_batch:
         return False, f"{len(cands)} candidate(s), fewer than {min_batch}"
     names = ", ".join(f"#{p['number']}" for p in cands)
-    landing = [p for p in cands if str(p.get("mergeStateStatus") or "").upper() in SELF_LANDING]
+    landing = [p for p in prs if str(p.get("mergeStateStatus") or "").upper() in SELF_LANDING
+               and p.get("autoMergeRequest") and not p.get("isCrossRepository") and p.get("baseRefName", base) == base]
     if landing:
         return False, (f"{len(cands)} candidates ({names}) but #{landing[0]['number']} is landing on its own "
                        "auto-merge; its push to main re-decides")

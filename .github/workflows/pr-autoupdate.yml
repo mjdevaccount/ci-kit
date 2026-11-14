@@ -41,6 +41,12 @@
 # last pass). The train's cron then needs only an hourly backstop. The token needs Actions: Read
 # and write (dispatch); a refused read or dispatch is a red run.
 #
+# THE TRAIN OWNS THE LANE (v1.35.0, with `queue-hold`): while a live train is open the queue head
+# reads `queue/position` pending ("held for merge train #M"), so it cannot land under the train and
+# throw its CI away (trade-data 11-14: all 5 unlanded trains died "stale: main moved"). Bounded by
+# `train-stale-minutes` (set it to the train's `stale-minutes`): a red, BEHIND/DIRTY or older train
+# releases the lane and its update hold, named in the summary (`hold: lane RELEASED ...`).
+#
 # The secret NAMES are the caller's: this workflow declares `token` and `ntfy-url` and the caller
 # maps its own repository secrets onto them (`secrets: inherit` works only if the caller's secrets
 # carry these exact names).
@@ -155,6 +161,13 @@ on:
         description: the train's own min-batch (dispatch only with at least this many candidates)
         type: number
         default: 2
+      train-stale-minutes:
+        description: >-
+          the merge train's own `stale-minutes` (v1.35.0): with `queue-hold`, an open merge train holds the queue
+          head pending (so main cannot move under the train) for at most this long; a red, BEHIND or older train
+          releases it, and the pass summary says so (ci_kit/pr_hold.py live_train)
+        type: number
+        default: 90
       cancel-doomed-runs:
         description: >-
           cancel the queued/running `pull_request` runs at a head that cannot merge and whose result
@@ -258,6 +271,7 @@ jobs:
       # env vars, never flags (the older-@v1-tool reason above)
       CI_KIT_TRAIN_WORKFLOW: ${{ inputs.train-workflow }}
       CI_KIT_TRAIN_MIN_BATCH: ${{ inputs.train-min-batch }}
+      CI_KIT_TRAIN_STALE_MIN: ${{ inputs.train-stale-minutes }}
       CI_KIT_CANCEL_DOOMED: ${{ inputs.cancel-doomed-runs }}
       # the heal ladder: env vars, never flags (an older @v1 tool refuses a flag it does not know)
       CI_KIT_HEAL: ${{ inputs.heal }}
