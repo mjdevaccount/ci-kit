@@ -12,7 +12,10 @@ import pathlib
 import json5
 
 PRESET = pathlib.Path(__file__).resolve().parent.parent / "renovate" / "default.json5"
-QUEUE_REPOS = {"mjdevaccount/trade-data"}  # every repo whose default branch runs merge-train.yml
+# every repo whose default branch runs ci-kit's pr-autoupdate with max-in-flight (the serial queue)
+QUEUE_REPOS = {f"mjdevaccount/{r}" for r in (
+    "trade-data", "trade-infra", "trade-ui", "edge-host", "home-host", "TradingEdge.Scraper",
+    "claude-plugins", "local-mcp", "mattpc-llm-stack", "cred-broker", "edge-ci", "ci-kit")}
 
 
 def _cfg() -> dict:
@@ -33,9 +36,12 @@ def test_renovate_never_merges_in_a_merge_queue_repo_must_fire() -> None:
     # "**Automerge**: Enabled", which is what mcp pr_reconcile reads before it arms the PR
     assert rule["automergeType"] == "pr-comment" and rule["automergeComment"].strip()
     assert "automerge" not in rule
+    # Renovate is not a second updater: a branch made current with main by Renovate's own rebase
+    # landed past the queue's in-flight PR (trade-data#3072, 2026-11-14). Only a conflict rebases.
+    assert rule["rebaseWhen"] == "conflicted"
     # repository is its ONLY matcher, and nothing after it sets the merge step back
     assert not [k for k in rule if k.startswith("match") and k != "matchRepositories"]
-    assert not [r for r in rules[at + 1:] if "automergeType" in r or "platformAutomerge" in r]
+    assert not [r for r in rules[at + 1:] if "automergeType" in r or "platformAutomerge" in r or "rebaseWhen" in r]
 
 
 def test_every_other_repo_keeps_the_every_check_merge() -> None:
