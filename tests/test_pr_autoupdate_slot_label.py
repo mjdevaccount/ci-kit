@@ -123,7 +123,7 @@ def test_an_open_train_keeps_an_ordinary_spare_out_of_a_freed_slot_must_not_fire
         monkeypatch: pytest.MonkeyPatch) -> None:
     """Review finding 2: with a train open, an EJECTED PR mid-review must not hand its slot to an
     ordinary PR -- updating that one would put the open train BEHIND (the hold's whole point)."""
-    train = _pr(9, headRefName="train/1-1", autoMergeRequest=None)
+    train = _pr(9, headRefName="train/1-1", autoMergeRequest=None, mergeStateStatus="BLOCKED")  # live (v1.35.0: a BEHIND train is dead)
     ejected = _pr(1, labels=[{"name": upd.EJECTED}])
     calls = _world(monkeypatch, [train, ejected, _pr(2)], {"b1"})
     summary: list[str] = []
@@ -135,7 +135,7 @@ def test_an_open_train_keeps_an_ordinary_spare_out_of_a_freed_slot_must_not_fire
 def test_an_open_train_gives_the_slot_it_holds_to_an_ejected_pr_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
     """Review of 1.26.1, finding 1: the slot went to ordinary #1, the train hold took it back, and
     ejected #2 waited in spare forever -- 0/1 in flight. The emptied slot goes to #2 now."""
-    train = _pr(9, headRefName="train/1-1", autoMergeRequest=None)
+    train = _pr(9, headRefName="train/1-1", autoMergeRequest=None, mergeStateStatus="BLOCKED")  # live (v1.35.0: a BEHIND train is dead)
     calls = _world(monkeypatch, [train, _pr(1), _pr(2, labels=[{"name": upd.EJECTED}]), _pr(3)], set())
     summary: list[str] = []
     assert upd.run("o/r", summary, [], upd.Options(max_in_flight=1)) == 0
@@ -147,7 +147,7 @@ def test_an_open_train_hands_a_reviewing_ejected_slot_to_the_next_ejected_must_f
         monkeypatch: pytest.MonkeyPatch) -> None:
     """Review of 1.26.1, finding 2: the positive train-open handoff. Ejected #1 is mid-review;
     ejected #3 takes its slot, ordinary #2 never does."""
-    train = _pr(9, headRefName="train/1-1", autoMergeRequest=None)
+    train = _pr(9, headRefName="train/1-1", autoMergeRequest=None, mergeStateStatus="BLOCKED")  # live (v1.35.0: a BEHIND train is dead)
     ej = [{"name": upd.EJECTED}]
     calls = _world(monkeypatch, [train, _pr(1, labels=ej), _pr(2), _pr(3, labels=ej)], {"b1"})
     assert upd.run("o/r", [], [], upd.Options(max_in_flight=1, review_workflow="rg.yml")) == 0
@@ -159,7 +159,7 @@ def test_promotion_fills_only_the_slots_the_hold_emptied_and_leaves_spare_must_n
     """Review of 8a4d43e, gaps 1+2: ONE held ordinary PR frees ONE slot, so exactly one ejected
     spare is promoted (never two -- max-in-flight), and the promoted PR leaves spare, so its own
     running review hands on to the NEXT ejected PR, never back to itself."""
-    train = _pr(9, headRefName="train/1-1", autoMergeRequest=None)
+    train = _pr(9, headRefName="train/1-1", autoMergeRequest=None, mergeStateStatus="BLOCKED")  # live (v1.35.0: a BEHIND train is dead)
     ej = [{"name": upd.EJECTED}]
     rows = [train, _pr(1), _pr(2, labels=ej), _pr(3, labels=ej), _pr(4, labels=ej)]
     calls = _world(monkeypatch, rows, set())
