@@ -20,7 +20,7 @@ and a SHA says nothing comparable. Neither is a range (`>=1.1.0`) or a pre-relea
 The newest release is the highest `vX.Y.Z` tag on `--remote` (`git ls-remote --tags`), so a
 runner reads it with the same credential that installs the package.
 
-GRACE (`--grace-hours`, default 24; 2026-11-09). A pin is STALE only once the FIRST release past
+GRACE (`--grace-hours`, default 48 since v1.35.0, 24 before; 2026-11-09). A pin is STALE only once the FIRST release past
 it is older than the grace; until then it is PENDING: printed, exit 0. Renovate bumps a kit pin
 "at any time" (renovate/default.json5 "first-party kits"), but hosted Renovate runs on its own
 cadence and the bump PR then waits in the CI queue, so a daily cron read the lag the day after
@@ -34,7 +34,10 @@ tag made late or re-made (llm-ports v1.19.0 is dated after v1.20.0) must not let
 version hide a stale pin. A release date it cannot read, or one in the FUTURE (clock skew), gets
 NO grace: unknown is not "young". A pin naming no release is never graced. The throwaway repo
 holds no credential, so a PRIVATE kit's dates are unreadable and its lag fails closed (strict).
-`--grace-hours 0` is the old strict check.
+`--grace-hours 0` is the old strict check. 48h since v1.35.0: Renovate now opens a kit bump only in
+its DAILY window (renovate/default.json5 "first-party kits", 04:00-07:59 ET), so a release just after
+the window waits ~20h for it and then the queue's landing time; 24h would go red on every such
+release that the next morning lands.
 
 EXIT. 0 every pin is the newest tag, or lags only within the grace - 1 a pin is stale, or names
 no release tag (each printed with file:line) - 2 could not look: a file missing, NO pin found in
@@ -171,9 +174,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="file to scan for <name>@vX.Y.Z pins (repeatable)")
     ap.add_argument("--remote", required=True, help="the kit's git remote (its tags are the releases)")
     ap.add_argument("--name", default="", help="the kit's name in a pin (default: from --remote)")
-    ap.add_argument("--grace-hours", type=float, default=24.0,
+    ap.add_argument("--grace-hours", type=float, default=48.0,
                     help="a lag whose every missing release is younger than this is PENDING, "
-                         "not a finding (default 24; 0 = strict)")
+                         "not a finding (default 48; 0 = strict)")
     a = ap.parse_args(argv)
     if a.grace_hours < 0:
         print("ci-pin-drift: --grace-hours must be >= 0", file=sys.stderr)
