@@ -6,7 +6,7 @@
 # so until this file ci-kit ran no updater on itself: its armed PRs were updated by nothing, and
 # mcp pr_reconcile.py -- which reads pr-autoupdate.yml on the default branch as "this repo has an
 # updater" -- left them BEHIND. Same split as tag-version.yml (caller) / version-tag.yml (reusable).
-# It calls the reusable from THIS checkout (main's copy), so a broken reusable shows here first.
+# It calls the reusable from THIS checkout (main's copy of the YAML; the tool itself is ci-kit@v1).
 #
 # It is what makes "require branches to be up to date" (strict protection) affordable: strict with
 # nothing updating branches stalls every armed PR BEHIND. A conflicting PR gets label `conflict`

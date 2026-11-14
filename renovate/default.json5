@@ -551,8 +551,8 @@
     // current with main while #3073, the queue's one in-flight PR, was mid-review; #3072 landed
     // at 03:53:47Z and #3073/#3075/#3076 all went BEHIND. So in these repos a Renovate branch is
     // rebased only on a CONFLICT, merged by nothing of its own, and becomes current with main
-    // only when the queue picks it (mcp pr_reconcile arms it; it also refuses to land a CLEAN
-    // one while another armed PR is in flight). A repo that adds pr-autoupdate.yml with
+    // only when the queue picks it (mcp pr_reconcile arms it and dispatches the updater, and
+    // never lands a CLEAN one while another is in flight). A repo that adds pr-autoupdate.yml with
     // max-in-flight joins this list (tests/test_renovate_merge_queue.py pins it).
     // trade-data runs ci-kit's merge train + serial pr-autoupdate, which land armed PRs lowest
     // number first, one heavy CI run at a time. Renovate's own merge sees none of it:
