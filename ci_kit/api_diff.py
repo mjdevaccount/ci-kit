@@ -49,7 +49,7 @@ from ci_kit import discover, release_bin, site_lint
 
 GATE = "api-diff"
 # renovate: datasource=github-releases depName=oasdiff/oasdiff
-OASDIFF_VERSION = "1.35.0"
+OASDIFF_VERSION = "1.37.0"
 #: sha256 of each release tarball, from the release's checksums.txt (v1.35.0, 2026-11-03). A bump
 #: moves the version AND every hash in one edit; a tarball that does not match is exit 2.
 OASDIFF = release_bin.Pin(
