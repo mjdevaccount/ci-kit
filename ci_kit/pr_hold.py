@@ -113,7 +113,7 @@ def current(repo: str, sha: str, read: Gh) -> tuple[str | None, str]:
     failed, and then the state is posted anyway: a redundant post costs nothing, a missed one holds a PR."""
     try:
         rows = json.loads(read("api", f"repos/{repo}/commits/{sha}/status").stdout or "{}").get("statuses") or []
-    except (subprocess.CalledProcessError, ValueError, AttributeError):
+    except (subprocess.CalledProcessError, ValueError, AttributeError, TypeError):
         return UNREAD, ""
     s = next((s for s in rows if isinstance(s, dict) and s.get("context") == CONTEXT), None)
     return (str(s.get("state")), str(s.get("updated_at") or "")) if s else (None, "")
@@ -169,8 +169,20 @@ def hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
          comments: Callable[[str, int], list[str]], skip: frozenset[int] = frozenset(), *,
          base: str | None = _READ, stale_s: float = 1800, required: tuple[str, ...] = (),
          now: float | None = None) -> int:
-    """One hold pass; `skip` = pr_queue.blocked(...). Returns the errors. Raises nothing: the caller
-    runs it even when the pass around it crashes, so a crash cannot cost the head its success."""
+    """One hold pass; `skip` = pr_queue.blocked(...). Returns the errors. NEVER raises: the caller
+    runs it even when the pass around it crashes, and a crash in here (a missing gh binary, an
+    answer of the wrong shape) is one error -- a red run -- never a silent skip."""
+    try:
+        return _hold(repo, prs, read, write, summary, comments, skip, base, stale_s, required, now)
+    except Exception as e:  # noqa: BLE001 -- the guard IS the point: the run goes red, it never crashes the pass
+        print(f"::error::{CONTEXT}: the hold pass crashed: {type(e).__name__}: {e}")
+        summary.append(f"hold ({CONTEXT}): CRASHED ({type(e).__name__}: {e}) -- statuses as last posted")
+        return 1
+
+
+def _hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
+          comments: Callable[[str, int], list[str]], skip: frozenset[int], base: str | None, stale_s: float,
+          required: tuple[str, ...], now: float | None) -> int:
     errors = 0
     now = dt.datetime.now(dt.UTC).timestamp() if now is None else now
     base = default_branch(repo, read) if base == _READ else base
@@ -229,12 +241,15 @@ def _escalate(repo: str, p: dict, sha: str, why: str, write: Gh, comments: Calla
     if not marks:
         body = (HELD.format(sha=sha, paged="") + f"\nThe PR queue's head cannot merge: {why}. "
                 "The next pass looks again and pages if it still cannot.")
-        write("pr", "comment", str(n), "-R", repo, "--body", body)
-        return f"HEAD HELD: #{n} cannot merge ({why}); paged next pass if it still cannot"
+        if write("pr", "comment", str(n), "-R", repo, "--body", body).returncode == 0:
+            return f"HEAD HELD: #{n} cannot merge ({why}); paged next pass if it still cannot"
+        # the marker was refused (a dead push token refuses statuses AND comments): without a
+        # marker no later pass could ever page, so page now -- ntfy needs no GitHub token
+        why += " (and the marker comment was refused: the push token)"
     try:
         note = page(f"{repo.rsplit('/', 1)[-1]}: queue head #{n} cannot merge",
                     f"two passes: {why}"[:900], str(p.get("url") or ""))
-    except ValueError as e:  # a malformed NTFY_URL: page() catches OSError only
+    except Exception as e:  # noqa: BLE001 -- page() catches OSError only (a malformed URL is ValueError)
         note = f"push FAILED: {e}"
     write("pr", "comment", str(n), "-R", repo, "--body", HELD.format(sha=sha, paged=" paged") + f"\nPaged: {note}")
     return f"HEAD HELD: #{n} cannot merge for 2 passes ({why}); page {note}"

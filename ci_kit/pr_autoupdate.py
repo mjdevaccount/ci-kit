@@ -258,7 +258,7 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     try:  # reads only; the hold (the head's `queue/position` success) runs whatever happens here
         heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read,
                                             pr_heal.comments_of, summary)
-    except (subprocess.CalledProcessError, ValueError, KeyError):
+    except Exception:  # noqa: BLE001 -- whatever it was, the head gets its success, then it re-raises
         if opts.hold:
             pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of,
                          pr_queue.blocked(prs, opts.required, parked, base), base=base,

@@ -22,7 +22,7 @@ import os
 import subprocess
 import sys
 
-from ci_kit import pr_queue
+from ci_kit import pr_hold, pr_list, pr_queue
 from ci_kit.pr_sched import MAX_ATTEMPT, PARKED, PARKED_OFF, PRE_JOB, Gh, _tail, active_runs, run_jobs
 
 
@@ -60,10 +60,13 @@ def admit_main(argv: list[str] | None = None) -> int:
         if args.attempt >= MAX_ATTEMPT:
             why = f"attempt {args.attempt}: parked often enough, runs now (no starving)"
         elif args.pool:
-            prs = json.loads(read("pr", "list", "-R", args.repo, "--state", "open", "--limit", "200", "--json",
-                                  "number,isDraft,isCrossRepository,headRefName,headRefOid,autoMergeRequest,labels").stdout)
+            prs = pr_list.rows(json.loads(read(*pr_list.gh_args(args.repo)).stdout))
             me = next((p for p in prs if int(p["number"]) == args.pr), {"number": args.pr})
-            h = pr_queue.head(prs)
+            # the SAME head as the hold and the scheduler: the lowest armed PR that can land. No
+            # required list here (every check counts) and no machinery verdict: where that differs it
+            # names a LATER head, and a PR ahead of the head is never parked -- it errs toward running
+            parked = frozenset(int(p["number"]) for p in prs if any(lb.get("name") == PARKED for lb in p.get("labels") or []))
+            h = pr_queue.head(prs, pr_queue.blocked(prs, (), parked, pr_hold.default_branch(args.repo, read)))
             hn = str(h["number"]) if h else ""
             demand = bool(h) and int(h["number"]) < args.pr and head_demand(args.repo, h, args.pool, read, args.pending)
             defer, why = pr_queue.admit(me, h, demand)

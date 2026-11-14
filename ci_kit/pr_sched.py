@@ -40,7 +40,7 @@ import json
 import subprocess
 from collections.abc import Callable
 
-from ci_kit import pr_queue
+from ci_kit import pr_queue, redclass
 from ci_kit.ntfy import page
 from ci_kit.pr_heal import PARKED  # ONE name; pr_heal reads it too
 
@@ -240,7 +240,7 @@ def out_of_queue(repo: str, prs: list[dict], before: str, sha: str, read: Gh, sk
                  or str((m.get("user") or {}).get("login") or "") in RENOVATE)]
     if not nums:
         return ""
-    if pr_queue.check_state(h.get("statusCheckRollup")) == "failing":
+    if redclass.red_checks(h.get("statusCheckRollup")):  # a red head was never in flight (cancelled is red)
         return ""
     cmp = _json(read, "api", f"repos/{repo}/compare/{before}...{h['headRefOid']}")
     if not isinstance(cmp, dict) or int(cmp.get("behind_by", 1)) != 0:

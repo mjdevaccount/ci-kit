@@ -351,6 +351,17 @@ def test_a_skipped_red_head_hands_the_watch_to_the_pr_that_can_land_must_fire() 
     assert "#3085" in pr_sched.out_of_queue("o/r", prs, "b" * 40, "sha1", gh.read, frozenset({3073}))
     assert pr_queue.head(prs, frozenset({3073}))["number"] == 3080
 
+
+def test_a_head_red_only_by_cancelled_runs_was_never_in_flight_must_not_fire() -> None:
+    # 2nd review, finding 1 (repeat): parked #3079 (cancelled runs) skipped while current; #3084 held
+    # success and merged; the push pass sees #3079 BEHIND and the head -- the hold allowed that merge
+    gh = Gh({"repos/o/r/commits/sha1/pulls": [{"number": 3084, "merged_at": "x", "head": {"ref": "b3084"},
+                                                "user": {"login": "agent"}}],
+             "repos/o/r/compare/": {"behind_by": 0}})
+    cancelled = [{"__typename": "CheckRun", "name": "model review", "status": "COMPLETED", "conclusion": "CANCELLED"}]
+    prs = [_pr(3079, statusCheckRollup=cancelled, labels=(pr_sched.PARKED,))]
+    assert pr_sched.out_of_queue("o/r", prs, "b" * 40, "sha1", gh.read) == ""
+
 # ── the review gate's admission CLI ───────────────────────────────────────────────────────────
 def _admit(monkeypatch: pytest.MonkeyPatch, tmp_path, prs: list[dict], *, edit_rc: int = 0, demand: bool = True,
            argv: tuple[str, ...] = (), label: str | None = "PR queue: parked") -> dict[str, str]:
@@ -358,8 +369,14 @@ def _admit(monkeypatch: pytest.MonkeyPatch, tmp_path, prs: list[dict], *, edit_r
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))
 
     def run(cmd, **_):
-        if cmd[:3] == ["gh", "pr", "list"]:
-            return subprocess.CompletedProcess(cmd, 0, json.dumps(prs), "")
+        if cmd[:3] == ["gh", "api", "graphql"]:  # pr_list: the same rows the hold and the scheduler read
+            nodes = [{**p, "baseRefName": p.get("baseRefName", "main"), "labels": {"nodes": p.get("labels") or []},
+                      "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {
+                          "nodes": p.get("statusCheckRollup") or []}}}}]}} for p in prs]
+            answer = {"data": {"repository": {"pullRequests": {"nodes": nodes}}}}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(answer), "")
+        if cmd[:3] == ["gh", "api", "repos/o/r"]:
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"default_branch": "main"}), "")
         if cmd[:3] == ["gh", "pr", "edit"]:
             return subprocess.CompletedProcess(cmd, edit_rc, "", "no such label")
         if cmd[:3] == ["gh", "label", "list"]:
@@ -375,6 +392,14 @@ def _admit(monkeypatch: pytest.MonkeyPatch, tmp_path, prs: list[dict], *, edit_r
 def test_admission_parks_a_later_pr_and_labels_it_must_fire(monkeypatch, tmp_path) -> None:
     got = _admit(monkeypatch, tmp_path, [_pr(3073), _pr(3080)])
     assert got["defer"] == "true" and got["head"] == "3073"
+
+
+def test_admission_shares_the_holds_head_past_a_red_lowest_pr_must_fire(monkeypatch, tmp_path) -> None:
+    # review of the hold, 2nd pass, finding 2: #3070's lint failed fast; the hold and the scheduler
+    # skip it, so #3073 is the head for admission too -- #3080 parks for #3073, never for #3070
+    red = [{"__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "FAILURE"}]
+    got = _admit(monkeypatch, tmp_path, [_pr(3070, statusCheckRollup=red), _pr(3073), _pr(3080)])
+    assert got["head"] == "3073"
 
 
 def test_admission_runs_when_it_cannot_label_or_cannot_look_or_was_parked_enough_must_not_fire(monkeypatch, tmp_path) -> None:

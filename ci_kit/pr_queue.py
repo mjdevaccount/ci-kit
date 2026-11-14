@@ -175,7 +175,8 @@ def blocked(prs: list[dict], required: tuple[str, ...] = (), eligible: frozenset
             base: str | None = None) -> frozenset[int]:
     """The PRs that cannot land AS THEY STAND -- never the head, for the hold, the updater and the
     scheduler alike (one head, pr_queue.head(prs, skip)). Pure. Blocked:
-      * DIRTY (a conflict with its base);
+      * DIRTY or CONFLICTING (a conflict with its base; the merge state reads UNKNOWN for a while
+        after a push to main, `mergeable` often already knows);
       * a required check RED on its head (redclass.red_checks: failing or CANCELLED, newest run per
         name), unless the PR is `eligible` (parked or machinery-red) AND behind main: then the
         queue's own update is its fresh run. Current with main, a re-run is owed that this token
@@ -188,7 +189,8 @@ def blocked(prs: list[dict], required: tuple[str, ...] = (), eligible: frozenset
     for p in prs:
         n = int(p["number"])
         stale = (p.get("mergeStateStatus") or "UNKNOWN").upper() in _STALE_STATES
-        if (p.get("mergeStateStatus") or "").upper() == "DIRTY" or (base and p.get("baseRefName") != base):
+        if (p.get("mergeStateStatus") or "").upper() == "DIRTY" or (p.get("mergeable") or "").upper() == "CONFLICTING" \
+                or (base and p.get("baseRefName") != base):
             out.add(n)
         elif not (n in eligible and stale) and red_checks(p.get("statusCheckRollup"), required):
             out.add(n)

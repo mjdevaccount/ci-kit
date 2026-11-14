@@ -327,3 +327,51 @@ def test_one_head_for_the_hold_and_the_scheduler_on_a_machinery_red_behind_main_
 def test_a_stacked_pr_is_never_the_schedulers_head_either_must_not_fire() -> None:
     prs = [_pr(3080, base="b3079"), _pr(3082)]
     assert pr_queue.head(prs, pr_queue.blocked(prs, REQ, frozenset(), "main"))["number"] == 3082
+
+
+def test_a_dead_push_token_pages_at_once_since_no_marker_can_be_left_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 3rd review, finding 1: the PAT that is refused the status is refused the marker comment too;
+    # waiting for a marker that can never exist would never page
+    pages: list[str] = []
+    monkeypatch.setattr(pr_hold, "page", lambda title, body, click: pages.append(body) or "published (200)")
+    errors, summary = _pass(Gh(refuse=("statuses/", "pr comment")), [_pr(3082), _pr(3083)])
+    assert errors == 2 and len(pages) == 1 and "marker comment was refused" in pages[0]
+
+
+def test_a_crash_inside_the_hold_is_a_red_run_never_an_exception_must_fire() -> None:
+    def gone(*a, **k):
+        raise FileNotFoundError("gh")
+    summary: list[str] = []
+    assert pr_hold.hold("o/r", [_pr(3082)], Gh().read, gone, summary, lambda r, n: [], base="main") == 1
+    assert any("CRASHED (FileNotFoundError" in s for s in summary)
+
+
+def test_a_conflicting_pr_read_unknown_after_a_push_is_skipped_must_fire() -> None:
+    conflicting = {**_pr(3082, merge="UNKNOWN"), "mergeable": "CONFLICTING"}
+    gh = Gh()
+    _pass(gh, [conflicting, _pr(3083)])
+    assert gh.posted() == {3082: "pending", 3083: "success"}
+
+
+def test_run_hands_one_skip_to_the_hold_the_updater_and_the_scheduler_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 3rd review, finding 4: un-wiring any consumer from the shared skip must fail a test
+    seen: dict[str, object] = {}
+    prs = [_pr(3082, checks=RED), _pr(3083), _pr(3084)]
+    monkeypatch.setattr(pr_autoupdate, "_gh_read", lambda *a: subprocess.CompletedProcess(a, 0, "{}", ""))
+    monkeypatch.setattr(pr_autoupdate.pr_list, "rows", lambda raw: prs)
+    monkeypatch.setattr(pr_hold, "default_branch", lambda repo, read: "main")
+    monkeypatch.setattr(pr_autoupdate.pr_heal, "assess_armed", lambda *a, **k: ({}, 0))
+    monkeypatch.setattr(pr_autoupdate.pr_heal, "act", lambda *a, **k: 0)
+    monkeypatch.setattr(pr_autoupdate, "unlabel_resolved", lambda *a, **k: 0)
+    monkeypatch.setattr(pr_hold, "hold", lambda *a, **k: seen.setdefault("hold", a[6]) and 0)
+    monkeypatch.setattr(pr_autoupdate, "_head_first", lambda *a, **k: seen.setdefault("head_first", a[5]) and None)
+    monkeypatch.setattr(pr_autoupdate.pr_sched, "pass_", lambda *a, **k: seen.setdefault("sched", k["skip"]) and 0)
+    pr_autoupdate.run("o/r", [], [], pr_autoupdate.Options(hold=True, scarce=(("home-sealed", 1),), required=REQ))
+    assert seen["hold"] == seen["head_first"] == seen["sched"] == frozenset({3082})
+
+
+def test_the_trains_reading_never_waits_on_the_holds_pending_must_not_fire() -> None:
+    from ci_kit.merge_train import policy
+    rollup = [{"__typename": "StatusContext", "context": pr_hold.CONTEXT, "state": "PENDING"},
+              {"__typename": "CheckRun", "name": "unit tests", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    assert policy.checks(rollup, ())[0] == "green"            # required-checks empty: a member still rides
