@@ -1,4 +1,4 @@
-"""Wake the merge train when a pr-autoupdate pass sees work for it (v1.32.0).
+"""Wake the merge train when a pr-autoupdate pass sees work for it (v1.34.0).
 
 WHY (trade-data, 2026-11-14 00:00-17:38Z). merge-train ran on a cron, "7,27,47 * * * *": 49 of
 its 52 passes logged "fewer than 2 candidates", and each was a single-use job on the caller's

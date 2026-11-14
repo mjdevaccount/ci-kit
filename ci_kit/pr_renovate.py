@@ -128,6 +128,12 @@ def automerge_verdict(body: str) -> str | None:
     return m.group(1) if m else None
 
 
+def automerge_enabled(body: str) -> bool:
+    """Renovate will merge this PR itself (its config block says Enabled). Pure; the heal ladder's
+    `armed` for a Renovate PR in a repo with no queue, where nothing arms it (ci_kit/pr_ladder.py)."""
+    return automerge_verdict(body) == ENABLED
+
+
 # Renovate's own control (its PR body's "rebase/retry" checkbox): ticked, its next run recreates the
 # branch on current main -- the one way to move a `rebaseWhen: "never"` branch (the preset's kit rule)
 _REBASE_BOX = re.compile(r"^([ \t]*- )\[ \]([ \t]*<!-- rebase-check -->)", re.M)

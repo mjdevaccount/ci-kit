@@ -220,8 +220,8 @@ def test_run_without_a_train_workflow_never_kicks(monkeypatch: pytest.MonkeyPatc
 
 
 def test_a_train_workflow_never_changes_the_queue_plans_base(monkeypatch: pytest.MonkeyPatch) -> None:
-    # with hold/scarce off the plan ran with base=None before v1.32.0; naming a train workflow must
-    # not change that (review of 1.32.0, finding 2) -- the default branch is read for the kick only
+    # with hold/scarce off the plan ran with base=None before v1.34.0; naming a train workflow must
+    # not change that (review of 1.34.0, finding 2) -- the default branch is read for the kick only
     reads: list[tuple] = []
     seen: list = []
     _wire(monkeypatch, seen)
@@ -240,7 +240,7 @@ def test_a_train_workflow_never_changes_the_queue_plans_base(monkeypatch: pytest
 
 def test_main_reads_the_train_workflow_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     got: list[Options] = []
-    monkeypatch.setattr(upd, "run", lambda repo, summary, relock, opts: got.append(opts) or 0)
+    monkeypatch.setattr(upd, "run", lambda repo, summary, relock, opts, *_: got.append(opts) or 0)
     monkeypatch.setenv("CI_KIT_TRAIN_WORKFLOW", "merge-train.yml")
     monkeypatch.setenv("CI_KIT_TRAIN_MIN_BATCH", "2")
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)

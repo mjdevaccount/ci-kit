@@ -18,6 +18,7 @@ query($owner: String!, $name: String!) {
         isDraft mergeable baseRefName createdAt
         author { __typename login }
         autoMergeRequest { enabledAt }
+        body
         labels(first: 30) { nodes { name } }
         commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
           __typename
@@ -38,6 +39,7 @@ def gh_args(repo: str) -> list[str]:
 
 def rows(answer: dict) -> list[dict]:
     """GraphQL answer -> `gh pr list --json`-shaped rows. Pure: the shape the tests pin."""
+    from ci_kit.pr_renovate import automerge_enabled  # here: an import cycle at load
     if answer.get("errors"):
         raise ValueError(f"GraphQL errors: {answer['errors']}")
     out = []
@@ -49,6 +51,11 @@ def rows(answer: dict) -> list[dict]:
                                      "headRefName", "mergeStateStatus", "autoMergeRequest",
                                      "isDraft", "mergeable", "baseRefName", "createdAt", "author")},
             "labels": (n.get("labels") or {}).get("nodes") or [],
+            "author": n.get("author") or {},
+            # Renovate merges its own PRs (platformAutomerge off), so in a repo with no queue they are
+            # never ARMED; its config block says whether it will (pr_renovate's reader, never a first
+            # match: changelogs come first). Only the flag travels: bodies stay out of the rows.
+            "renovateAutomerge": automerge_enabled(n.get("body") or ""),
             "statusCheckRollup": ((rollup.get("contexts") or {}).get("nodes")) or [],
         })
     return out

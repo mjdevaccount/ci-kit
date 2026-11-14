@@ -230,7 +230,7 @@ def test_run_with_the_rule_off_cancels_nothing(monkeypatch: pytest.MonkeyPatch) 
 @pytest.mark.parametrize("env,want", [(None, True), ("true", True), ("false", False)])
 def test_main_turns_the_rule_on_by_default(monkeypatch: pytest.MonkeyPatch, env, want) -> None:
     got: list[Options] = []
-    monkeypatch.setattr(upd, "run", lambda repo, summary, relock, opts: got.append(opts) or 0)
+    monkeypatch.setattr(upd, "run", lambda repo, summary, relock, opts, *_: got.append(opts) or 0)
     if env is None:
         monkeypatch.delenv("CI_KIT_CANCEL_DOOMED", raising=False)
     else:

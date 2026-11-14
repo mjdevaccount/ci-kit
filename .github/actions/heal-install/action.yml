@@ -1,0 +1,70 @@
+# heal-install -- the caller's install, then a command, with an optional read-only deploy key for a
+# private dependency: ci_kit/git_ssh.sh's three phases, one copy for pr-heal.yml's two PR-code jobs
+# (regen: the generators; fix: tier 3's project). The KEY lives only in the load step, where no PR
+# code runs; the install step holds the agent's socket, never the key; the agent is killed after.
+name: heal-install
+description: run the caller's install and a command, routing private git fetches through a deploy key
+inputs:
+  kit:
+    description: the ci-kit directory (heal-kit's dir output)
+    required: true
+  install:
+    description: the caller's install command ('' = none)
+    required: false
+    default: ""
+  then:
+    description: a command after the install, same step and env ('' = none)
+    required: false
+    default: ""
+  git-ssh-repos:
+    description: private repos fetched by https (ci_kit/git_ssh.sh)
+    required: false
+    default: ""
+  git-ssh-key:
+    description: the deploy key(s), one per repo in git-ssh-repos order
+    required: false
+    default: ""
+outputs:
+  failed:
+    description: what failed ('' = nothing)
+    value: ${{ steps.run.outputs.failed }}
+runs:
+  using: composite
+  steps:
+    - id: gitssh
+      if: inputs.git-ssh-repos != ''
+      shell: bash
+      env:
+        KIT: ${{ inputs.kit }}
+        CI_KIT_GIT_SSH_REPOS: ${{ inputs.git-ssh-repos }}
+        CI_KIT_GIT_SSH_KEY: ${{ inputs.git-ssh-key }}
+      run: bash "$KIT/ci_kit/git_ssh.sh" load "$GITHUB_OUTPUT"
+    - id: run
+      shell: bash
+      env:
+        KIT: ${{ inputs.kit }}
+        PYTHONPATH: ${{ inputs.kit }}
+        PYTHONSAFEPATH: ""
+        INSTALL: ${{ inputs.install }}
+        THEN: ${{ inputs.then }}
+        CI_KIT_GIT_SSH_SOCK: ${{ steps.gitssh.outputs.sock }}
+        CI_KIT_GIT_SSH_KNOWN_HOSTS: ${{ steps.gitssh.outputs.known-hosts }}
+        CI_KIT_GIT_SSH_CONFIG: ${{ steps.gitssh.outputs.ssh-config }}
+        CI_KIT_GIT_SSH_REPOS: ${{ inputs.git-ssh-repos }}
+      run: |
+        set -uo pipefail
+        rc=0
+        if [ -n "$CI_KIT_GIT_SSH_SOCK" ]; then export SSH_AUTH_SOCK="$CI_KIT_GIT_SSH_SOCK"; . "$KIT/ci_kit/git_ssh.sh" route; fi
+        if [ -n "$INSTALL" ]; then
+          bash -c "$INSTALL" || { rc=$?; echo "failed=install: $INSTALL (exit $rc)" >> "$GITHUB_OUTPUT"; }
+        fi
+        if [ "$rc" = 0 ] && [ -n "$THEN" ]; then
+          bash -c "$THEN" || { rc=$?; echo "failed=$THEN (exit $rc)" >> "$GITHUB_OUTPUT"; }
+        fi
+        exit "$rc"
+    - if: always() && steps.gitssh.outputs.pid != ''
+      shell: bash
+      env:
+        KIT: ${{ inputs.kit }}
+        AGENT_PID: ${{ steps.gitssh.outputs.pid }}
+      run: bash "$KIT/ci_kit/git_ssh.sh" kill "$AGENT_PID"

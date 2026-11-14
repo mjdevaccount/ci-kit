@@ -26,7 +26,7 @@
 #       secrets:
 #         token: ${{ secrets.PR_UPDATE_TOKEN }}   # the same PAT pr-autoupdate holds
 #
-# WOKEN BY THE QUEUE (v1.32.0). A cron every 20 min found work on 3 of 52 passes (trade-data
+# WOKEN BY THE QUEUE (v1.34.0). A cron every 20 min found work on 3 of 52 passes (trade-data
 # 2026-11-14), each a secure-pool job. pr-autoupdate already reads every PR with its checks, so
 # with `train-workflow: merge-train.yml` it dispatches this workflow when a pass would find work
 # (ci_kit/train_kick.py), and the cron is an hourly backstop for whatever it misses.

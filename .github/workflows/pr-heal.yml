@@ -1,0 +1,472 @@
+# pr-heal -- THE HEAL LADDER's tiers 1-4 for ONE armed PR the updater dispatched (ci_kit/pr_ladder.py).
+#
+# The caller's pr-autoupdate job (ci-kit pr-autoupdate.yml with `heal: true`) decides, at most once
+# per PR head, that a conflict or a judgment red is the ladder's; its `heal` output is a JSON list
+# of {pr, head, mode, claude, checks, runs}. The caller runs this once per row:
+#
+#   heal:
+#     needs: update
+#     if: always() && needs.update.outputs.heal != '' && needs.update.outputs.heal != '[]'
+#     strategy:
+#       fail-fast: false
+#       max-parallel: 2
+#       matrix:
+#         include: ${{ fromJSON(needs.update.outputs.heal) }}
+#     permissions: { contents: read, pull-requests: read, actions: read }
+#     uses: mjdevaccount/ci-kit/.github/workflows/pr-heal.yml@v1
+#     with:
+#       pr: ${{ matrix.pr }}
+#       head: ${{ matrix.head }}
+#       mode: ${{ matrix.mode }}
+#       claude: ${{ matrix.claude }}
+#       checks: ${{ matrix.checks }}
+#       runs: ${{ matrix.runs }}
+#       regen: |                   # YOUR generated files (ci_kit/pr_regen.py); lockfiles are built in
+#         [{"paths": ["docs/api/openapi.json"], "run": "uv run python scripts/openapi_snapshot.py --write",
+#           "on": ["conflict", "red"]}]
+#       install: uv sync --all-groups --frozen
+#     secrets:
+#       token: ${{ secrets.PR_UPDATE_TOKEN }}                       # the push (a PAT: CI must see it)
+#       ntfy-url: ${{ secrets.NTFY_URL }}                           # tier 4
+#       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # tier 3 (or anthropic-api-key)
+#
+# FIVE JOBS, ONE TRUST BOUNDARY EACH:
+#   plan    SECURE pool, the job token (read). Re-checks the PR at run time -- open, armed, same
+#           repo, head unchanged, not autoland-off, not the db group, tier 3 not on a Renovate
+#           major -- fixes the base sha every later job merges, and gathers the failed jobs' logs.
+#   regen   tiers 1+2. The caller's CI pool (CI_RUNNER) or hosted: it RUNS PR CODE (the generators,
+#           the install), the class every CI job already runs as, so it holds NO secret -- only, with
+#           `git-ssh-repos`, a read-only deploy key's ssh-agent for a private dependency (`uv lock`
+#           needs it; the key itself lives only in its load step, ci_kit/git_ssh.sh).
+#   fix     tier 3, only when tier 2 had nothing to push and the plan allows it. The SEALED pool
+#           (one job per boot, rolled back), as the review gate's model job: Claude Code with the
+#           Claude credential and NO push token. It leaves an artifact, never a push.
+#   push    a FRESH runner on the SECURE pool with the push token. Runs no PR code: redoes the
+#           merge, takes only the tier's files, re-checks their scope (ci_kit/pr_apply.py), commits
+#           a merge or fix commit and pushes it fast-forward. Never --force, never a rebase.
+#   report  SECURE pool. The `healed` marker comment, and tier 4: ONE page per head when nothing
+#           was pushed (ci_kit/pr_ladder.py outcome/report). Red when the ladder itself failed.
+#
+# What it never does: push to a fork, a draft, an unarmed or `autoland-off` PR; run Claude on a
+# Renovate major or the database group; change a test to pass, touch .github/, or widen the PR;
+# cancel any run. The repo's CI and its review gate judge every push it makes.
+name: pr-heal
+
+on:
+  workflow_call:
+    inputs:
+      pr:
+        type: number
+        required: true
+      head:
+        description: 'the PR head sha the ladder dispatched for (a moved head is a new budget: skipped)'
+        type: string
+        required: true
+      mode:
+        description: conflict | red
+        type: string
+        required: true
+      claude:
+        description: tier 3 allowed for this dispatch (the pass's budget); the plan re-checks it
+        type: boolean
+        default: false
+      checks:
+        description: the red required checks (red mode), for the record, the page and tier 3
+        type: string
+        default: ""
+      runs:
+        description: 'the red workflow run ids (red mode): tier 3 reads their failed jobs'' logs'
+        type: string
+        default: ""
+      regen:
+        description: >-
+          the caller's regen map, JSON (ci_kit/pr_regen.py): [{"paths": [...], "run": "...", "on":
+          ["conflict", "red"], "touches": [...], "shrink": false}]. Lockfiles (uv, npm, pnpm, NuGet)
+          are built in. Read from the caller's MAIN workflow file, never the PR
+        type: string
+        default: ""
+      install:
+        description: installs the caller's project before the generators and tier 3 ('' = none)
+        type: string
+        default: ""
+      python-version:
+        description: setup-uv python-version ('' = uv's choice)
+        type: string
+        default: ""
+      dotnet-version:
+        description: setup-dotnet version for a NuGet relock or a .NET project ('' = only when a lockfile needs it, 10.0.x)
+        type: string
+        default: ""
+      model:
+        description: tier 3's model
+        type: string
+        default: claude-opus-5-5
+      fix-commands:
+        description: command prefixes tier 3 may run with Bash, one per line ('' = ci_kit/pr_fix.DEFAULT_COMMANDS)
+        type: string
+        default: ""
+      max-fix-lines:
+        description: tier 3's changed-line budget outside conflict resolutions; over it, refused and paged
+        type: number
+        default: 300
+      auth-mode:
+        description: subscription | api | auto ('' = the caller repo's REVIEW_GATE_AUTH variable, else auto)
+        type: string
+        default: ""
+      claude-code-version:
+        description: tier 3's pinned Claude Code CLI
+        type: string
+        # renovate: datasource=npm depName=@anthropic-ai/claude-code
+        default: 2.1.322
+      kit-ref:
+        description: the ci-kit ref whose ci_kit.pr_* modules run every job (a tag, branch or sha)
+        type: string
+        default: v1
+      git-ssh-repos:
+        description: PRIVATE repos the install fetches by https (ci_kit/git_ssh.sh), with the git-ssh-key secret
+        type: string
+        default: ""
+    secrets:
+      token:
+        description: the push token (fine-grained PAT, contents + pull requests RW on the repo); comments too
+        required: true
+      ntfy-url:
+        description: tier 4's page topic ('' = not pushed, named in the record)
+        required: false
+      claude-code-oauth-token:
+        description: tier 3, the subscription credential
+        required: false
+      anthropic-api-key:
+        description: tier 3, the api credential
+        required: false
+      git-ssh-key:
+        description: read-only deploy key(s) for git-ssh-repos, one per repo in order
+        required: false
+    outputs:
+      result:
+        description: pushed | moved | nothing | skipped | declined | refused | failed | exhausted
+        value: ${{ jobs.report.outputs.result }}
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+# every job runs ci_kit from $RUNNER_TEMP, never a `ci_kit/` the PR adds to the checkout
+env:
+  PYTHONSAFEPATH: "1"
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.plan.outputs.go }}
+      why: ${{ steps.plan.outputs.why }}
+      ref: ${{ steps.plan.outputs.ref }}
+      base: ${{ steps.plan.outputs.base }}
+      base-ref: ${{ steps.plan.outputs.base-ref }}
+      claude: ${{ steps.plan.outputs.claude }}
+      title: ${{ steps.plan.outputs.title }}
+      url: ${{ steps.plan.outputs.url }}
+      kit-sha: ${{ steps.kit.outputs.sha }}
+    steps:
+      - name: Fetch ci-kit at kit-ref
+        id: kit
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        with:
+          ref: ${{ inputs.kit-ref }}
+      - name: Plan
+        id: plan
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+          HEAD: ${{ inputs.head }}
+          CLAUDE: ${{ inputs.claude }}
+          RUNS: ${{ inputs.runs }}
+          CHECKS: ${{ inputs.checks }}
+        run: >-
+          python3 -m ci_kit.pr_ladder plan --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD"
+          --claude "$CLAUDE" --runs "$RUNS" --checks "$CHECKS" --context-out "$RUNNER_TEMP/context.md"
+      - uses: actions/upload-artifact@v7
+        if: steps.plan.outputs.go == 'true'
+        with:
+          name: heal-context-${{ inputs.pr }}
+          path: ${{ runner.temp }}/context.md
+          retention-days: 3
+
+  regen:
+    # tiers 1+2. RUNS PR CODE (the generators and the caller's install): the CI class, no secret.
+    name: regen (tiers 1-2)
+    needs: plan
+    if: needs.plan.outputs.go == 'true'
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      state: ${{ steps.collect.outputs.state || steps.prepare.outputs.state || 'failed' }}
+      why: ${{ steps.run.outputs.failed || steps.prepare.outputs.uncovered }}
+    steps:
+      - name: Check out the PR, fetch the base and ci-kit (the plan's sha)
+        id: kit
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        with: {checkout: "${{ inputs.head }}", ref: "${{ needs.plan.outputs.kit-sha }}", base: "${{ needs.plan.outputs.base }}"}
+      - name: Prepare (merge the base, resolve what the map covers)
+        id: prepare
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          CI_KIT_REGEN_MAP: ${{ inputs.regen }}
+          MODE: ${{ inputs.mode }}
+          BASE: ${{ needs.plan.outputs.base }}
+        run: python3 -m ci_kit.pr_regen prepare --mode "$MODE" --base "$BASE" --state-file "$RUNNER_TEMP/regen.json"
+      - uses: astral-sh/setup-uv@v10.3.3
+        if: steps.prepare.outputs.state == 'regen'
+        with:
+          python-version: ${{ inputs.python-version }}
+      - uses: actions/setup-node@v7
+        if: steps.prepare.outputs.state == 'regen' && steps.prepare.outputs.node == 'true'
+        with:
+          node-version: 26
+          package-manager-cache: false
+      - uses: actions/setup-dotnet@v6
+        if: steps.prepare.outputs.state == 'regen' && (steps.prepare.outputs.dotnet == 'true' || inputs.dotnet-version != '')
+        with:
+          dotnet-version: ${{ inputs.dotnet-version || '10.0.x' }}
+      - name: Install + regenerate (PR code; a deploy key only in its own load step)
+        id: run
+        if: steps.prepare.outputs.state == 'regen'
+        continue-on-error: true
+        uses: mjdevaccount/ci-kit/.github/actions/heal-install@v1
+        with:
+          kit: ${{ steps.kit.outputs.dir }}
+          install: ${{ inputs.install }}
+          then: PYTHONSAFEPATH=1 python3 -m ci_kit.pr_regen run --state-file "$RUNNER_TEMP/regen.json"
+          git-ssh-repos: ${{ inputs.git-ssh-repos }}
+          git-ssh-key: ${{ secrets.git-ssh-key }}
+      - name: Collect
+        id: collect
+        if: steps.prepare.outputs.state == 'regen' || steps.prepare.outputs.state == 'merge'
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          FAILED: ${{ steps.run.outcome == 'failure' && (steps.run.outputs.failed || 'a generator or the install') || '' }}
+        run: python3 -m ci_kit.pr_regen collect --state-file "$RUNNER_TEMP/regen.json" --out "$RUNNER_TEMP/heal" --failed "$FAILED"
+      - uses: actions/upload-artifact@v7
+        if: steps.collect.outputs.state == 'regen' || steps.collect.outputs.state == 'merge'
+        with:
+          name: heal-regen-${{ inputs.pr }}
+          path: ${{ runner.temp }}/heal
+          include-hidden-files: true
+          retention-days: 3
+
+  claim:
+    # tier 3's ONE attempt per head, recorded BEFORE Claude runs (token-only; the fix job holds none)
+    name: claim (tier 3)
+    needs: [plan, regen]
+    if: >-
+      !cancelled() && needs.plan.outputs.go == 'true' && needs.plan.outputs.claude == 'true'
+      && needs.regen.outputs.state != 'regen' && needs.regen.outputs.state != 'merge'
+    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
+    timeout-minutes: 5
+    outputs:
+      claimed: ${{ steps.claim.outputs.claimed || 'false' }}
+      why: ${{ steps.claim.outputs.why || 'the claim step did not finish' }}
+      attempt: ${{ github.run_attempt }}
+    steps:
+      - name: Fetch ci-kit (the plan's sha)
+        id: kit
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        with:
+          ref: ${{ needs.plan.outputs.kit-sha }}
+      - name: Record the attempt, or refuse a second one at this head
+        id: claim
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          GH_TOKEN: ${{ secrets.token }}
+          PR: ${{ inputs.pr }}
+          HEAD: ${{ inputs.head }}
+        run: python3 -m ci_kit.pr_ladder claim --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD" --run "$GITHUB_RUN_ID"
+
+  fix:
+    # tier 3: the review gate's harness (the sealed pool, the credential toggle, the pinned CLI).
+    # Only behind a claim made in THIS attempt: 'Re-run failed jobs' reuses the old claim's outputs, and
+    # its attempt number no longer matches, so a re-run never runs Claude twice at one head.
+    name: fix (tier 3)
+    needs: [plan, regen, claim]
+    if: >-
+      !cancelled() && needs.claim.outputs.claimed == 'true'
+      && needs.claim.outputs.attempt == format('{0}', github.run_attempt)
+    runs-on: ${{ vars.CI_SEALED_RUNNER && fromJSON('["self-hosted","home-sealed"]') || 'ubuntu-latest' }}
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      state: ${{ steps.fix.outputs.state || 'failed' }}
+      why: ${{ steps.fix.outputs.why || 'the fix step did not finish' }}
+    steps:
+      - name: Check out the PR, fetch the base and ci-kit (the plan's sha)
+        id: kit
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        with: {checkout: "${{ inputs.head }}", ref: "${{ needs.plan.outputs.kit-sha }}", base: "${{ needs.plan.outputs.base }}"}
+      - uses: actions/download-artifact@v8
+        with:
+          name: heal-context-${{ inputs.pr }}
+          path: ${{ runner.temp }}/context
+      - name: Prepare (merge the base, markers kept)
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          MODE: ${{ inputs.mode }}
+          BASE: ${{ needs.plan.outputs.base }}
+        run: python3 -m ci_kit.pr_fix prepare --mode "$MODE" --base "$BASE" --state-file "$RUNNER_TEMP/fix.json"
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: ${{ inputs.python-version }}
+          enable-cache: true
+      # node: the CLI below (the sealed image has none) and an npm project
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          package-manager-cache: false
+      - uses: actions/setup-dotnet@v6
+        if: inputs.dotnet-version != ''
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+      - name: Install the project (a deploy key only in its own load step)
+        continue-on-error: true
+        uses: mjdevaccount/ci-kit/.github/actions/heal-install@v1
+        with:
+          kit: ${{ steps.kit.outputs.dir }}
+          install: ${{ inputs.install }}
+          git-ssh-repos: ${{ inputs.git-ssh-repos }}
+          git-ssh-key: ${{ secrets.git-ssh-key }}
+      - name: Install Claude Code
+        continue-on-error: true
+        env:
+          CLAUDE_CODE_VERSION: ${{ inputs.claude-code-version }}
+        run: npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" && claude --version
+      - name: Choose the credential
+        id: cred
+        env:
+          HAS_OAUTH: ${{ secrets.claude-code-oauth-token != '' }}
+          HAS_KEY: ${{ secrets.anthropic-api-key != '' }}
+          AUTH_MODE: ${{ inputs.auth-mode || vars.REVIEW_GATE_AUTH }}
+        run: |
+          case "${AUTH_MODE:-auto}" in
+            subscription) c=$([ "$HAS_OAUTH" = true ] && echo oauth) ;;
+            api) c=$([ "$HAS_KEY" = true ] && echo api_key) ;;
+            *) if [ "$HAS_OAUTH" = true ]; then c=oauth; elif [ "$HAS_KEY" = true ]; then c=api_key; else c=; fi ;;
+          esac
+          echo "credential=${c:-}" >> "$GITHUB_OUTPUT"
+      - name: Fix
+        id: fix
+        timeout-minutes: 42
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          # ONLY the chosen credential reaches the step (as the review gate)
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ steps.cred.outputs.credential == 'oauth' && secrets.claude-code-oauth-token || '' }}
+          ANTHROPIC_API_KEY: ${{ steps.cred.outputs.credential == 'api_key' && secrets.anthropic-api-key || '' }}
+          CI_KIT_REGEN_MAP: ${{ inputs.regen }}
+          CI_KIT_FIX_COMMANDS: ${{ inputs.fix-commands }}
+          CI_KIT_PR: ${{ inputs.pr }}
+          CI_KIT_PR_TITLE: ${{ needs.plan.outputs.title }}
+          CI_KIT_BASE_REF: ${{ needs.plan.outputs.base-ref }}
+          MODEL: ${{ inputs.model }}
+          MAX_LINES: ${{ inputs.max-fix-lines }}
+        run: >-
+          python3 -m ci_kit.pr_fix run --state-file "$RUNNER_TEMP/fix.json" --out "$RUNNER_TEMP/heal"
+          --model "$MODEL" --context "$RUNNER_TEMP/context/context.md" --max-lines "$MAX_LINES"
+      - uses: actions/upload-artifact@v7
+        if: steps.fix.outputs.state == 'fixed'
+        with:
+          name: heal-fix-${{ inputs.pr }}
+          path: ${{ runner.temp }}/heal
+          include-hidden-files: true
+          retention-days: 3
+
+  push:
+    # a FRESH runner with the push token; no PR code runs here (git + ci-kit at the plan's sha)
+    name: push
+    needs: [plan, regen, fix]
+    if: >-
+      !cancelled() && needs.plan.outputs.go == 'true'
+      && (needs.regen.outputs.state == 'regen' || needs.regen.outputs.state == 'merge' || needs.fix.outputs.state == 'fixed')
+    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
+    timeout-minutes: 10
+    concurrency:
+      group: pr-heal-push-${{ github.repository }}-${{ inputs.pr }}
+      cancel-in-progress: false
+    outputs:
+      result: ${{ steps.apply.outputs.result || 'failed' }}
+      why: ${{ steps.apply.outputs.why || 'the push step did not finish' }}
+      sha: ${{ steps.apply.outputs.sha }}
+    steps:
+      - name: Check out the PR, fetch the base and ci-kit (the plan's sha)
+        id: kit
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        with: {checkout: "${{ needs.plan.outputs.ref }}", ref: "${{ needs.plan.outputs.kit-sha }}", base: "${{ needs.plan.outputs.base }}"}
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.fix.outputs.state == 'fixed' && format('heal-fix-{0}', inputs.pr) || format('heal-regen-{0}', inputs.pr) }}
+          path: ${{ runner.temp }}/heal
+      - name: Apply and push (fast-forward only)
+        id: apply
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          CI_KIT_PUSH_TOKEN: ${{ secrets.token }}
+          CI_KIT_REGEN_MAP: ${{ inputs.regen }}
+          HEAD: ${{ inputs.head }}
+          BASE: ${{ needs.plan.outputs.base }}
+          REF: ${{ needs.plan.outputs.ref }}
+          MAX_LINES: ${{ inputs.max-fix-lines }}
+        run: >-
+          python3 -m ci_kit.pr_apply --artifact "$RUNNER_TEMP/heal" --head "$HEAD" --base "$BASE" --ref "$REF"
+          --repo "$GITHUB_REPOSITORY" --max-lines "$MAX_LINES"
+
+  report:
+    name: report (tier 4)
+    needs: [plan, regen, claim, fix, push]
+    if: always()
+    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
+    timeout-minutes: 5
+    outputs:
+      result: ${{ steps.report.outputs.result }}
+    steps:
+      - name: Fetch ci-kit
+        id: kit
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        with:
+          ref: ${{ needs.plan.outputs.kit-sha || inputs.kit-ref }}
+      - name: Record, and page once per head when nothing was pushed
+        id: report
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          GH_TOKEN: ${{ secrets.token }}
+          NTFY_URL: ${{ secrets.ntfy-url }}
+          PR: ${{ inputs.pr }}
+          HEAD: ${{ inputs.head }}
+          CHECKS: ${{ inputs.checks }}
+          GO: ${{ needs.plan.outputs.go }}
+          PLAN_WHY: ${{ needs.plan.outputs.why }}
+          REGEN: ${{ needs.regen.outputs.state }}
+          REGEN_WHY: ${{ needs.regen.outputs.why }}
+          FIX: ${{ needs.fix.outputs.state }}
+          FIX_WHY: ${{ needs.fix.outputs.why }}
+          PUSH: ${{ needs.push.outputs.result }}
+          PUSH_WHY: ${{ needs.push.outputs.why }}
+          CLAUDE: ${{ needs.plan.outputs.claude }}
+          CLAIMED: ${{ needs.claim.outputs.claimed }}
+          CLAIM_WHY: ${{ needs.claim.outputs.why }}
+          CLAIM_ATTEMPT: ${{ needs.claim.outputs.attempt }}
+          URL: ${{ needs.plan.outputs.url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          python3 -m ci_kit.pr_ladder report --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD" --checks "$CHECKS"
+          --go "$GO" --plan-why "$PLAN_WHY" --regen "$REGEN" --regen-why "$REGEN_WHY" --fix "$FIX" --fix-why "$FIX_WHY"
+          --push "$PUSH" --push-why "$PUSH_WHY" --claude "$CLAUDE" --url "$URL" --run-url "$RUN_URL"
+          --claimed "$CLAIMED" --claim-why "$CLAIM_WHY" --claim-attempt "$CLAIM_ATTEMPT" --run-attempt "$GITHUB_RUN_ATTEMPT"

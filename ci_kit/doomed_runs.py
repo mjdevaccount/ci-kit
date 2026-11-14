@@ -1,4 +1,4 @@
-"""Cancel the PR runs that can never be the ones that merge -- and whose result nothing reads (v1.32.0).
+"""Cancel the PR runs that can never be the ones that merge -- and whose result nothing reads (v1.34.0).
 
 WHY (operator, 2026-11-14: "if its not gonna merge with 100% certainty... DO THE SMART AND
 EFFICIENT MOVE"). local-mcp#499 started its full CI at 19:17:48Z; main moved 54s later. Under

@@ -55,7 +55,7 @@ import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ci_kit import doomed_runs, pr_heal, pr_hold, pr_list, pr_queue, pr_renovate, pr_sched, train_kick
+from ci_kit import doomed_runs, pr_heal, pr_hold, pr_ladder, pr_list, pr_queue, pr_renovate, pr_sched, train_kick
 from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
 from ci_kit.ntfy import page  # noqa: F401 -- re-exported: _update_one pages through this name
 
@@ -83,6 +83,7 @@ class Options:
     train_min_batch: int = train_kick.MIN_BATCH
     # cancel the `pull_request` runs at heads that cannot merge under strict protection (doomed_runs)
     cancel_doomed: bool = False  # main() turns it ON (env CI_KIT_CANCEL_DOOMED, default true)
+    ladder: pr_ladder.Config = pr_ladder.Config()  # the heal ladder (pr_ladder): off unless the caller runs pr-heal.yml
 
 
 @dataclass(frozen=True)
@@ -257,7 +258,7 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
     return q
 
 
-def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
+def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing: list[dict] | None = None) -> int:
     prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout))
     # Renovate's automerge PRs JOIN the serial queue (ci_kit/pr_renovate.py): armed here, so no
     # session arms them by hand. Only with a queue: without one Renovate merges itself, on EVERY check
@@ -269,8 +270,8 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     parked = frozenset(int(p["number"]) for p in prs if _has(p, pr_sched.PARKED))
     base = pr_hold.default_branch(repo, _gh_read) if opts.hold or opts.scarce else None
     try:  # reads only; the hold (the head's `queue/position` success) runs whatever happens here
-        heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read,
-                                            pr_heal.comments_of, summary)
+        heal, errors = pr_heal.assess_armed(repo, armed + renovate_pool(prs, opts), opts.required, opts.rerun_limit, _gh_read,
+                                            pr_heal.comments_of, summary, ladder=opts.ladder.on)
     except Exception:  # noqa: BLE001 -- whatever it was, the head gets its success, then it re-raises
         if opts.hold:
             pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of,
@@ -300,9 +301,11 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
                        f"{len(q.held)} held")
         summary += [f"#{p['number']}: in flight against current main" for p in q.in_flight]
         summary += [f"#{p['number']}: held, {why}" for p, why in q.held]
-    attempted, updated, err = _drive(repo, q, head, opts, relock, summary, cancel)
+    attempted, updated, conflicts, err = _drive(repo, q, head, opts, relock, summary, cancel)
     errors += err + (cancel.errors if cancel else 0)
-    errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, pr_heal.write, summary)
+    e, taken = _ladder(repo, heal, conflicts + [p for p in renovate_pool(prs, opts) if _dirty(p)], opts, summary, healing)
+    errors += e
+    errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, pr_heal.write, summary, frozenset(taken))
     if opts.scarce or parked:  # parked work is re-run even with the scheduler switched off: never strand
         errors += pr_sched.pass_(
             repo, prs, dict(opts.scarce), _gh_read, pr_heal.write, summary,
@@ -318,16 +321,16 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     return 1 if errors else 0
 
 
-def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock: list[int],
-           summary: list[str], cancel: doomed_runs.Canceller | None = None) -> tuple[set[int], set[int], int]:
-    """The update loop: (attempted, updated, errors). After each update the head it replaced is
-    a head that can never merge, so its `pull_request` runs are cancelled (doomed_runs)."""
+def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock: list[int], summary: list[str],
+           cancel: doomed_runs.Canceller | None = None) -> tuple[set[int], set[int], list[dict], int]:
+    """The update loop: (attempted, updated, conflicts, errors). After each update the head it
+    replaced is a head that can never merge, so its `pull_request` runs are cancelled (doomed_runs)."""
     errors = 0
     tracker = ""
     if opts.tracker:
         tracker = _gh("issue", "view", str(opts.tracker), "-R", repo, "--json", "body", "-q",
                       ".body", check=False).stdout
-    todo, spare, attempted, updated = list(q.update), list(q.spare), set(), set()
+    todo, spare, attempted, updated, conflicts = list(q.update), list(q.spare), set(), set(), []
     while todo:
         p = todo.pop(0)
         n = p["number"]
@@ -346,15 +349,16 @@ def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock:
         updated |= {n} if kind == "updated" else set()
         if kind == "updated" and cancel:
             cancel.superseded(p)
+        conflicts += [p] if kind == "conflict" else []
         errors += kind == "error"
         if line:
             summary.append(line)
-    return attempted, updated, errors
+    return attempted, updated, conflicts, errors
 
 
 def _lazy_default(repo: str, base: str | None) -> Callable[[], str]:
     """The default branch, read at most once and only when asked: the plan's own `base` stays
-    exactly what hold/scarce made it (review of 1.32.0, finding 2)."""
+    exactly what hold/scarce made it (review of 1.34.0, finding 2)."""
     got: list[str] = []
 
     def read() -> str:
@@ -362,6 +366,46 @@ def _lazy_default(repo: str, base: str | None) -> Callable[[], str]:
             got.append(base or pr_hold.default_branch(repo, _gh_read) or "main")
         return got[0]
     return read
+
+
+def _ladder(repo: str, heal: pr_heal.Heal, conflicts: list[dict], opts: Options, summary: list[str],
+            healing: list[dict] | None) -> tuple[int, set[int]]:
+    """Tiers 1-4 (ci_kit/pr_ladder.py): each dispatched row goes to the `heal` output, which the
+    caller's pr-heal.yml call runs. (errors, the PR numbers the ladder took). Off = (0, none)."""
+    if not opts.ladder.on:
+        return 0, set()
+    rows, errors, taken = pr_ladder.dispatch(repo, ladder_candidates(heal, conflicts), opts.ladder,
+                                             lambda r, n: heal[n][1] if n in heal else pr_heal.comments_of(r, n),
+                                             pr_heal.write, summary, page)
+    if healing is not None:
+        healing += rows
+    return errors, taken
+
+
+def renovate_pool(prs: list[dict], opts: Options) -> list[dict]:
+    """With the heal ladder on, the Renovate PRs Renovate will merge itself: never armed (it merges
+    them, `platformAutomerge: false`), so the armed pass never saw them red or conflicted. Their
+    machinery reds get pr_heal's rerun, their judgment reds and conflicts the ladder. Pure."""
+    if not opts.ladder.on:
+        return []
+    return [p for p in prs if not p.get("autoMergeRequest") and not p.get("isCrossRepository")
+            and pr_ladder.is_renovate(p) and pr_ladder.armed(p)]
+
+
+def _dirty(p: dict) -> bool:
+    return (p.get("mergeStateStatus") or "").upper() == "DIRTY"
+
+
+def ladder_candidates(heal: pr_heal.Heal, conflicts: list[dict]) -> list[pr_ladder.Candidate]:
+    """What the heal ladder is offered: each PR this pass found conflicting, and each armed PR whose
+    red is JUDGMENT (a machinery red is pr_heal's rerun; a parked one the scheduler's). Pure."""
+    out = [pr_ladder.Candidate(p, "conflict") for p in conflicts]
+    for _, (v, _, p) in sorted(heal.items()):
+        if v.kind == "judgment":
+            checks = ", ".join(c for r in v.reds for c in r.checks) or ", ".join(v.unrunnable) or \
+                ", ".join(pr_heal.red_checks(p.get("statusCheckRollup")))
+            out.append(pr_ladder.Candidate(p, "red", checks, ",".join(str(r.run) for r in v.reds)))
+    return out
 
 
 def _has(p: dict, label: str) -> bool:
@@ -410,6 +454,8 @@ def _update_one(repo: str, p: dict, opts: Options, tracker: str, relock: list[in
         if state.returncode == 0 and state.stdout.strip() not in ("", "OPEN"):
             return "gone", f"#{n}: {state.stdout.strip().lower()} during the update, skipped"
     add, do_page, remove = actions_for(o, labelled)
+    if do_page and opts.ladder.on and not pr_ladder.blocked(p):
+        do_page = False  # the heal ladder takes the conflict; its tier 4 is the page
     line = f"#{n}: {o.kind}" + (f" ({o.detail})" if o.detail else "")
     if add:
         added, created = add_label(repo, n, opts.label)
@@ -497,11 +543,13 @@ def main(argv: list[str] | None = None) -> int:
                    # env vars, never flags: an older @v1 tool would refuse a flag it does not know
                    train_workflow=os.environ.get("CI_KIT_TRAIN_WORKFLOW", "").strip(),
                    train_min_batch=int(os.environ.get("CI_KIT_TRAIN_MIN_BATCH", "").strip() or train_kick.MIN_BATCH),
-                   cancel_doomed=os.environ.get("CI_KIT_CANCEL_DOOMED", "true").strip().lower() not in ("false", "0", "no"))
+                   cancel_doomed=os.environ.get("CI_KIT_CANCEL_DOOMED", "true").strip().lower() not in ("false", "0", "no"),
+                   ladder=pr_ladder.Config.from_env())
     summary: list[str] = []
     relock: list[int] = []
+    healing: list[dict] = []
     try:
-        rc = run(args.repo, summary, relock, opts)
+        rc = run(args.repo, summary, relock, opts, healing)
     except (subprocess.CalledProcessError, ValueError, KeyError) as e:
         # gh's stderr is the only place the cause is named (a token scope, a GraphQL limit);
         # without it the run says only "returned non-zero exit status 1" (2026-10-24)
@@ -514,6 +562,8 @@ def main(argv: list[str] | None = None) -> int:
         # the NEWLY labelled PRs: a caller may relock each (a lockfile-only conflict)
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
             fh.write(f"relock={json.dumps(relock)}\n")
+            # the heal ladder's dispatches (ci_kit/pr_ladder.py): one pr-heal.yml call per row
+            fh.write(f"heal={json.dumps(healing)}\n")
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
             fh.write("### PR auto-update\n\n" + text + "\n")

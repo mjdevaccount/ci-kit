@@ -142,6 +142,22 @@ def judge(stdout: str, stderr: str, returncode: int | str) -> tuple[str, str]:
     return "cause", _scrub(why)[:400]
 
 
+def run(argv_: list[str], text: str, cwd: Path, env: dict[str, str], timeout: int = CLI_TIMEOUT
+        ) -> tuple[str, str, int | str]:
+    """The CLI headless on `text`: (stdout, stderr, exit code | 'timeout' | 'not-run'). Never raises:
+    a hang keeps what it streamed, a CLI that is not installed is a cause, not a traceback. Shared
+    with the heal ladder's fixer (ci_kit/pr_fix.py)."""
+    try:
+        p = subprocess.run(argv_, input=text, cwd=cwd, env=env, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+        return p.stdout, p.stderr, p.returncode
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        return out, f"timed out after {timeout}s", "timeout"
+    except OSError as e:                              # the CLI is not installed
+        return "", f"{type(e).__name__}: {e}", "not-run"
+
+
 def _usage(stdout: str) -> str:
     _, result, _ = parse_stream(stdout)
     if not result:
@@ -168,16 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         tools.emit("cause", f"KIND=error review claude: {e}")
         return 1
-    try:
-        p = subprocess.run(argv_, input=prompt, cwd=cwd, env=cli_env(dict(os.environ)),
-                           capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=CLI_TIMEOUT)
-        stdout, stderr, code = p.stdout, p.stderr, p.returncode
-    except subprocess.TimeoutExpired as e:
-        stdout = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        stderr, code = f"timed out after {CLI_TIMEOUT}s", "timeout"
-    except OSError as e:                              # the CLI is not installed
-        stdout, stderr, code = "", f"{type(e).__name__}: {e}", "not-run"
+    stdout, stderr, code = run(argv_, prompt, cwd, cli_env(dict(os.environ)))
     tools.summary(_usage(stdout))
     key, value = judge(stdout, stderr, code)
     tools.emit(key, value)
