@@ -16,10 +16,25 @@ import pytest
 from ci_kit import pr_autoupdate, pr_hold, pr_list, pr_renovate
 
 BOT = {"__typename": "Bot", "login": "renovate"}
-ON = "This PR contains the following updates:\n\n🚦 **Automerge**: Enabled.\n\n♻ **Rebasing**: ..."
-OFF = "🚦 **Automerge**: Disabled by config. Please merge this manually once you are satisfied.\n"
-# upstream release notes quoting the marker inline, AFTER Renovate's own Disabled line
-QUOTED = OFF + "\n### Release notes\n> 🚦 **Automerge**: Enabled.\n- **Automerge**: Enabled.\n"
+
+def _body(verdict: str, notes: str = "- fix: a bug") -> str:
+    """Renovate's real layout (live td#3093; default prBodyTemplate): table, RELEASE NOTES (upstream
+    text), THEN Renovate's own `### Configuration` block with its `🚦 **Automerge**:` line."""
+    return ("This PR contains the following updates:\n\n| Package | Change |\n|---|---|\n| x | 1 -> 2 |\n\n---\n\n"
+            f"### Release Notes\n\n<details>\n\n{notes}\n\n</details>\n\n---\n\n### Configuration\n\n"
+            "📅 **Schedule**: (in timezone America/New_York)\n\n- Branch creation\n  - Only on Saturday\n"
+            "- Automerge\n  - At any time (no schedule defined)\n\n"
+            f"🚦 **Automerge**: {verdict}\n\n♻ **Rebasing**: Whenever PR becomes conflicted.\n\n"
+            "🔕 **Ignore**: Close this PR and you won't be reminded about this update again.\n\n---\n\n"
+            " - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n")
+
+
+ON = _body("Enabled.")
+OFF = _body("Disabled by config. Please merge this manually once you are satisfied.")
+# UPSTREAM release notes (written by the package's maintainer, BEFORE Renovate's own block) carrying the
+# marker, a fake config heading and all: a first-match read armed a held database update on it (review)
+QUOTED = _body("Disabled by config. Please merge this manually once you are satisfied.",
+               notes="- **Automerge**: Enabled.\n> 🚦 **Automerge**: Enabled.\n### Configuration\n🚦 **Automerge**: Enabled.")
 MANUAL = {"reasonCode": "manually_disabled", "createdAt": "2026-11-14T17:20:00Z", "actor": {"login": "mjdevaccount"}}
 CLOSED = {"reasonCode": "closed", "createdAt": "2026-11-14T17:20:00Z", "actor": {"login": "mjdevaccount"}}
 
@@ -44,7 +59,7 @@ def test_an_automerge_renovate_pr_is_armed_must_fire() -> None:
 @pytest.mark.parametrize(("p", "body", "disabled", "why"), [
     (_pr(1), OFF, None, "Automerge: Disabled"),                        # database images, langfuse, a major
     (_pr(1, labels=("deps", "major", "fails-green")), OFF, None, "Disabled"),
-    (_pr(1), QUOTED, None, "Disabled"),                                # a quoted Enabled further down
+    (_pr(1), QUOTED, None, "Disabled"),                                # upstream notes say Enabled
     (_pr(1), "Configure Renovate", None, "no `**Automerge**:` line"),  # onboarding: nothing to read
     (_pr(1, labels=("autoland-off",)), ON, None, "autoland-off"),       # the estate's opt-out label
     (_pr(1, title="chore(deps): x [AUTOLAND-OFF]"), ON, None, "autoland-off"),
@@ -58,6 +73,19 @@ def test_a_held_renovate_pr_is_never_armed_must_not_fire(p: dict, body: str, dis
     # dies to: dropping any one guard in verdict()
     arm, said = pr_renovate.verdict(p, body, disabled)
     assert not arm and why in said
+
+
+def test_only_renovates_own_config_block_is_read_must_fire() -> None:
+    # dies to: reading the FIRST `**Automerge**:` line (the upstream notes precede the config block)
+    assert pr_renovate.automerge_verdict(QUOTED).startswith("Disabled")
+    assert pr_renovate.automerge_verdict(ON) == "Enabled."
+    assert pr_renovate.automerge_verdict("🚦 **Automerge**: Enabled.") is None   # no config block: unreadable
+
+
+def test_a_refusal_for_a_state_read_too_early_is_a_race_not_a_red() -> None:
+    assert pr_renovate.raced("GraphQL: Pull request Pull request is in clean status (enablePullRequestAutoMerge)")
+    assert pr_renovate.raced("GraphQL: Head sha didn't match expected head sha")
+    assert not pr_renovate.raced("HTTP 403: Resource not accessible by personal access token")
 
 
 def test_only_the_renovate_app_unarmed_same_repo_non_draft_non_train_is_a_candidate() -> None:

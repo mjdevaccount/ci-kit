@@ -5,6 +5,7 @@
 #
 #   on:
 #     push: { branches: [main] }
+#     pull_request_target: { types: [auto_merge_enabled] }   # arming starts a pass (v1.31.0)
 #     workflow_dispatch:
 #   concurrency: { group: pr-autoupdate, cancel-in-progress: false }
 #   permissions: { contents: read, pull-requests: read, checks: read, statuses: read }
@@ -41,6 +42,12 @@
 # armed: Automerge Disabled (the database group, majors, `fails-green`), `autoland-off`, a hand
 # `--disable-auto`, a conflict. A refused arm is a red run. Needs nothing new: the `token` already
 # holds Pull requests RW.
+#
+# ARMING STARTS THE QUEUE (v1.31.0): without `pull_request_target: { types: [auto_merge_enabled] }`
+# in the caller's `on:`, a newly armed PR waits for the next push to main or check-workflow run --
+# arming is neither. pull_request_target runs the BASE copy of the caller with its secrets; this
+# workflow checks out no PR code, so that is safe. Guard the caller's job against a fork's PR:
+#   if: github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository
 #
 # UNCONFIGURED IS RED: with no `token` the job fails naming it. GITHUB_TOKEN is NOT a fallback --
 # a push made with it fires no workflow, so every updated PR would wait on checks that never

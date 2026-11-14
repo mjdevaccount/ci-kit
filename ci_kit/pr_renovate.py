@@ -13,10 +13,11 @@ THE RULE, per open Renovate PR (author the Renovate GitHub App -- a Bot, login `
 who registered that name is not it), unarmed, same-repo, not a draft, not a train:
   * HELD, never armed -- each named in the summary, every pass:
       - `autoland-off` as a label or in the title (the estate's opt-out; Renovate's stop label too);
-      - Renovate's own verdict is not "Enabled.": the FIRST whole-line `**Automerge**:` in the body,
-        which Renovate writes from the preset's automerge for THAT update (database images,
-        langfuse, windmill, a major, `fails-green` all say Disabled). Upstream release notes quoted
-        further down cannot flip it (mirrors mcp scripts/pr_reconcile.py `automerge_enabled`);
+      - Renovate's own verdict is not "Enabled.": the `🚦 **Automerge**:` line of its config block
+        (after the LAST `### Configuration` heading), which Renovate writes from the preset's
+        automerge for THAT update (database images, langfuse, windmill, a major, `fails-green` all
+        say Disabled). The changelogs come BEFORE that block, so upstream text cannot flip it
+        (`automerge_verdict`);
       - no such line at all (Renovate's onboarding PR, a PR this cannot read);
       - auto-merge was turned off BY HAND since (the PR's last AutoMergeDisabledEvent has
         reasonCode `manually_disabled`): a session's `gh pr merge --disable-auto` is a hold, as the
@@ -25,7 +26,9 @@ who registered that name is not it), unarmed, same-repo, not a draft, not a trai
       - CLEAN / UNSTABLE / HAS_HOOKS: GitHub would merge it the moment it is armed (gh's `--auto`
         merges an UNSTABLE PR at once -- past a red non-required check). Never in a hold repo (an
         unarmed PR's `queue/position` is pending, so it is BLOCKED); elsewhere it is armed once main
-        moves, and mcp pr_reconcile lands a CLEAN one when nothing is in flight.
+        moves, and mcp pr_reconcile lands a CLEAN one when nothing is in flight. This is the one
+        hold that is NOT an error: a summary line only, so in a repo without the hold whose PR stays
+        CLEAN the witness is pr_reconcile (`land`), not this run.
   * otherwise ARMED: GraphQL `enablePullRequestAutoMerge` (SQUASH, `expectedHeadOid` = the head this
     pass read), never `gh pr merge --auto`, which merges a CLEAN or UNSTABLE PR immediately. The
     mutation's answer is the proof: no `autoMergeRequest` back is an error. The PR is marked armed in
@@ -38,7 +41,9 @@ gets at open; a red required check keeps it from landing exactly as it keeps the
 
 TELEMETRY. What fails silently: an automerge PR that stays unarmed. Here every arm the token is
 refused, every answer without `autoMergeRequest`, and every PR whose body/timeline could not be read
-is an ERROR (`::error::`, a red pr-autoupdate run, whose red streak mcp ci-schedule-audit reads).
+is an ERROR (`::error::`, a red pr-autoupdate run, whose red streak mcp ci-schedule-audit reads) --
+except GitHub refusing because the PR turned mergeable-now or its head moved since the list was read
+(`raced`): the next pass reads the new state, so that is a summary line, not a red.
 Each held PR is named in the run summary with why. From outside: mcp pr_reconcile's `stalled`
 finding (armed hours and still open) and `red` / `conflict` findings for any Renovate PR.
 
@@ -57,7 +62,10 @@ from ci_kit.pr_sched import RENOVATE
 
 Gh = Callable[..., subprocess.CompletedProcess]
 
-_AUTOMERGE_LINE = re.compile(r"^\W*\*\*Automerge\*\*: (.*?)\s*$", re.M)
+# Renovate's own config block: the LAST `### Configuration` heading (prBodyTemplate puts it AFTER the
+# changelogs, whose upstream text may carry any heading or marker), then its `🚦 **Automerge**:` line
+_CONFIG = re.compile(r"^### Configuration[ \t]*$", re.M)
+_AUTOMERGE_LINE = re.compile(r"^\U0001f6a6 \*\*Automerge\*\*: (.*?)\s*$", re.M)
 ENABLED = "Enabled."
 MANUAL = "manually_disabled"  # AutoMergeDisabledEvent.reasonCode of a hand `--disable-auto`
 # GitHub merges these the moment auto-merge is enabled (gh pr merge: isImmediatelyMergeable)
@@ -91,9 +99,17 @@ def candidate(p: dict) -> bool:
 
 
 def automerge_verdict(body: str) -> str | None:
-    """Renovate's own verdict: the FIRST whole-line `**Automerge**:` (its config block precedes the
-    release notes), e.g. 'Enabled.' or 'Disabled by config. ...'. None = no such line. Pure."""
-    m = _AUTOMERGE_LINE.search(body or "")
+    """Renovate's own verdict, e.g. 'Enabled.' or 'Disabled by config. ...'; None = unreadable. Pure.
+
+    Read ONLY after the LAST `### Configuration` heading: Renovate's default prBodyTemplate is
+    header, table, notes, CHANGELOGS, then the config block, so upstream release notes (text the
+    upstream maintainer writes) come FIRST and may carry `- **Automerge**: Enabled.` -- a first-match
+    read armed a held database update on it (reviewer, 2026-11-14, on the live td#3093 layout).
+    Nothing after the config block is upstream text (controls, footer)."""
+    heads = list(_CONFIG.finditer(body or ""))
+    if not heads:
+        return None
+    m = _AUTOMERGE_LINE.search(body, heads[-1].end())
     return m.group(1) if m else None
 
 
@@ -128,6 +144,16 @@ def _detail(repo: str, n: int, read: Gh) -> tuple[str, dict | None]:
     pr = json.loads(r.stdout or "{}")["data"]["repository"]["pullRequest"]
     nodes = ((pr.get("timelineItems") or {}).get("nodes")) or []
     return str(pr.get("body") or ""), (nodes[-1] if nodes else None)
+
+
+# GitHub's refusals for a state this pass read a moment too early: the next pass decides afresh
+_RACE = ("clean status", "unstable status", "has_hooks status", "head sha", "head ref", "expected head")
+
+
+def raced(err: str) -> bool:
+    """A refused arm that is a race, not a failure: the PR became mergeable-now (an UNKNOWN that was
+    CLEAN) or Renovate pushed after the list was read (expectedHeadOid). Pure."""
+    return any(r in err.lower() for r in _RACE)
 
 
 def _arm(p: dict, write: Gh) -> str:
@@ -166,6 +192,9 @@ def join(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str]) ->
             summary.append(f"#{n}: Renovate PR left out of the queue -- {why}")
             continue
         err = _arm(p, write)
+        if err and raced(err):
+            summary.append(f"#{n}: Renovate PR not armed this pass -- GitHub: {err[:160]} (decided afresh next pass)")
+            continue
         if err:
             errors += 1
             print(f"::error::#{n}: Renovate automerge PR could not be armed, so it is NOT in the PR queue: {err}")

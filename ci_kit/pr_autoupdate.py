@@ -156,7 +156,9 @@ def page_text(repo: str, pr: dict, row: str, opts: Options) -> tuple[str, str]:
 
 
 def _gh(*args: str, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["gh", *args], check=check, capture_output=True, text=True, env=env)
+    # utf-8, never the locale: a Renovate body's emoji in cp1252 made its verdict unreadable (review 2026-11-14)
+    return subprocess.run(["gh", *args], check=check, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", env=env)
 
 
 READ_TOKEN = "CI_KIT_READ_TOKEN"
