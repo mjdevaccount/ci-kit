@@ -52,7 +52,7 @@ import sys
 import urllib.parse
 from dataclasses import dataclass
 
-from ci_kit import pr_heal, pr_list, pr_queue, pr_sched
+from ci_kit import pr_heal, pr_hold, pr_list, pr_queue, pr_sched
 from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
 from ci_kit.ntfy import page  # noqa: F401 -- re-exported: _update_one pages through this name
 
@@ -74,6 +74,7 @@ class Options:
     head_stall_min: float = 15.0
     before: str = ""  # a push to main's previous sha (the out-of-queue merge check)
     sha: str = ""
+    hold: bool = False  # the queue hold: required status `queue/position`, success on the head only (pr_hold)
 
 
 @dataclass(frozen=True)
@@ -250,13 +251,27 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout))
     armed = [p for p in prs if p.get("autoMergeRequest") and not p.get("isCrossRepository")]
     summary.append(f"{len(armed)} armed PR(s) of {len(prs)} open")
-    heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read,
-                                        pr_heal.comments_of, summary)
     # a PARKED PR (the scheduler cancelled or deferred its run) is eligible like a machinery red:
     # nothing in it is the author's to fix, and the update is its fresh run
     parked = frozenset(int(p["number"]) for p in prs if _has(p, pr_sched.PARKED))
-    q = _train_plan(prs, armed, summary, opts, pr_heal.machinery(heal) | parked)
-    head = _head_first(repo, prs, q, opts, summary)
+    base = pr_hold.default_branch(repo, _gh_read) if opts.hold or opts.scarce else None
+    try:  # reads only; the hold (the head's `queue/position` success) runs whatever happens here
+        heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read,
+                                            pr_heal.comments_of, summary)
+    except Exception:  # noqa: BLE001 -- whatever it was, the head gets its success, then it re-raises
+        if opts.hold:
+            pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of,
+                         pr_queue.blocked(prs, opts.required, parked, base), base=base,
+                         stale_s=opts.head_stall_min * 120, required=opts.required)
+        raise
+    machinery = pr_heal.machinery(heal)
+    # ONE head for the hold, the updater and the scheduler: the lowest armed PR that can land
+    skip = pr_queue.blocked(prs, opts.required, machinery | parked, base)
+    if opts.hold:
+        errors += pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of, skip,
+                               base=base, stale_s=opts.head_stall_min * 120, required=opts.required)
+    q = _train_plan(prs, armed, summary, opts, machinery | parked)
+    head = _head_first(repo, prs, q, opts, summary, skip)
     if opts.max_in_flight > 0:
         summary.append(f"queue: {len(q.in_flight)}/{opts.max_in_flight} in flight "
                        f"[{', '.join('#' + str(p['number']) for p in q.in_flight)}], {len(q.update)} to attempt, "
@@ -293,7 +308,7 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
             repo, prs, dict(opts.scarce), _gh_read, pr_heal.write, summary,
             preempt_after_s=opts.preempt_after_min * 60, stall_s=opts.head_stall_min * 60,
             behind=lambda p: (p.get("mergeStateStatus") or "UNKNOWN").upper() in ("BEHIND", "UNKNOWN"),
-            before=opts.before, sha=opts.sha, updated=frozenset(int(n) for n in updated))
+            before=opts.before, sha=opts.sha, updated=frozenset(int(n) for n in updated), skip=skip)
     errors += unlabel_resolved(repo, prs, attempted, opts, summary)
     return 1 if errors else 0
 
@@ -302,13 +317,14 @@ def _has(p: dict, label: str) -> bool:
     return any(lb.get("name") == label for lb in p.get("labels") or [])
 
 
-def _head_first(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, summary: list[str]) -> int | None:
+def _head_first(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, summary: list[str],
+                skip: frozenset[int] = frozenset()) -> int | None:
     """Update the queue HEAD the moment it is safe, ahead of the slot count: BEHIND main, armed, not
     red on its own checks, and no review run still owes a verdict (`pr_sched.review_settled`) -- the
     gate's tail is not a reason to wait (td#3073, 03:58Z 11-14: verdict recorded, update held for the
     tail job, then the sealed runner went to another PR). Returns the head's number when it was moved
     up (so the loop does not skip it for that tail), else None. Off unless the scheduler is on."""
-    h = pr_queue.head(prs)
+    h = pr_queue.head(prs, skip)
     if not opts.scarce or h is None or not h.get("autoMergeRequest"):
         return None
     queued = any(p is h for p in q.update)
@@ -425,7 +441,8 @@ def main(argv: list[str] | None = None) -> int:
                    scarce=scarce,
                    preempt_after_min=args.preempt_after_min, head_stall_min=args.head_stall_min,
                    before=os.environ.get("CI_KIT_BEFORE", ""),
-                   sha=os.environ.get("CI_KIT_SHA", "") if os.environ.get("CI_KIT_EVENT") == "push" else "")
+                   sha=os.environ.get("CI_KIT_SHA", "") if os.environ.get("CI_KIT_EVENT") == "push" else "",
+                   hold=os.environ.get("CI_KIT_QUEUE_HOLD", "").strip().lower() in ("1", "true"))
     summary: list[str] = []
     relock: list[int] = []
     try:

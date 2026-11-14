@@ -45,6 +45,32 @@ PASS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 FAIL = {"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
 INFRA = {"STARTUP_FAILURE"}  # the check never ran its steps: no evidence against the code
 RED_RUN = {"failure", "cancelled", "startup_failure", "timed_out"}  # a workflow run worth classifying
+CANCELLED = {"CANCELLED"}
+# the queue hold's commit status (ci_kit/pr_hold.py): ORDER, not a check. Counted as one, a PR waiting
+# its turn would read `running` forever and hold an in-flight slot (review of the hold, finding 2)
+QUEUE_STATUS = "queue/position"
+
+
+def red_checks(rollup: list[dict] | None, required: tuple[str, ...] = ()) -> list[str]:
+    """The required checks red at a head: FAILING, or CANCELLED (a cancelled required check blocks
+    a merge forever and no author's push is owed for it). A name reported twice takes its newest
+    answer: GraphQL lists the latest check run per name per suite. `queue/position` never counts.
+    Pure. THE one definition: pr_heal (what to rerun) and pr_queue.blocked (the hold's head) agree."""
+    out: list[str] = []
+    newest: dict[str, dict] = {}
+    for c in rollup or []:  # two runs of one workflow at one head are two suites: keep the later
+        name = c.get("name") or c.get("context") or ""
+        if name not in newest or str(c.get("startedAt") or "") >= str(newest[name].get("startedAt") or ""):
+            newest[name] = c
+    for name, c in newest.items():
+        if (required and name not in required) or name == QUEUE_STATUS:
+            continue
+        if c.get("__typename") == "StatusContext" or ("state" in c and "status" not in c):
+            if (c.get("state") or "").upper() in FAIL:
+                out.append(name)
+        elif (c.get("status") or "").upper() == "COMPLETED" and (c.get("conclusion") or "").upper() in FAIL | CANCELLED:
+            out.append(name)
+    return sorted(set(out))
 
 MACHINERY, CONSEQUENCE, JUDGMENT, PARKED = "machinery", "consequence", "judgment", "parked"
 # the review gate's job that fails, on purpose, when the PR queue parks a review ("<caller> / review deferred")

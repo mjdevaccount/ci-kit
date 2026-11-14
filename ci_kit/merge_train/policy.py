@@ -45,7 +45,7 @@ import re
 
 from ci_kit.merge_train import EJECTED, OPT_OUT, RIDING, TRAIN_PREFIX
 from ci_kit.pr_queue import landing_order
-from ci_kit.redclass import FAIL, PASS, rollup_infra
+from ci_kit.redclass import FAIL, PASS, QUEUE_STATUS, rollup_infra
 
 # PASS / FAIL / INFRA and the machinery-vs-verdict test live in ci_kit/redclass.py, shared with
 # pr_queue and pr_heal. CANCELLED / STALE are NOT failures here: a cancelled check is no evidence
@@ -75,7 +75,7 @@ def checks(rollup: list[dict] | None, required: tuple[str, ...]) -> tuple[str, l
     seen: dict[str, str] = {}
     for c in rollup or []:
         name = c.get("name") or c.get("context") or ""
-        if required and name not in required:
+        if (required and name not in required) or name == QUEUE_STATUS:  # the queue hold: order, not a check
             continue
         if c.get("__typename") == "StatusContext" or ("state" in c and "status" not in c):
             state = (c.get("state") or "").upper()

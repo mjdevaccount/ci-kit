@@ -341,6 +341,27 @@ def test_the_heads_own_landing_a_train_or_a_stale_head_does_not_page_must_not_fi
     assert _oq([3080], behind_by=3) == ""   # the head was not in flight against the old main
 
 
+
+def test_a_skipped_red_head_hands_the_watch_to_the_pr_that_can_land_must_fire() -> None:
+    # #3073 red (skipped by the hold): #3080 is the head in flight, and #3085 landing past it pages
+    gh = Gh({"repos/o/r/commits/sha1/pulls": [{"number": 3085, "merged_at": "x", "head": {"ref": "b3085"},
+                                                "user": {"login": "agent"}}],
+             "repos/o/r/compare/": {"behind_by": 0}})
+    prs = [_pr(3073), _pr(3080), _pr(3085)]
+    assert "#3085" in pr_sched.out_of_queue("o/r", prs, "b" * 40, "sha1", gh.read, frozenset({3073}))
+    assert pr_queue.head(prs, frozenset({3073}))["number"] == 3080
+
+
+def test_a_head_red_only_by_cancelled_runs_was_never_in_flight_must_not_fire() -> None:
+    # 2nd review, finding 1 (repeat): parked #3079 (cancelled runs) skipped while current; #3084 held
+    # success and merged; the push pass sees #3079 BEHIND and the head -- the hold allowed that merge
+    gh = Gh({"repos/o/r/commits/sha1/pulls": [{"number": 3084, "merged_at": "x", "head": {"ref": "b3084"},
+                                                "user": {"login": "agent"}}],
+             "repos/o/r/compare/": {"behind_by": 0}})
+    cancelled = [{"__typename": "CheckRun", "name": "model review", "status": "COMPLETED", "conclusion": "CANCELLED"}]
+    prs = [_pr(3079, statusCheckRollup=cancelled, labels=(pr_sched.PARKED,))]
+    assert pr_sched.out_of_queue("o/r", prs, "b" * 40, "sha1", gh.read) == ""
+
 # ── the review gate's admission CLI ───────────────────────────────────────────────────────────
 def _admit(monkeypatch: pytest.MonkeyPatch, tmp_path, prs: list[dict], *, edit_rc: int = 0, demand: bool = True,
            argv: tuple[str, ...] = (), label: str | None = "PR queue: parked") -> dict[str, str]:
@@ -348,8 +369,12 @@ def _admit(monkeypatch: pytest.MonkeyPatch, tmp_path, prs: list[dict], *, edit_r
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))
 
     def run(cmd, **_):
-        if cmd[:3] == ["gh", "pr", "list"]:
-            return subprocess.CompletedProcess(cmd, 0, json.dumps(prs), "")
+        if cmd[:3] == ["gh", "pr", "list"]:  # no rollup: the review gate's token cannot read check runs
+            assert "statusCheckRollup" not in " ".join(cmd)
+            rows = [{**p, "baseRefName": p.get("baseRefName", "main")} for p in prs]
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(rows), "")
+        if cmd[:3] == ["gh", "api", "repos/o/r"]:
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"default_branch": "main"}), "")
         if cmd[:3] == ["gh", "pr", "edit"]:
             return subprocess.CompletedProcess(cmd, edit_rc, "", "no such label")
         if cmd[:3] == ["gh", "label", "list"]:
@@ -365,6 +390,12 @@ def _admit(monkeypatch: pytest.MonkeyPatch, tmp_path, prs: list[dict], *, edit_r
 def test_admission_parks_a_later_pr_and_labels_it_must_fire(monkeypatch, tmp_path) -> None:
     got = _admit(monkeypatch, tmp_path, [_pr(3073), _pr(3080)])
     assert got["defer"] == "true" and got["head"] == "3073"
+
+
+def test_admission_skips_a_conflicting_or_stacked_lowest_pr_like_the_hold_must_fire(monkeypatch, tmp_path) -> None:
+    for low in (_pr(3070, state="DIRTY"), _pr(3070, state="UNKNOWN", mergeable="CONFLICTING"), _pr(3070, baseRefName="b1")):
+        got = _admit(monkeypatch, tmp_path, [low, _pr(3073), _pr(3080)])
+        assert got["head"] == "3073"
 
 
 def test_admission_runs_when_it_cannot_label_or_cannot_look_or_was_parked_enough_must_not_fire(monkeypatch, tmp_path) -> None:

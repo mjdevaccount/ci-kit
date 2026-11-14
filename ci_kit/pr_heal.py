@@ -60,7 +60,6 @@ _EXHAUSTED = re.compile(r"<!-- smart-merge:exhausted head=([0-9a-f]{40}) -->")
 _JUDGED = re.compile(r"<!-- smart-merge:judgment head=([0-9a-f]{40}) kind=([a-z]+) -->")
 _JOB_URL = re.compile(r"/actions/runs/(\d+)/job/(\d+)")
 LIMIT = 2
-_CANCELLED = {"CANCELLED"}
 
 # `read` RAISES CalledProcessError when GitHub will not answer (pr_autoupdate._gh_read: the job's
 # read token first, then the PAT); `write` never raises and is judged by its return code.
@@ -95,26 +94,7 @@ class Verdict:
 
 
 # ── pure ──────────────────────────────────────────────────────────────────────────────────────
-def red_checks(rollup: list[dict] | None, required: tuple[str, ...] = ()) -> list[str]:
-    """The required checks red at a head: FAILING, or CANCELLED (a cancelled required check blocks
-    a merge forever and no author's push is owed for it). A name reported twice takes its newest
-    answer: GraphQL lists the latest check run per name per suite. Pure."""
-    out: list[str] = []
-    newest: dict[str, dict] = {}
-    for c in rollup or []:  # two runs of one workflow at one head are two suites: keep the later
-        name = c.get("name") or c.get("context") or ""
-        if name not in newest or str(c.get("startedAt") or "") >= str(newest[name].get("startedAt") or ""):
-            newest[name] = c
-    for name, c in newest.items():
-        if required and name not in required:
-            continue
-        if c.get("__typename") == "StatusContext" or ("state" in c and "status" not in c):
-            if (c.get("state") or "").upper() in redclass.FAIL:
-                out.append(name)
-        elif (c.get("status") or "").upper() == "COMPLETED" and \
-                (c.get("conclusion") or "").upper() in redclass.FAIL | _CANCELLED:
-            out.append(name)
-    return sorted(set(out))
+red_checks = redclass.red_checks  # the one definition (the queue hold's head reads it too)
 
 
 def spent(bodies: list[str], head: str, attempts: list[int]) -> int:

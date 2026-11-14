@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ci_kit.redclass import FAIL
+from ci_kit.redclass import FAIL, QUEUE_STATUS, red_checks
 
 _FAIL = FAIL  # the one set (ci_kit/redclass.py)
 _RUNNING_STATUS = {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"}
@@ -57,7 +57,7 @@ def check_state(rollup: list[dict] | None, required: tuple[str, ...] = ()) -> st
     running = False
     for c in rollup or []:
         name = c.get("name") or c.get("context") or ""
-        if required and name not in required:
+        if (required and name not in required) or name == QUEUE_STATUS:  # the hold is order, not a check
             continue
         if c.get("__typename") == "StatusContext" or ("state" in c and "status" not in c):  # commit status
             state = (c.get("state") or "").upper()
@@ -154,18 +154,47 @@ def member(p: dict) -> bool:
     gives no way to tell a self-merging one from a major bump left for a human. Counted by author
     or branch, that bump left open a week would be the head all week, and the PR the operator is
     waiting on would never get the head's priority. So Renovate's merges are watched, not ordered:
-    one landing past an in-flight head is paged (pr_sched.out_of_queue). Arm them (Renovate
-    `platformAutomerge: true`) and they join the queue with no change here."""
+    one landing past an in-flight head is paged (pr_sched.out_of_queue). Arm them (pr_reconcile
+    does, hourly; or Renovate `platformAutomerge: true`) and they join the queue in number order,
+    like any PR. With the queue hold on (ci_kit/pr_hold.py) an UNARMED one reads `queue/position`
+    pending, so Renovate's own merge waits for that arming (td#3079, 06:49Z 11-14)."""
     branch = str(p.get("headRefName") or "")
     return (not p.get("isCrossRepository") and not p.get("isDraft") and not branch.startswith("train/")
             and bool(p.get("autoMergeRequest")))
 
 
-def head(prs: list[dict]) -> dict | None:
-    """THE queue head: the lowest-numbered member (landing_order). Pure. A head blocked on its own
-    red holds no runner -- it has no demand -- so it costs the rest nothing (work-conserving)."""
-    members = [p for p in prs if member(p)]
+def head(prs: list[dict], skip: frozenset[int] = frozenset()) -> dict | None:
+    """THE queue head: the lowest-numbered member (landing_order) not in `skip`. Pure. A head blocked
+    on its own red holds no runner -- it has no demand -- so it costs the rest nothing
+    (work-conserving). `skip` = `blocked(...)`: the members that cannot land as they stand."""
+    members = [p for p in prs if member(p) and int(p["number"]) not in skip]
     return min(members, key=landing_order) if members else None
+
+
+def blocked(prs: list[dict], required: tuple[str, ...] = (), eligible: frozenset[int] = frozenset(),
+            base: str | None = None) -> frozenset[int]:
+    """The PRs that cannot land AS THEY STAND -- never the head, for the hold, the updater and the
+    scheduler alike (one head, pr_queue.head(prs, skip)). Pure. Blocked:
+      * DIRTY or CONFLICTING (a conflict with its base; the merge state reads UNKNOWN for a while
+        after a push to main, `mergeable` often already knows);
+      * a required check RED on its head (redclass.red_checks: failing or CANCELLED, newest run per
+        name), unless the PR is `eligible` (parked or machinery-red) AND behind main: then the
+        queue's own update is its fresh run. Current with main, a re-run is owed that this token
+        may not be able to make (no Actions write), so it is skipped until that run is going;
+      * stacked: into a branch other than `base` (the default branch; None = unknown, none).
+    WHY: the queue hold (ci_kit/pr_hold.py) gives `queue/position` success to ONE PR; were that one
+    unable to land, nothing could merge into main (review of the hold, finding 1). A skipped PR is
+    the head again the moment its fix (or re-run) leaves it running or green."""
+    out = set()
+    for p in prs:
+        n = int(p["number"])
+        stale = (p.get("mergeStateStatus") or "UNKNOWN").upper() in _STALE_STATES
+        if (p.get("mergeStateStatus") or "").upper() == "DIRTY" or (p.get("mergeable") or "").upper() == "CONFLICTING" \
+                or (base and p.get("baseRefName") != base):
+            out.add(n)
+        elif not (n in eligible and stale) and red_checks(p.get("statusCheckRollup"), required):
+            out.add(n)
+    return frozenset(out)
 
 
 @dataclass(frozen=True)
