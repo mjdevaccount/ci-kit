@@ -3,12 +3,12 @@
 `review` holds the Claude credential and runs the PR's own tests: hosted, or the SEALED pool (one
 job per boot on a VM rolled back to a clean snapshot, home-host docs/CI-RUNNER-CONFIG-PLAN.md
 § Sealed pool) -- never the secure pool, which runs jobs side by side, nor the socket pool.
-`record` holds no secret but writes the artifact a later run trusts to carry a verdict: the
+`record verdict` (a STEP of `verdict` since v1.35.0) holds no secret but writes the artifact a later run trusts to carry a verdict: the
 SECURE pool (no docker socket) or hosted, never the shared socket pool (CI_RUNNER), where a
 concurrent PR job is root over docker. Both jobs' labels are fixed in the workflow, so a repo
 variable can only switch a job on or off (as pr-autoupdate's update job). `decide` (v1.29.0) runs
 no PR code and holds only the job token -- train, tier, carry, admission -- so it is the SECURE
-pool's class too, as are `review deferred` and the `verdict` aggregate: never the sealed pool,
+pool's class too, as is the `verdict` aggregate (and its `review deferred` step): never the sealed pool,
 whose ONE runner is what the split exists to spare.
 """
 from __future__ import annotations
@@ -28,12 +28,12 @@ def placement_faults(jobs: dict) -> list[str]:
     out = []
     if jobs["review"].get("runs-on") not in ("ubuntu-latest", SEALED):
         out.append("review: holds the credential -- hosted or the fixed sealed labels only")
-    rec = str(jobs["record"].get("runs-on"))
+    rec = str(jobs["verdict"].get("runs-on"))
     if rec not in ("ubuntu-latest", SECURE):
         out.append(f"record: {rec} is neither hosted nor the fixed secure labels")
     if "CI_RUNNER" in rec.replace("CI_SECURE_RUNNER", ""):
         out.append("record: on the shared socket pool")
-    for name in ("decide", "defer", "verdict"):
+    for name in ("decide", "verdict"):
         if jobs[name].get("runs-on") not in ("ubuntu-latest", SECURE):
             out.append(f"{name}: token-only -- hosted or the fixed secure labels only")
     return out
@@ -59,20 +59,20 @@ def _jobs() -> dict:
 
 def test_the_shipped_placement_is_clean() -> None:
     jobs = _jobs()
-    assert jobs["record"]["runs-on"] == SECURE
+    assert jobs["verdict"]["runs-on"] == SECURE
     assert jobs["review"]["runs-on"] == SEALED
     assert placement_faults(jobs) == []
 
 
 def test_fires_when_record_joins_the_socket_pool() -> None:
     jobs = _jobs()
-    jobs["record"]["runs-on"] = "${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}"
+    jobs["verdict"]["runs-on"] = "${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}"
     assert placement_faults(jobs)
 
 
 def test_fires_when_record_takes_its_labels_from_a_variable() -> None:
     jobs = _jobs()
-    jobs["record"]["runs-on"] = "${{ vars.CI_SECURE_RUNNER && fromJSON(vars.CI_SECURE_RUNNER) || 'ubuntu-latest' }}"
+    jobs["verdict"]["runs-on"] = "${{ vars.CI_SECURE_RUNNER && fromJSON(vars.CI_SECURE_RUNNER) || 'ubuntu-latest' }}"
     assert placement_faults(jobs)
 
 
@@ -89,7 +89,7 @@ def test_fires_when_review_takes_its_labels_from_a_variable() -> None:
 
 
 def test_fires_when_the_carry_moves_back_to_the_sealed_pool() -> None:
-    for name in ("decide", "defer", "verdict"):
+    for name in ("decide", "verdict"):
         jobs = _jobs()
         jobs[name]["runs-on"] = SEALED
         assert placement_faults(jobs), name

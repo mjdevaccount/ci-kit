@@ -49,15 +49,18 @@
 # starts and a STEP decides (ci_kit.review.tier): every code PR is reviewed; guard path / 3+
 # non-merge commits / the label are the REASONS it reads; a docs/lockfile-only diff passes with no
 # model call. The check name is `<caller job> / review`, so the caller's `review gate` aggregate
-# above is what branch protection lists -- it keeps a pre-existing check name, and `record`
+# above is what branch protection lists -- it keeps a pre-existing check name, and `record verdict`
 # (continue-on-error) can never turn it red.
 #
-# FIVE JOBS, ONE VERDICT (v1.29.0). `review` (job id `decide`, the SECURE pool) runs everything
-# that executes no PR code -- train, tier, carry, admission, siblings -- and finishes a carry, a
-# BLIND or a train itself. `model review` (the SEALED pool) runs only for a full review. `review
-# deferred` is red when the PR queue parked the review. `verdict` is the in-workflow aggregate: a
-# skipped `model review` passes only when `decide` said none was needed. `record verdict` writes
-# the carry record. A base-only update of a passed PR never waits for the one sealed runner.
+# THREE JOBS, ONE VERDICT (v1.29.0; five until v1.35.0). `review` (job id `decide`, the SECURE
+# pool) runs everything that executes no PR code -- train, tier, carry, admission, siblings -- and
+# finishes a carry, a BLIND or a train itself. `model review` (the SEALED pool) runs only for a
+# full review. `verdict` is the in-workflow aggregate: a skipped `model review` passes only when
+# `decide` said none was needed; its STEPS `review deferred` (red when the PR queue parked the
+# review) and `record verdict` (the carry record) were jobs of their own until v1.35.0 -- a runner
+# boot each for seconds of shell. A base-only update of a passed PR never waits for the one sealed
+# runner. Check names (caller job `reviewer`): `reviewer / review`, `reviewer / model review`,
+# `reviewer / verdict`, and the caller's own `review gate` -- the REQUIRED one, unchanged.
 #
 # THE PR QUEUE (`queue-priority`, v1.29.0). The sealed pool is ONE runner. A PR numbered after
 # the queue head (the lowest-numbered armed PR, ci_kit/pr_queue.head) does not start a full
@@ -86,7 +89,8 @@
 # CARRIED VERDICTS: the armed-PR updater merges main into every armed PR; each move re-runs this.
 # When the PR's OWN diff (merge-base..head) hashes the same as one a previous run PASSED, it passes
 # with "verdict carried from <sha>" and no model run (ci_kit.review.carry). The record is an
-# ARTIFACT written by the separate `record` job (a comment is editable by any token holder).
+# ARTIFACT written by the `record verdict` step of the `verdict` job, which never checks the PR out
+# (a comment is editable by any token holder).
 #
 # A PRIVATE GIT DEPENDENCY (v1.24.0): a caller whose lockfile installs a private GitHub repo by
 # https URL passes `git-ssh-repos: owner/name` and `secrets: git-ssh-key:` (a read-only deploy
@@ -222,7 +226,7 @@ jobs:
       pull-requests: write   # the `queue:parked` label (the comment is the `verdict` job's)
       actions: read          # the carry's artifact; the scheduler's read of the head's jobs
     outputs:
-      # frozen at each step's end; `review`, `record` and `verdict` read them
+      # frozen at each step's end; `review` and `verdict` (its record step) read them
       mode: ${{ steps.mode.outputs.mode }}
       result: ${{ steps.verdict.outputs.result || steps.train.outputs.result || steps.mode.outputs.result }}
       hash: ${{ steps.carry.outputs.hash }}
@@ -355,7 +359,7 @@ jobs:
           set -uo pipefail
           wf=${WORKFLOW_REF%@*}; wf=${wf##*/}
           # exit 2 = could not finish looking: that is NO carry (a full review), never a pass --
-          # and no hash output, so the `record` job records nothing for this run
+          # and no hash output, so the `record verdict` step records nothing for this run
           python3 -m ci_kit.review.carry carry --repo "$GITHUB_REPOSITORY" --pr "$PR" \
             --base "$BASE_SHA" --head "$HEAD_SHA" --branch "$HEAD_REF" --run-id "$GITHUB_RUN_ID" \
             --workflow "$wf" \
@@ -366,7 +370,7 @@ jobs:
       # runner. A PR numbered after the queue head is PARKED while the head needs that pool (a
       # sealed job queued, or a review run still deciding); otherwise -- the head, a PR ahead of
       # it, a head that needs nothing there -- it runs (work-conserving). Parked = this run ends
-      # red at `review deferred`
+      # red at the `verdict` job's `review deferred` step
       # and the PR gets `queue:parked`; pr-autoupdate re-runs it when it is the head or the pool is
       # free. The review is never skipped: a parked PR cannot merge until it is reviewed. A failed
       # look RUNS the review (never parks blind).
@@ -501,7 +505,7 @@ jobs:
       pull-requests: write   # the `queue:parked` label (the comment is the `verdict` job's)
       actions: read          # the scheduler's read of the head's jobs
     outputs:
-      # frozen at each step's end; the `record` job reads them on a runner the PR's code never ran on
+      # frozen at each step's end; `verdict` (its record step) reads them on a runner the PR's code never ran on
       result: ${{ steps.verdict.outputs.result || (steps.admit.outputs.defer == 'true' && 'parked' || '') }}
       parked: ${{ steps.admit.outputs.defer }}
       body: ${{ steps.body.outputs.body }}
@@ -709,34 +713,24 @@ jobs:
             *) echo "::error::review gate BLIND ($RESULT) -- the reviewer did not finish looking"; exit 1 ;;
           esac
 
-  defer:
-    # A PARKED review (either Admit above). RED on purpose: the PR is not reviewed, so it cannot
-    # merge -- nothing is waived. The `queue:parked` label and this job's name say it is the queue's
-    # timing, not a finding; pr_heal / redclass read the name and leave it to the scheduler.
-    name: review deferred
-    needs: [decide, review]
-    if: ${{ !cancelled() && (needs.decide.outputs.mode == 'defer' || needs.review.outputs.parked == 'true') }}
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Parked by the PR queue (not a failure of this PR)
-        env:
-          WHY: ${{ needs.decide.outputs.parked }}
-        run: |
-          msg="review PARKED by the PR queue -- NOT a failure of this PR, nothing to fix: ${WHY:-the queue head needs the sealed runner}. pr-autoupdate re-runs this review when this PR is the queue head or the pool is free."
-          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::$msg"
-          exit 1
-
   verdict:
     # THE IN-WORKFLOW AGGREGATE (v1.29.0). The caller's `review gate` judges this whole workflow, and
     # GitHub counts a skipped job as passed: with the model review in its own job, `decide` green +
     # `review` skipped would read as a pass. So: `review` may be skipped ONLY when `decide` said it
-    # is not needed (train, skip, finish, defer); in mode `review` it must have run and passed. A
-    # parked review fails here as a CONSEQUENCE of `review deferred` (redclass reads it so).
+    # is not needed (train, skip, finish, defer); in mode `review` it must have run and passed.
+    #
+    # ONE BOOT, NOT THREE (v1.35.0). `review deferred` and `record verdict` were jobs of their own:
+    # each a single-use secure-pool runner for a few seconds of shell (trade-data 2026-11-14: 33
+    # `record verdict` + 3 `review deferred` boots in 15 hours). They are STEPS here now. The trust
+    # boundary is unchanged: this job, like both of those, never checks the PR out and never runs PR
+    # code, on the same secure pool; `record` held no secret and still needs none (upload-artifact
+    # uses the runner's own token, not `permissions:`); `review deferred` held none either. The
+    # ntfy secret was already here. Both steps run `always()`: a red aggregate above them must not
+    # skip the record of a BLOCK, nor the park's own red. Their failure modes are the old jobs':
+    # record is continue-on-error (a failure only means the next run reviews in full), the park is
+    # red. Readers that keyed on the JOB names (ci_kit/redclass, ci_kit/pr_sched) read the STEP too.
     name: verdict
-    needs: [decide, review, defer]
+    needs: [decide, review]
     if: ${{ !cancelled() }}
     runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
@@ -754,14 +748,14 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          printf '%s\n' "$BODY" > body.md
+          printf '%s\n' "$BODY" > "$RUNNER_TEMP/body.md"
           # one sticky comment, found by its marker, so a re-review edits instead of piling up
           id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
                  -q '.[] | select(.body | startswith("<!-- review-gate -->")) | .id' | tail -1)
           if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@body.md >/dev/null
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@"$RUNNER_TEMP/body.md" >/dev/null
           else
-            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body-file body.md
+            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/body.md"
           fi
 
       - name: Push a block to ntfy
@@ -786,14 +780,60 @@ jobs:
             --data-binary "$PR_TITLE" >/dev/null \
             || echo "::warning::ntfy push failed"
 
-      # mode review: `model review` must run (and `defer` may skip); mode defer: `review deferred`
-      # must run (it is red); train / skip / finish: neither runs
+      # mode review: `model review` must run; every other mode: it does not
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           jobs: ${{ toJSON(needs) }}
-          allowed-skips: >-
-            ${{ needs.decide.outputs.mode == 'review' && 'defer'
-            || needs.decide.outputs.mode == 'defer' && 'review' || 'review, defer' }}
+          allowed-skips: ${{ needs.decide.outputs.mode != 'review' && 'review' || '' }}
+
+      # RECORD VERDICT (a job until v1.35.0): what a later run of this PR compares against to carry a
+      # verdict (ci_kit.review.carry). Never where PR code ran: the review job runs the PR's own
+      # tests, which could rewrite any file on that runner; this job never checks the PR out. Pass
+      # AND block are recorded (the newest record wins, so an older pass cannot outvote a newer
+      # block); BLIND records nothing, and neither does a parked run. The hash and origin come from
+      # `decide` (secure pool), the result from whichever job produced it: `decide` for a carry,
+      # `review` for a full review. It trusts the artifact later runs read, so it never joins the
+      # shared socket pool (this job's pool, above). continue-on-error: a failure here only means
+      # the next run reviews in full, and must never turn the caller's aggregate red.
+      - name: record verdict
+        id: record
+        if: >-
+          always() && needs.decide.outputs.hash != ''
+          && ((needs.decide.outputs.mode == 'finish' && needs.decide.outputs.result == 'pass')
+              || (needs.decide.outputs.mode == 'review'
+                  && (needs.review.outputs.result == 'pass' || needs.review.outputs.result == 'block')))
+        continue-on-error: true
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          HASH: ${{ needs.decide.outputs.hash }}
+          ORIGIN: ${{ needs.decide.outputs.origin }}
+          RESULT: ${{ needs.decide.outputs.mode == 'review' && needs.review.outputs.result || needs.decide.outputs.result }}
+        run: |
+          python3 -c 'import json, os; e = os.environ; print(json.dumps({"pr": int(e["PR"]), "hash": e["HASH"], "head_sha": e["ORIGIN"], "result": e["RESULT"]}))' > "$RUNNER_TEMP/verdict.json"
+          cat "$RUNNER_TEMP/verdict.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: upload the verdict record
+        if: always() && steps.record.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: review-verdict-${{ github.event.pull_request.number }}
+          path: ${{ runner.temp }}/verdict.json
+          retention-days: 90
+
+      # REVIEW DEFERRED (a job until v1.35.0): a PARKED review (either Admit above). RED on purpose:
+      # the PR is not reviewed, so it cannot merge -- nothing is waived. The `queue:parked` label and
+      # this step's name say it is the queue's timing, not a finding; pr_heal / redclass read the
+      # name and leave it to the scheduler.
+      - name: review deferred
+        if: always() && (needs.decide.outputs.mode == 'defer' || needs.review.outputs.parked == 'true')
+        env:
+          WHY: ${{ needs.decide.outputs.parked }}
+        run: |
+          msg="review PARKED by the PR queue -- NOT a failure of this PR, nothing to fix: ${WHY:-the queue head needs the sealed runner}. pr-autoupdate re-runs this review when this PR is the queue head or the pool is free."
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::$msg"
+          exit 1
+
       # A job's conclusion is not its verdict: a parked `model review` ends SUCCESS (its steps were
       # skipped). Read the verdict itself -- in mode review only `pass` is green, whatever else
       # the jobs above say; in mode defer nothing is.
@@ -806,46 +846,3 @@ jobs:
             review) [ "$RESULT" = pass ] || { echo "::error::model review result '${RESULT}' is not pass"; exit 1; } ;;
             defer) echo "::error::review parked by the PR queue: not reviewed yet"; exit 1 ;;
           esac
-
-  record:
-    # What a later run of this PR compares against to carry a verdict (ci_kit.review.carry).
-    # A SEPARATE JOB on purpose: the review job runs the PR's own tests, which could rewrite any
-    # file on that runner; this runner never checks the PR out. Pass AND block are recorded (the
-    # newest record wins, so an older pass cannot outvote a newer block); BLIND records nothing,
-    # and neither does a parked run. The hash and origin come from `decide` (secure pool), the
-    # result from whichever job produced it: `decide` for a carry, `review` for a full review.
-    # continue-on-error: a failure here only means the next run reviews in full, and must never
-    # turn the caller's aggregate red.
-    name: record verdict
-    needs: [decide, review]
-    if: >-
-      always() && needs.decide.outputs.hash != ''
-      && ((needs.decide.outputs.mode == 'finish' && needs.decide.outputs.result == 'pass')
-          || (needs.decide.outputs.mode == 'review'
-              && (needs.review.outputs.result == 'pass' || needs.review.outputs.result == 'block')))
-    # THE SECURE POOL when the caller sets CI_SECURE_RUNNER (2026-11-08): this job holds no
-    # secret, but later runs TRUST the artifact it writes to carry a pass, so it never joins the
-    # shared socket pool, where a concurrent PR job is root over docker and could rewrite it.
-    # The secure pool (home-host VM 111, no docker socket, icc off; home-host docs/CI-RUNNER.md
-    # § The secure pool) is the same class as pr-autoupdate's update job. No environment: there
-    # is no secret for one to gate. Labels fixed HERE (an ON/OFF switch, never a label list, as
-    # in pr-autoupdate.yml). Unset = hosted, as before. vars resolve to the CALLER.
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
-    timeout-minutes: 5
-    continue-on-error: true
-    permissions: {}
-    steps:
-      - name: Write
-        env:
-          PR: ${{ github.event.pull_request.number }}
-          HASH: ${{ needs.decide.outputs.hash }}
-          ORIGIN: ${{ needs.decide.outputs.origin }}
-          RESULT: ${{ needs.decide.outputs.mode == 'review' && needs.review.outputs.result || needs.decide.outputs.result }}
-        run: |
-          python3 -c 'import json, os; e = os.environ; print(json.dumps({"pr": int(e["PR"]), "hash": e["HASH"], "head_sha": e["ORIGIN"], "result": e["RESULT"]}))' > verdict.json
-          cat verdict.json >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: review-verdict-${{ github.event.pull_request.number }}
-          path: verdict.json
-          retention-days: 90

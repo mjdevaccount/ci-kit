@@ -18,7 +18,8 @@ measured thresholds are there). This module is its two actors:
   * the review gate's admission (`python -m ci_kit.pr_admit`, its own module): parks a non-head
     PR's model review while the head needs the sealed pool (pr_queue.admit).
 
-PARKED IS RED, AND LABELLED. A parked review fails `review deferred`; a preempted run is
+PARKED IS RED, AND LABELLED. A parked review fails `review deferred` (the review gate's `verdict`
+job's step since v1.35.0, a job before); a preempted run is
 cancelled. Both block the merge exactly as a missing check does -- nothing is waived -- and both
 read as "CI failed" to an author's agent or an auto-fix bot, so the PR carries the `parked` label
 (`queue:parked`; its description says it re-runs itself) from the moment it is parked until the
@@ -49,8 +50,9 @@ PARKED_DESCRIPTION = "PR queue: CI/review parked so the queue head gets the runn
 # the label's description while a pass cannot re-run: the review gate's admission reads it and parks
 # nothing (a park nobody can re-run would strand the PR). ensure_label restores the description.
 PARKED_OFF = "PR queue OFF: the push token cannot re-run runs (Actions: write). Admission parks nothing"
-DEFERRED_JOB = "review deferred"   # the review gate's job that fails when it parks a review
-RECORD_JOB = "record verdict"      # the review gate's job that writes the verdict a carry reads
+DEFERRED_JOB = "review deferred"   # the review gate's job (a STEP of `verdict` since v1.35.0) that fails on a park
+RECORD_JOB = "record verdict"      # the review gate's job (a STEP of `verdict` since v1.35.0) that writes the record
+VERDICT_JOB = "verdict"            # the review gate's aggregate: completed = record written and any park red
 PRE_JOB = "review"                 # the review gate's first job (the name mcp review_gate_auth reads)
 MAX_ATTEMPT = 4                    # a run re-run this often is never parked again (no starving)
 
@@ -150,22 +152,31 @@ def parked_runs(repo: str, p: dict, read: Gh) -> tuple[list[dict], bool]:
             continue
         if r.get("conclusion") == "cancelled":
             out.append(r)
-        elif r.get("conclusion") == "failure" and any(
-                _tail(j.get("name")) == DEFERRED_JOB and j.get("conclusion") == "failure"
-                for j in run_jobs(repo, int(r["id"]), read)):
+        elif r.get("conclusion") == "failure" and any(_deferred(j) for j in run_jobs(repo, int(r["id"]), read)):
             out.append({**r, "deferred": True})
     return out, active
 
 
+def _deferred(j: dict) -> bool:
+    """A failed `review deferred`: the job (until v1.35.0) or the `verdict` job's step of that name."""
+    if j.get("conclusion") != "failure":
+        return False
+    return _tail(j.get("name")) == DEFERRED_JOB or any(
+        isinstance(s, dict) and s.get("name") == DEFERRED_JOB and s.get("conclusion") == "failure"
+        for s in j.get("steps") or [])
+
+
 def review_settled(repo: str, branch: str, read: Gh) -> bool:
     """No review run on this branch still owes a verdict: each active run of the review gate has
-    finished `record verdict` (or parked). An update now cancels only the gate's tail, and the next
+    finished `record verdict` (or parked) -- since v1.35.0 its `verdict` job, which holds both.
+    An update now cancels only the gate's tail, and the next
     run can carry -- the 03:58Z case: head #3073 BEHIND, verdict recorded, update held for the tail."""
     for run in active_runs(repo, read, branch):
         names = {_tail(j.get("name")): j for j in run_jobs(repo, int(run["id"]), read)}
         if PRE_JOB not in names:
             continue  # not the review gate
-        done = [n for n in (RECORD_JOB, DEFERRED_JOB) if (names.get(n) or {}).get("status") == "completed"]
+        # since v1.35.0 both are steps of `verdict`: it completed (or was skipped: a carry) = settled
+        done = [n for n in (RECORD_JOB, DEFERRED_JOB, VERDICT_JOB) if (names.get(n) or {}).get("status") == "completed"]
         if not done:
             return False
     return True

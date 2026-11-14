@@ -1,4 +1,4 @@
-"""The review gate's five-job split (v1.29.0) can neither skip a review nor read a park as a pass.
+"""The review gate's job split (v1.29.0; three jobs since v1.35.0) can neither skip a review nor read a park as a pass.
 
 GitHub counts a SKIPPED job as passed, and the caller's `review gate` aggregates this workflow's
 jobs. With the model review in its own job, `decide` green + `model review` skipped would read
@@ -8,7 +8,10 @@ as a pass. These predicates pin the wiring that prevents it, each shown to fire 
     not-parked diff, and is the ONLY way the sealed job runs;
   * the in-workflow `verdict` aggregate allows `model review` to be skipped only when mode is
     not `review`, and never allows `decide` to be skipped;
-  * a parked review is RED: `review deferred` exits 1 on either admission's park;
+  * a parked review is RED: `review deferred` (a STEP of `verdict` since v1.35.0, `always()` so a red
+    above cannot skip it) exits 1 on either admission's park;
+  * `record verdict` (a STEP of `verdict` since v1.35.0) never runs where PR code ran: `verdict`
+    checks nothing out; it runs `always()` and can never turn the aggregate red;
   * inside `model review`, once its Admit parked, nothing that reviews, comments or gates runs.
 """
 from __future__ import annotations
@@ -24,8 +27,7 @@ import pytest
 import yaml
 
 WF = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "review-gate.yml"
-ALLOWED = ("${{ needs.decide.outputs.mode == 'review' && 'defer' "
-           "|| needs.decide.outputs.mode == 'defer' && 'review' || 'review, defer' }}")
+ALLOWED = "${{ needs.decide.outputs.mode != 'review' && 'review' || '' }}"
 NOT_PARKED = "steps.admit.outputs.defer != 'true'"
 
 
@@ -43,25 +45,31 @@ def faults(wf: dict) -> list[str]:
     if jobs["review"].get("if") != "needs.decide.outputs.mode == 'review'":
         out.append("model review is not keyed on mode == review alone")
     v = jobs["verdict"]
-    if not {"decide", "review", "defer"} <= set(v.get("needs") or []):
-        out.append("verdict does not aggregate decide, review and defer")
+    if not {"decide", "review"} <= set(v.get("needs") or []):
+        out.append("verdict does not aggregate decide and review")
     if "!cancelled()" not in str(v.get("if")):
         out.append("verdict can be skipped")
+    if any("actions/checkout" in str(s.get("uses")) for s in v["steps"]) or {"defer", "record"} & set(jobs):
+        out.append("verdict checks the PR out, or record/defer left the job that never runs PR code")
     green = next((s for s in v["steps"] if "re-actors/alls-green" in str(s.get("uses"))), None)
     if green is None or " ".join(str(green["with"].get("allowed-skips")).split()) != ALLOWED:
         out.append("verdict allows skips beyond the mode's")
-    own = next((s for s in v["steps"] if "needs.review.outputs.result" in str((s.get("env") or {}).get("RESULT"))), None)
+    own = next((s for s in v["steps"] if "needs.review.outputs.result" in str((s.get("env") or {}).get("RESULT"))
+                and s.get("name") != "record verdict"), None)
     run = str((own or {}).get("run", ""))
     if own is None or own.get("if") or own.get("continue-on-error") or '[ "$RESULT" = pass ]' not in run \
             or "defer) " not in run or run.count("exit 1") < 2:
         out.append("verdict does not read the review's own result")
-    d = jobs["defer"]
+    d = next((s for s in v["steps"] if s.get("name") == "review deferred"), {})
     if "needs.decide.outputs.mode == 'defer'" not in str(d.get("if")) or "needs.review.outputs.parked == 'true'" not in str(d.get("if")):
         out.append("review deferred does not fire on both parks")
-    if "!cancelled()" not in str(d.get("if")):
-        out.append("review deferred is skipped with the review it stands in for (implicit success())")
-    if "exit 1" not in str(d["steps"][-1].get("run")) or d["steps"][-1].get("continue-on-error") or d.get("continue-on-error"):
+    if "always()" not in str(d.get("if")):
+        out.append("review deferred is skipped by a red step above it (implicit success())")
+    if "exit 1" not in str(d.get("run")) or d.get("continue-on-error"):
         out.append("review deferred is not red")
+    r = next((s for s in v["steps"] if s.get("name") == "record verdict"), {})
+    if "always()" not in str(r.get("if")) or not r.get("continue-on-error"):
+        out.append("record verdict can be skipped by a red above it, or can turn the gate red")
     started = False
     for s in jobs["review"]["steps"]:
         if s.get("id") == "admit":
@@ -105,14 +113,17 @@ def _green(jobs: dict) -> dict:
 
 def test_each_fault_fires() -> None:
     assert _mut(lambda j, w: j["review"].update({"if": "needs.decide.outputs.mode != 'skip'"}))
-    assert _mut(lambda j, w: j["verdict"].update({"needs": ["decide", "defer"]}))
+    assert _mut(lambda j, w: j["verdict"].update({"needs": ["decide"]}))
     assert _mut(lambda j, w: j["verdict"].update({"if": "success()"}))
-    assert _mut(lambda j, w: _green(j)["with"].update({"allowed-skips": "review, defer"}))
-    assert _mut(lambda j, w: j["defer"].update({"if": "needs.decide.outputs.mode == 'defer'"}))
-    assert _mut(lambda j, w: j["defer"]["steps"][-1].update({"run": "echo parked"}))
-    assert _mut(lambda j, w: j["defer"].update({"continue-on-error": True}))
-    assert _mut(lambda j, w: j["defer"].update(
+    assert _mut(lambda j, w: _green(j)["with"].update({"allowed-skips": "review"}))
+    assert _mut(lambda j, w: _step(j["verdict"], "review deferred").update({"if": "always() && needs.decide.outputs.mode == 'defer'"}))
+    assert _mut(lambda j, w: _step(j["verdict"], "review deferred").update({"run": "echo parked"}))
+    assert _mut(lambda j, w: _step(j["verdict"], "review deferred").update({"continue-on-error": True}))
+    assert _mut(lambda j, w: _step(j["verdict"], "review deferred").update(
         {"if": "needs.decide.outputs.mode == 'defer' || needs.review.outputs.parked == 'true'"}))
+    assert _mut(lambda j, w: _step(j["verdict"], "record verdict").update({"continue-on-error": False}))
+    assert _mut(lambda j, w: _step(j["verdict"], "record").update({"if": "needs.decide.outputs.hash != ''"}))
+    assert _mut(lambda j, w: j["verdict"]["steps"].insert(0, {"uses": "actions/checkout@v7"}))
     assert _mut(lambda j, w: j["verdict"]["steps"].remove(_step(j["verdict"], "The review's own verdict")))
     assert _mut(lambda j, w: _step(j["verdict"], "The review's own verdict").update({"run": "true"}))
     assert _mut(lambda j, w: _step(j["review"], "review").update({"if": "always()"}))
@@ -133,11 +144,18 @@ def test_a_carry_and_a_blind_and_a_train_are_finished_by_decide() -> None:
     assert "exit 1" in _step(d, "Gate")["run"] and "pass)" in _step(d, "Gate")["run"]
 
 
-def test_the_record_job_records_a_carry_or_a_review_never_a_park() -> None:
-    cond = " ".join(str(_wf()["jobs"]["record"]["if"]).split())
+def test_the_record_step_records_a_carry_or_a_review_never_a_park() -> None:
+    cond = " ".join(str(_step(_wf()["jobs"]["verdict"], "record")["if"]).split())
     assert "needs.decide.outputs.hash != ''" in cond
     assert "needs.decide.outputs.mode == 'finish' && needs.decide.outputs.result == 'pass'" in cond
     assert "needs.review.outputs.result == 'pass' || needs.review.outputs.result == 'block'" in cond
+
+
+def test_the_jobs_and_so_the_check_names_are_exactly_three() -> None:
+    # `<caller> / review`, `<caller> / model review`, `<caller> / verdict`; the caller's `review gate`
+    # (the REQUIRED check) aggregates the call and is untouched (v1.35.0: two boots fewer)
+    jobs = _wf()["jobs"]
+    assert {k: v["name"] for k, v in jobs.items()} == {"decide": "review", "review": "model review", "verdict": "verdict"}
 
 
 # ── Mode, executed ────────────────────────────────────────────────────────────────────────────

@@ -525,3 +525,41 @@ def _conflict_on(write, path: str):
             return subprocess.CompletedProcess(args, 1, "", "HTTP 409: Cannot cancel a workflow run that is completed.")
         return got
     return w
+
+
+# ── v1.35.0: `review deferred` and `record verdict` are STEPS of the gate's `verdict` job ────
+STEP_PARK = {"name": "reviewer / verdict", "conclusion": "failure",
+             "steps": [{"name": "Run re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35", "conclusion": "success"},
+                       {"name": "review deferred", "conclusion": "failure"},
+                       {"name": "The review's own verdict", "conclusion": "skipped"}]}
+
+
+def test_a_park_as_the_verdict_jobs_step_is_parked_must_fire() -> None:
+    assert redclass.job_class(STEP_PARK)[0] == redclass.PARKED
+    assert pr_sched._deferred(STEP_PARK) and pr_sched._deferred(DEFERRED)        # both shapes, old runs too
+
+
+def test_a_verdict_job_red_on_anything_besides_the_park_is_judgment_must_not_fire() -> None:
+    both = {**STEP_PARK, "steps": [*STEP_PARK["steps"], {"name": "Comment on the PR", "conclusion": "failure"}]}
+    assert redclass.job_class(both)[0] == redclass.JUDGMENT
+    red = {**STEP_PARK, "steps": [{"name": "The review's own verdict", "conclusion": "failure"}]}
+    assert redclass.job_class(red)[0] != redclass.PARKED and not pr_sched._deferred(red)
+    assert not pr_sched._deferred({**STEP_PARK, "conclusion": "success"})
+
+
+def test_the_parked_run_is_found_by_its_step(labels) -> None:
+    run = _run(50 + 3073, 3073, status="completed", conclusion="failure")
+    gh = Gh({f"repos/o/r/actions/runs?head_sha={3073:040d}": {"workflow_runs": [run]},
+             f"repos/o/r/actions/runs/{50 + 3073}/jobs": {"jobs": [{**STEP_PARK, "status": "completed"}]}})
+    errors, _ = _pass(gh, [_pr(3073, labels=(pr_sched.PARKED,))])
+    assert errors == 0 and f"api -X POST repos/o/r/actions/runs/{50 + 3073}/rerun" in gh.writes
+
+
+@pytest.mark.parametrize("verdict,settled", [("completed", True), ("in_progress", False), ("queued", False)])
+def test_the_review_is_settled_when_its_verdict_job_is(verdict: str, settled: bool) -> None:
+    review_run = {**_run(9, 3078, status="in_progress"), "head_branch": "b3078"}
+    gh = Gh({"repos/o/r/actions/runs?status=queued": {"workflow_runs": []},
+             "repos/o/r/actions/runs?status=in_progress": {"workflow_runs": [review_run]},
+             "repos/o/r/actions/runs/9/jobs": {"jobs": [_rjob("reviewer / review", "completed", labels=()),
+                                                         _rjob("reviewer / verdict", verdict, labels=())]}})
+    assert pr_sched.review_settled("o/r", "b3078", gh.read) is settled
