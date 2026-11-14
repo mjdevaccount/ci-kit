@@ -6,7 +6,10 @@ job per boot on a VM rolled back to a clean snapshot, home-host docs/CI-RUNNER-C
 `record` holds no secret but writes the artifact a later run trusts to carry a verdict: the
 SECURE pool (no docker socket) or hosted, never the shared socket pool (CI_RUNNER), where a
 concurrent PR job is root over docker. Both jobs' labels are fixed in the workflow, so a repo
-variable can only switch a job on or off (as pr-autoupdate's update job).
+variable can only switch a job on or off (as pr-autoupdate's update job). `decide` (v1.29.0) runs
+no PR code and holds only the job token -- train, tier, carry, admission -- so it is the SECURE
+pool's class too, as are `review deferred` and the `verdict` aggregate: never the sealed pool,
+whose ONE runner is what the split exists to spare.
 """
 from __future__ import annotations
 
@@ -30,6 +33,9 @@ def placement_faults(jobs: dict) -> list[str]:
         out.append(f"record: {rec} is neither hosted nor the fixed secure labels")
     if "CI_RUNNER" in rec.replace("CI_SECURE_RUNNER", ""):
         out.append("record: on the shared socket pool")
+    for name in ("decide", "defer", "verdict"):
+        if jobs[name].get("runs-on") not in ("ubuntu-latest", SECURE):
+            out.append(f"{name}: token-only -- hosted or the fixed secure labels only")
     return out
 
 
@@ -80,6 +86,13 @@ def test_fires_when_review_takes_its_labels_from_a_variable() -> None:
     jobs = _jobs()
     jobs["review"]["runs-on"] = "${{ vars.CI_SEALED_RUNNER && fromJSON(vars.CI_SEALED_RUNNER) || 'ubuntu-latest' }}"
     assert placement_faults(jobs)
+
+
+def test_fires_when_the_carry_moves_back_to_the_sealed_pool() -> None:
+    for name in ("decide", "defer", "verdict"):
+        jobs = _jobs()
+        jobs[name]["runs-on"] = SEALED
+        assert placement_faults(jobs), name
 
 
 def test_fires_when_review_joins_the_socket_pool() -> None:

@@ -116,3 +116,121 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = (),
     for i, p in enumerate(eligible[slots:], 1):
         out.held.append((p, f"queued, position {i} (in flight: {len(out.in_flight)}/{max_in_flight})"))
     return out
+
+
+# ── the PR SCHEDULER (v1.29.0): ORDER and TIMING on the scarce runner pools, never fewer checks ──
+#
+# WHY (trade-data 2026-11-14 03:58Z, operator: "why are runners working on ANYTHING else other than
+# 3073? its WAITING and its next in line"). The queue above decides which PR main is merged INTO;
+# GitHub decides which job gets a runner, first come first served with no priority -- and measured
+# over 11-07..11-14 it did not even keep that order: on the one-runner pools a lower-numbered PR's job
+# sat behind a higher one's 90x on home-sealed (23% of PR jobs, wait p90 21 min) and 245x on
+# home-heavy (30%, p90 61 min, 100 runner-hours of waiting), and in half of those the other job was
+# DISPATCHED AFTER the waiting one queued. This is the policy that puts the queue's order on the
+# pools. It changes when a job runs and nothing else: every PR still passes every required check on
+# the exact head that merges -- a parked job is re-run, never skipped, and a parked check is red.
+#
+#   HEAD       the lowest-numbered same-repo, non-draft queue member: auto-merge ARMED (`member`). A
+#              train is never one. Renovate merges itself (platformAutomerge off), so it is no
+#              member; its landing past an in-flight head is paged instead (pr_sched.out_of_queue).
+#   DEMAND     the head has a job QUEUED on a scarce pool (`capacity`, from the caller's config).
+#   WORK-CONSERVING: a non-head job is parked only while the head has demand on ITS pool; with none
+#              it runs, so an idle pool never waits for the head.
+#   PREEMPT    while the head has demand on a pool, every non-head job QUEUED there is cancelled (it
+#              could be dispatched first, and in half the measured cases it was), and as many
+#              non-head jobs RUNNING there for less than `preempt_after_s` as the head's queued jobs
+#              need. Measured: a sealed carry finishes in ~0.2 min, a full review p50 4.8; a unit job
+#              p50 6.1; 85/90 sealed and 196/245 heavy inversions arrived within 5 min of the holder
+#              starting -- so 3 min. Older holders finish. Never the head, never a non-PR run (main's
+#              push CI, nightly), never a run already on its `max_attempt`th attempt (no starving).
+#   STALL      the head's oldest queued job on a pool has waited past `stall_s` while a non-head job
+#              runs there: the line the caller turns red (15 min: just over the p90 full review).
+
+def member(p: dict) -> bool:
+    """A PR the queue orders: same-repo, not a draft, not a train, and ARMED. Pure.
+
+    Renovate's PRs are members only when armed. ci-kit's preset sets `platformAutomerge: false`:
+    Renovate merges ITSELF once every check passes, so its PRs are never armed -- and the list
+    gives no way to tell a self-merging one from a major bump left for a human. Counted by author
+    or branch, that bump left open a week would be the head all week, and the PR the operator is
+    waiting on would never get the head's priority. So Renovate's merges are watched, not ordered:
+    one landing past an in-flight head is paged (pr_sched.out_of_queue). Arm them (Renovate
+    `platformAutomerge: true`) and they join the queue with no change here."""
+    branch = str(p.get("headRefName") or "")
+    return (not p.get("isCrossRepository") and not p.get("isDraft") and not branch.startswith("train/")
+            and bool(p.get("autoMergeRequest")))
+
+
+def head(prs: list[dict]) -> dict | None:
+    """THE queue head: the lowest-numbered member (landing_order). Pure. A head blocked on its own
+    red holds no runner -- it has no demand -- so it costs the rest nothing (work-conserving)."""
+    members = [p for p in prs if member(p)]
+    return min(members, key=landing_order) if members else None
+
+
+@dataclass(frozen=True)
+class Job:
+    """One queued or running job on a pool, from the Actions jobs API."""
+    pr: int          # 0 = not a pull_request run (push to main, schedule): never preempted
+    run: int
+    attempt: int
+    name: str
+    pool: str        # the scarce pool label it targets ('' = none)
+    status: str      # queued | in_progress
+    created: float   # epoch seconds
+    started: float | None = None
+
+
+@dataclass
+class Sched:
+    head: int | None
+    preempt: list[tuple[Job, str]] = field(default_factory=list)   # (job, why) -- cancel its run
+    demand: dict[str, float] = field(default_factory=dict)          # pool -> head's oldest queued wait (s)
+    stalled: list[str] = field(default_factory=list)                # one line per starved pool
+
+
+def schedule(head_pr: int | None, jobs: list[Job], capacity: dict[str, int], now: float,
+             preempt_after_s: float = 180, stall_s: float = 900, max_attempt: int = 4) -> Sched:
+    """Which non-head runs to cancel so the head gets the pool next, and which pools starve it. Pure."""
+    out = Sched(head_pr)
+    if head_pr is None:
+        return out
+    for pool, cap in sorted(capacity.items()):
+        here = [j for j in jobs if j.pool == pool]
+        mine = [j for j in here if j.pr == head_pr and j.status == "queued"]
+        if not mine:
+            continue
+        wait = now - min(j.created for j in mine)
+        out.demand[pool] = wait
+        others = [j for j in here if j.pr not in (0, head_pr) and j.attempt < max_attempt]
+        running = [j for j in here if j.status == "in_progress"]
+        holders = [j for j in running if j.pr not in (0, head_pr)]
+        if wait > stall_s and holders:
+            out.stalled.append(f"{pool}: head #{head_pr} has waited {wait / 60:.0f} min while "
+                               + ", ".join(f"#{j.pr} ({j.name})" for j in holders) + " held it")
+        for j in (j for j in others if j.status == "queued"):
+            out.preempt.append((j, f"queued on {pool} ahead of head #{head_pr}"))
+        need = len(mine) - max(0, cap - len(running))
+        young = sorted((j for j in others if j.status == "in_progress" and j.started is not None
+                        and now - j.started < preempt_after_s), key=lambda j: -(j.started or 0))
+        for j in young[:max(0, need)]:
+            out.preempt.append((j, f"started {(now - (j.started or now)) / 60:.1f} min ago on {pool}, "
+                                   f"head #{head_pr} waiting"))
+    seen: set[int] = set()
+    out.preempt = [(j, w) for j, w in out.preempt if not (j.run in seen or seen.add(j.run))]
+    return out
+
+
+def admit(me: dict, head_pr: dict | None, head_demand: bool) -> tuple[bool, str]:
+    """(park?, why) for one PR's job about to take a scarce pool. Pure. Parks ONLY a PR numbered
+    after the head while the head has demand there: the head itself, a PR ahead of it in landing
+    order (a fixed red, about to be head), and every PR when the head needs nothing all run."""
+    if head_pr is None:
+        return False, "no queue head"
+    if int(me["number"]) == int(head_pr["number"]):
+        return False, "this PR is the queue head"
+    if int(me["number"]) < int(head_pr["number"]):
+        return False, f"ahead of the queue head #{head_pr['number']} in landing order"
+    if not head_demand:
+        return False, f"queue head #{head_pr['number']} needs nothing on this pool (work-conserving)"
+    return True, f"parked: queue head #{head_pr['number']} needs this pool; re-run automatically when it is free"
