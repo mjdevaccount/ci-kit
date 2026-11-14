@@ -76,13 +76,24 @@ Comments = Callable[[str, int], list[str]]
 Write = Callable[..., subprocess.CompletedProcess]
 
 
+# THE STALE DEADLINE IS DERIVED, NOT GUESSED (v1.35.0). A dispatch is "stale" (paged) only after
+# the longest a LIVE heal can take: every pr-heal.yml job's timeout-minutes, in order (they run
+# one after another; tests/test_heal_ladder_must_fire.py pins this table to the workflow and the
+# fix job to pr_fix.FIX_JOB_MIN), plus the wait for a sealed runner before the fix job starts --
+# measured up to 38 min while full reviews held the pool. 90 was below the 95 of the timeouts
+# alone: a heal still inside its limits was paged as lost.
+HEAL_JOB_MIN = {"plan": 5, "regen": 20, "claim": 5, "fix": 50, "push": 10, "report": 5}
+SEALED_QUEUE_MIN = 40
+STALE_MIN = sum(HEAL_JOB_MIN.values()) + SEALED_QUEUE_MIN
+
+
 @dataclass(frozen=True)
 class Config:
     on: bool = False
     claude_per_pass: int = 1     # tier-3 dispatches per pass (0 = tier 3 off)
     claude_per_pr: int = 2       # tier-3 dispatches per PR, all heads
     per_pr: int = 6              # heal dispatches per PR, all heads
-    stale_min: float = 90.0      # a dispatch with no record after this long is paged
+    stale_min: float = STALE_MIN  # a dispatch with no record after this long is paged (derived above)
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Config:
@@ -94,7 +105,7 @@ class Config:
         return cls(on=(e.get("CI_KIT_HEAL") or "").strip().lower() in ("1", "true"),
                    claude_per_pass=int(num("CI_KIT_HEAL_CLAUDE_PER_PASS", 1)),
                    claude_per_pr=int(num("CI_KIT_HEAL_CLAUDE_PER_PR", 2)),
-                   per_pr=int(num("CI_KIT_HEAL_PER_PR", 6)), stale_min=num("CI_KIT_HEAL_STALE_MIN", 90))
+                   per_pr=int(num("CI_KIT_HEAL_PER_PR", 6)), stale_min=num("CI_KIT_HEAL_STALE_MIN", STALE_MIN))
 
 
 # ── pure ──────────────────────────────────────────────────────────────────────────────────────

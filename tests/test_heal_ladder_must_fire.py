@@ -344,3 +344,46 @@ def test_a_finished_or_other_head_heal_is_not_in_flight_must_not_fire() -> None:
     # an attempt at an OLD head says nothing about this one's tier 3
     why = pr_ladder.decide(pr(), [dispatched, pr_ladder.ATTEMPT.format(head="c" * 40, run="1")], ON, 1, NOW)[2]
     assert "IN FLIGHT" not in why and "in flight, no heal record yet" in why
+
+
+# ---- the stale deadline is derived from the heal's own timeouts (v1.35.0) -------------------------
+def _heal_timeouts(text: str) -> dict[str, int]:
+    import yaml
+    jobs = yaml.safe_load(text)["jobs"]
+    return {k: int(v["timeout-minutes"]) for k, v in jobs.items()}
+
+
+def stale_faults(heal_yml: str, autoupdate_yml: str, table: dict[str, int], stale: float) -> list[str]:
+    import yaml
+    out = []
+    if _heal_timeouts(heal_yml) != table:
+        out.append("HEAL_JOB_MIN is not pr-heal.yml's job timeouts")
+    if table.get("fix") != pr_fix.FIX_JOB_MIN:
+        out.append("the fix job's timeout is not pr_fix.FIX_JOB_MIN")
+    if stale < sum(table.values()) + 38:  # the measured sealed-runner wait
+        out.append("a heal inside its own limits can be paged as lost")
+    doc = yaml.safe_load(autoupdate_yml)
+    default = doc.get("on", doc.get(True))["workflow_call"]["inputs"]["heal-stale-minutes"]["default"]
+    if default != stale or Config().stale_min != stale or Config.from_env({}).stale_min != stale:
+        out.append("a heal-stale default is not the derived STALE_MIN")
+    return out
+
+
+def _stale_inputs() -> tuple[str, str]:
+    from pathlib import Path
+    wf = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    return (wf / "pr-heal.yml").read_text(encoding="utf-8"), (wf / "pr-autoupdate.yml").read_text(encoding="utf-8")
+
+
+def test_the_heal_stale_deadline_covers_a_live_heal_must_not_fire() -> None:
+    heal, upd_yml = _stale_inputs()
+    assert stale_faults(heal, upd_yml, pr_ladder.HEAL_JOB_MIN, pr_ladder.STALE_MIN) == []
+
+
+def test_each_stale_deadline_fault_fires_must_fire() -> None:
+    heal, upd_yml = _stale_inputs()
+    t = pr_ladder.HEAL_JOB_MIN
+    assert stale_faults(heal, upd_yml, t, 90)                                       # the old default
+    assert stale_faults(heal.replace("timeout-minutes: 20", "timeout-minutes: 30", 1), upd_yml, t, pr_ladder.STALE_MIN)
+    assert stale_faults(heal, upd_yml, {**t, "fix": 40}, pr_ladder.STALE_MIN)
+    assert stale_faults(heal, upd_yml.replace("        default: 135\n", "        default: 90\n"), t, pr_ladder.STALE_MIN)
