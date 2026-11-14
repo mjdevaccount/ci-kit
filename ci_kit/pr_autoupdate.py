@@ -52,7 +52,7 @@ import sys
 import urllib.parse
 from dataclasses import dataclass
 
-from ci_kit import pr_heal, pr_hold, pr_list, pr_queue, pr_sched
+from ci_kit import pr_heal, pr_hold, pr_list, pr_queue, pr_sched, train_kick
 from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
 from ci_kit.ntfy import page  # noqa: F401 -- re-exported: _update_one pages through this name
 
@@ -75,6 +75,9 @@ class Options:
     before: str = ""  # a push to main's previous sha (the out-of-queue merge check)
     sha: str = ""
     hold: bool = False  # the queue hold: required status `queue/position`, success on the head only (pr_hold)
+    # the caller's merge-train workflow file, dispatched when this pass sees work for it (train_kick); '' = off
+    train_workflow: str = ""
+    train_min_batch: int = train_kick.MIN_BATCH
 
 
 @dataclass(frozen=True)
@@ -254,7 +257,7 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     # a PARKED PR (the scheduler cancelled or deferred its run) is eligible like a machinery red:
     # nothing in it is the author's to fix, and the update is its fresh run
     parked = frozenset(int(p["number"]) for p in prs if _has(p, pr_sched.PARKED))
-    base = pr_hold.default_branch(repo, _gh_read) if opts.hold or opts.scarce else None
+    base = pr_hold.default_branch(repo, _gh_read) if opts.hold or opts.scarce or opts.train_workflow else None
     try:  # reads only; the hold (the head's `queue/position` success) runs whatever happens here
         heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read,
                                             pr_heal.comments_of, summary)
@@ -310,6 +313,10 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
             behind=lambda p: (p.get("mergeStateStatus") or "UNKNOWN").upper() in ("BEHIND", "UNKNOWN"),
             before=opts.before, sha=opts.sha, updated=frozenset(int(n) for n in updated), skip=skip)
     errors += unlabel_resolved(repo, prs, attempted, opts, summary)
+    if opts.train_workflow:
+        # a PR this pass just updated is no longer green at its new head: never count it ready
+        errors += train_kick.kick(repo, opts.train_workflow, [p for p in prs if p["number"] not in updated],
+                                  opts.required, base or "main", _gh, summary, opts.train_min_batch)
     return 1 if errors else 0
 
 
@@ -442,7 +449,10 @@ def main(argv: list[str] | None = None) -> int:
                    preempt_after_min=args.preempt_after_min, head_stall_min=args.head_stall_min,
                    before=os.environ.get("CI_KIT_BEFORE", ""),
                    sha=os.environ.get("CI_KIT_SHA", "") if os.environ.get("CI_KIT_EVENT") == "push" else "",
-                   hold=os.environ.get("CI_KIT_QUEUE_HOLD", "").strip().lower() in ("1", "true"))
+                   hold=os.environ.get("CI_KIT_QUEUE_HOLD", "").strip().lower() in ("1", "true"),
+                   # env vars, never flags: an older @v1 tool would refuse a flag it does not know
+                   train_workflow=os.environ.get("CI_KIT_TRAIN_WORKFLOW", "").strip(),
+                   train_min_batch=int(os.environ.get("CI_KIT_TRAIN_MIN_BATCH", "").strip() or train_kick.MIN_BATCH))
     summary: list[str] = []
     relock: list[int] = []
     try:

@@ -1,8 +1,8 @@
 # merge-train -- test N armed PRs ONCE on one tree, land them as N commits (ci-merge-train).
 #
 #   on:
-#     schedule: [{ cron: "7,27,47 * * * *" }]       # the pass that finds work nobody signalled
-#     workflow_dispatch:
+#     schedule: [{ cron: "7 * * * *" }]             # BACKSTOP: pr-autoupdate dispatches the rest
+#     workflow_dispatch:                             # pr-autoupdate's `train-workflow: merge-train.yml`
 #     pull_request_target:                           # the BASE branch's copy of this file runs
 #       types: [labeled, closed]                     # `merge-train` label = run now; a train closing = finalize
 #     workflow_run:                                  # a train's checks finishing = judge it now
@@ -25,6 +25,11 @@
 #         required-checks: "lint + doc checks,unit tests,review gate,image-pr-build"
 #       secrets:
 #         token: ${{ secrets.PR_UPDATE_TOKEN }}   # the same PAT pr-autoupdate holds
+#
+# WOKEN BY THE QUEUE (v1.32.0). A cron every 20 min found work on 3 of 52 passes (trade-data
+# 2026-11-14), each a secure-pool job. pr-autoupdate already reads every PR with its checks, so
+# with `train-workflow: merge-train.yml` it dispatches this workflow when a pass would find work
+# (ci_kit/train_kick.py), and the cron is an hourly backstop for whatever it misses.
 #
 # WHY (trade-data operator, 2026-11-11): "when we get like 8 prs queued up ... merge them into a
 # common branch and let CI run against that. Keep the commit history per PR at least." The design,
@@ -57,7 +62,8 @@
 # a `train/` PR this workflow did not compose. From OUTSIDE, mcp scripts/train_watch.py (via
 # pr_reconcile.py) names a RIDER in trains at one head for hours (its `rode` markers, across
 # trains), a train merged and never finalized, a constituent closed as landed whose commit is not
-# on main, and a stray `in-train` label; mcp scripts/ci-schedule-audit.py watches the cron.
+# on main, and a stray `in-train` label; mcp scripts/ci-schedule-audit.py watches the cron. Each
+# pr-autoupdate pass prints its `merge train:` decision (woken / not, and why).
 name: merge-train
 
 on:
