@@ -5,7 +5,7 @@
 #
 #   on:
 #     push: { branches: [main] }
-#     pull_request_target: { types: [auto_merge_enabled] }   # arming starts a pass (v1.31.0)
+#     pull_request_target: { types: [auto_merge_enabled] }   # arming starts a pass (v1.32.0)
 #     workflow_dispatch:
 #   concurrency: { group: pr-autoupdate, cancel-in-progress: false }
 #   permissions: { contents: read, pull-requests: read, checks: read, statuses: read }
@@ -36,7 +36,7 @@
 # re-run in full and every required check still passes at the merging head. Pair it with the
 # review gate's `queue-priority: true`. The `token` then needs Actions: Read and write.
 #
-# RENOVATE JOINS THE QUEUE (v1.31.0, ci_kit/pr_renovate.py). With `max-in-flight` set, each pass
+# RENOVATE JOINS THE QUEUE (v1.32.0, ci_kit/pr_renovate.py). With `max-in-flight` set, each pass
 # first ARMS (squash, the GraphQL mutation, pinned to the head it read) every Renovate PR whose body
 # says `**Automerge**: Enabled.` -- in a queue repo Renovate itself never arms or merges. Held, never
 # armed: Automerge Disabled (the database group, majors, `fails-green`), `autoland-off`, a hand
@@ -44,7 +44,7 @@
 # A refused arm or tick is a red run. Needs nothing new: the `token` already
 # holds Pull requests RW.
 #
-# ARMING STARTS THE QUEUE (v1.31.0): without `pull_request_target: { types: [auto_merge_enabled] }`
+# ARMING STARTS THE QUEUE (v1.32.0): without `pull_request_target: { types: [auto_merge_enabled] }`
 # in the caller's `on:`, a newly armed PR waits for the next push to main or check-workflow run --
 # arming is neither. pull_request_target runs the BASE copy of the caller with its secrets; this
 # workflow checks out no PR code, so that is safe. Guard the caller's job against a fork's PR:

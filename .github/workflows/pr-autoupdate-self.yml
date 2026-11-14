@@ -26,7 +26,7 @@ on:
   workflow_run:
     workflows: [ci]
     types: [completed]
-  # ARMING STARTS THE QUEUE (v1.31.0). Arming auto-merge changes the queue (a new member) but is
+  # ARMING STARTS THE QUEUE (v1.32.0). Arming auto-merge changes the queue (a new member) but is
   # neither a push to main nor a CI run, so an armed PR waited for the next one -- or a hand
   # dispatch (Scraper#161, home-host#245, trade-infra#888, 2026-11-14). pull_request_target runs
   # the BASE branch's copy of this file with the base's secrets and checks out NO PR code (the job

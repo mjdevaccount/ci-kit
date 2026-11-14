@@ -113,7 +113,7 @@ class World:
     def __init__(self, bodies: dict[int, tuple[str, dict | None]], *, refuse_arm: bool = False,
                  detail_fails: bool = False, refuse_patch: bool = False) -> None:
         self.bodies, self.refuse_arm, self.detail_fails, self.writes = bodies, refuse_arm, detail_fails, []
-        self.refuse_patch = refuse_patch
+        self.refuse_patch, self.inputs = refuse_patch, {}
 
     def read(self, *a: str) -> subprocess.CompletedProcess:
         if a[:2] == ("api", "graphql") and not any(x.startswith("number=") for x in a):
@@ -130,8 +130,10 @@ class World:
             return subprocess.CompletedProcess(a, 0, json.dumps({"statuses": []}), "")
         return subprocess.CompletedProcess(a, 0, json.dumps({"default_branch": "main"}), "")
 
-    def write(self, *a: str, **_: object) -> subprocess.CompletedProcess:
+    def write(self, *a: str, input_text: str | None = None) -> subprocess.CompletedProcess:
         self.writes.append(a)
+        if input_text is not None:
+            self.inputs[len(self.writes) - 1] = input_text
         if a[:2] == ("api", "graphql") and "enablePullRequestAutoMerge" in " ".join(a):
             if self.refuse_arm:
                 return subprocess.CompletedProcess(a, 1, "", "HTTP 403: Resource not accessible by personal access token")
@@ -142,8 +144,9 @@ class World:
         return subprocess.CompletedProcess(a, 0, "", "")
 
     def bodies_patched(self) -> dict[int, str]:
-        return {int(w[3].rsplit("/", 1)[1]): next(x for x in w if x.startswith("body="))[5:]
-                for w in self.writes if w[:2] == ("api", "-X") and w[2] == "PATCH"}
+        # the body travels on stdin (--input -), never as one argv string (Linux's 128 KiB arg cap)
+        return {int(w[3].rsplit("/", 1)[1]): json.loads(self.inputs[i])["body"]
+                for i, w in enumerate(self.writes) if w[:3] == ("api", "-X", "PATCH") and "--input" in w}
 
     def armed(self) -> list[str]:
         return [next(x for x in w if x.startswith("id=")) for w in self.writes
@@ -269,3 +272,23 @@ def test_a_rebase_box_that_cannot_be_ticked_is_a_red_run_must_fire(monkeypatch: 
     rc, summary = _run(monkeypatch, [_pr(3110, merge="DIRTY")], World({3110: (ON, None)}, refuse_patch=True))
     assert rc == 1 and "rebase box could not be ticked" in capsys.readouterr().out
     assert any("NOT ticked" in s for s in summary)
+
+
+def test_an_armed_kit_pr_that_went_dirty_is_asked_to_rebase_too_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+    # THE COMMON CASE (reviewer, 2026-11-14): every automerge Renovate PR is armed on its first pass, and a
+    # conflict never disarms it, so a kit PR that goes DIRTY later is armed -- no candidate. With
+    # rebaseWhen "never" nothing else moves it. dies to: ticking only unarmed candidates
+    world = World({3120: (ON, None), 3121: (ON, None), 3122: (OFF, None), 3123: (ON, None)})
+    prs = [_pr(3120, armed=True, merge="DIRTY"), _pr(3121, armed=True, merge="BEHIND"),
+           _pr(3122, armed=True, merge="DIRTY"), _pr(3123, armed=True, merge="DIRTY", labels=("autoland-off",))]
+    rc, summary = _run(monkeypatch, prs, world)
+    assert rc == 0 and world.armed() == []
+    assert list(world.bodies_patched()) == [3120], "an armed BEHIND, a Disabled and an opted-out PR are left alone"
+    assert any(s.startswith("#3120: armed Renovate PR") and "rebase box ticked" in s for s in summary)
+
+
+def test_a_crlf_body_still_reads_must_fire() -> None:
+    # a body saved from the web UI comes back CRLF; `$` alone missed the heading (reviewer, live td#3105)
+    crlf = ON.replace("\n", "\r\n")
+    assert pr_renovate.automerge_verdict(crlf) == "Enabled."
+    assert pr_renovate.ticked(crlf) is not None

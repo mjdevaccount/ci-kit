@@ -54,7 +54,7 @@ RECORD_JOB = "record verdict"      # the review gate's job that writes the verdi
 PRE_JOB = "review"                 # the review gate's first job (the name mcp review_gate_auth reads)
 MAX_ATTEMPT = 4                    # a run re-run this often is never parked again (no starving)
 
-RENOVATE = ("renovate", "renovate[bot]", "app/renovate")  # the bot's logins: it merges ITSELF (platformAutomerge off)
+RENOVATE = ("renovate", "renovate[bot]", "app/renovate")  # the bot's logins (pr_renovate.py, out_of_queue)
 
 Gh = Callable[..., subprocess.CompletedProcess]
 
@@ -223,10 +223,12 @@ def rerun(repo: str, r: dict, write: Gh) -> str:
 def out_of_queue(repo: str, prs: list[dict], before: str, sha: str, read: Gh, skip: frozenset[int] = frozenset()) -> str:
     """'' or the page body: the push `before..sha` merged a PR OUTSIDE the queue while the head was
     in flight (current with `before`, no failing check) -- only an in-flight head was hurt. Outside
-    = numbered after the head (the head was passed over), or Renovate's own merge whatever its
-    number: with `platformAutomerge: false` (ci-kit's preset) it is never armed, never a member,
-    and lands the moment its checks pass (td#3072 past head #3073, 03:53Z 11-14). A lower-numbered
-    ARMED merge was the head itself (closed now, so `head` is the next one)."""
+    = numbered after the head (the head was passed over), or a Renovate PR that merged UNARMED,
+    whatever its number: Renovate merging itself (td#3072 past head #3073, 03:53Z 11-14) or mcp
+    pr_reconcile landing a CLEAN one ci_kit/pr_renovate.py held. An ARMED lower-numbered merge was
+    the head itself (closed now, so `head` is the next one) -- Renovate's included since v1.32.0,
+    when pr_renovate.py arms its automerge PRs and they land as members. Arming is read from the
+    merged PR's `auto_merge`, which GitHub keeps after the merge (trade-data #3102-#3104)."""
     if not before or not sha or set(before) == {"0"}:
         return ""
     merged = _json(read, "api", f"repos/{repo}/commits/{sha}/pulls")
@@ -236,8 +238,10 @@ def out_of_queue(repo: str, prs: list[dict], before: str, sha: str, read: Gh, sk
         return ""
     nums = [int(m["number"]) for m in merged or [] if isinstance(m, dict) and m.get("merged_at")
             and not str((m.get("head") or {}).get("ref") or "").startswith("train/")
-            and (int(m["number"]) > int(h["number"]) or str((m.get("head") or {}).get("ref") or "").startswith("renovate/")
-                 or str((m.get("user") or {}).get("login") or "") in RENOVATE)]
+            and (int(m["number"]) > int(h["number"])
+                 or (not m.get("auto_merge")
+                     and (str((m.get("head") or {}).get("ref") or "").startswith("renovate/")
+                          or str((m.get("user") or {}).get("login") or "") in RENOVATE)))]
     if not nums:
         return ""
     if redclass.red_checks(h.get("statusCheckRollup")):  # a red head was never in flight (cancelled is red)
@@ -247,7 +251,7 @@ def out_of_queue(repo: str, prs: list[dict], before: str, sha: str, read: Gh, sk
         return ""
     return (f"#{', #'.join(map(str, nums))} merged to main while queue head #{h['number']} was in flight "
             f"against the previous main ({before[:12]}): #{h['number']} must re-test. A merge outside the "
-            "queue (Renovate's own automerge, a hand merge) costs the head its run.")
+            "queue (an unarmed Renovate merge, a hand merge) costs the head its run.")
 
 
 def pass_(repo: str, prs: list[dict], capacity: dict[str, int], read: Gh, write: Gh, summary: list[str],

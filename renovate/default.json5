@@ -424,6 +424,10 @@
 
     // Langfuse is STATEFUL: it runs Prisma and ClickHouse migrations at startup, so a bump is
     // a one-way schema change. One PR for the four images it moves with, read before merging.
+    // `held-deploy`, NOT `deploys-on-merge` (2026-11-14): edge-host scripts/infra_config.py POLICY
+    // gives langfuse-web/-worker/-redis NO entry (= manual) and langfuse-clickhouse `manual,
+    // recreate_ok=False`, so a merge recreates nothing; the bump needs a deliberate recreate under
+    // `held-deploy.sh --run`. The label must say what the merge DOES, not what a deploy might.
     {
       matchPackageNames: [
         "langfuse/langfuse",
@@ -434,7 +438,7 @@
       matchUpdateTypes: ["minor", "patch", "digest"],
       groupName: "langfuse stack",
       automerge: false,
-      labels: ["deps", "deploys-on-merge", "stateful"],
+      labels: ["deps", "held-deploy", "stateful"],
     },
     // ---- ghcr.io images: no release timestamp, so no END to the age wait (2026-11-11) ---------
     // Renovate reads no release timestamp from ghcr.io, and minimumReleaseAgeBehaviour's default
@@ -459,6 +463,30 @@
       groupName: "windmill",
       automerge: false,
       labels: ["deps", "held-deploy"],
+    },
+    // The rest of trade-infra's compose images that edge-host scripts/infra_config.py does NOT let
+    // a merge recreate (2026-11-14, checked service by service against its POLICY): caddy is
+    // `manual, recreate_ok=False` (the blue/green colour lives in the reload process), crawl4ai
+    // (mid-research calls) and valkey (litellm's cache) are unpolicied = manual. In "compose images"
+    // they were labelled `deploys-on-merge` and merging recreated nothing. Their OWN group, because
+    // Renovate unions every upgrade's labels into its PR (workers/repository/updates/generate.ts),
+    // so inside "compose images" the PR would carry both labels. Merge policy is unchanged (the
+    // compose rules above decide automerge); infra_config's `manual` finding is the sweep WARN that
+    // names the recreate still owed. Majors keep their own PRs (groupName null above), relabelled.
+    // database images (pg-batch, langfuse-pg/-db, pgai), windmill, langfuse and minio have rules.
+    {
+      matchRepositories: ["mjdevaccount/trade-infra"],
+      matchManagers: ["docker-compose"],
+      matchPackageNames: ["caddy", "unclecode/crawl4ai", "valkey/valkey"],
+      labels: ["deps", "held-deploy"],
+    },
+    {
+      matchRepositories: ["mjdevaccount/trade-infra"],
+      matchManagers: ["docker-compose"],
+      matchPackageNames: ["caddy", "unclecode/crawl4ai", "valkey/valkey"],
+      matchUpdateTypes: ["minor", "patch", "digest", "pin", "pinDigest"],
+      groupName: "compose images (held-deploy)",
+      groupSlug: "compose-images-held-deploy",
     },
     // A Python base-image bump changes the interpreter under every image built on it (#608:
     // python:3.14 auto-merged and wedged deploy-reconcile for 13h). Its own PR, read first.
@@ -491,7 +519,9 @@
     // no auto-merge (minio holds langfuse's event store, a data volume; a `latest` move can be a
     // minio release, same reasoning as the litellm floating-tag rule), its own PR (in "compose
     // images" it would stop that whole group auto-merging), opened in the weekend window and NOT
-    // re-pushed between windows, so the reviewed digest is the one that lands. A session merges it.
+    // re-pushed between windows, so the reviewed digest is the one that lands. A session merges it,
+    // then recreates under `held-deploy.sh --run`: infra_config.py POLICY names neither
+    // langfuse-minio nor langfuse-minio-ilm (= manual), so the merge alone recreates nothing.
     {
       matchDatasources: ["docker"],
       matchPackageNames: ["cgr.dev/chainguard/minio"],
@@ -500,7 +530,7 @@
       minimumReleaseAge: null,
       automerge: false,
       updateNotScheduled: false,
-      labels: ["deps", "deploys-on-merge", "floating-tag", "stateful"],
+      labels: ["deps", "held-deploy", "floating-tag", "stateful"],
     },
     // A pgbouncer PATCH lands on green: CI runs scripts/test_pgbouncer_lan.sh against the
     // image, so a broken patch is a red check. After "database images" so it wins for patches.
@@ -560,7 +590,7 @@
     // at 03:53:47Z and #3073/#3075/#3076 all went BEHIND. So in these repos a Renovate branch is
     // rebased only on a CONFLICT, merged by nothing of its own, and becomes current with main
     // only when the queue picks it (ci-kit pr-autoupdate ARMS it on its next pass,
-    // ci_kit/pr_renovate.py since v1.31.0 -- no hand step; mcp pr_reconcile is the outside witness). A repo that adds pr-autoupdate.yml with
+    // ci_kit/pr_renovate.py since v1.32.0 -- no hand step; mcp pr_reconcile is the outside witness). A repo that adds pr-autoupdate.yml with
     // max-in-flight joins this list (tests/test_renovate_merge_queue.py pins it).
     // trade-data runs ci-kit's merge train + serial pr-autoupdate, which land armed PRs lowest
     // number first, one heavy CI run at a time. Renovate's own merge sees none of it:

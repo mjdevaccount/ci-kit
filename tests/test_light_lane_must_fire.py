@@ -1,4 +1,4 @@
-"""The four lint workflows take the caller's LIGHT lane before its CI_RUNNER (v1.18.0).
+"""The five lint workflows take the caller's LIGHT lane before its CI_RUNNER (v1.18.0).
 
 A self-hosted pool admits a runner at its pool's measured peak memory; a doc lint on trade-data's
 CI_RUNNER pool was booked at 2560 MB and held the room a unit job needed (home-host, 2026-11-08:
@@ -14,7 +14,7 @@ import re
 import unittest
 
 _WF = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows"
-LINTS = ("doc-refs.yml", "dup-code.yml", "secret-argv.yml", "gitleaks.yml")
+LINTS = ("doc-refs.yml", "dup-code.yml", "secret-argv.yml", "hidden-unicode.yml", "gitleaks.yml")
 _LANES = ("inputs.runner", "vars.CI_RUNNER_LIGHT", "vars.CI_RUNNER", "'\"ubuntu-latest\"'")
 
 

@@ -24,7 +24,8 @@ who registered that name is not it), unarmed, same-repo, not a draft, not a trai
         preset documents, and is never undone here. Re-arm by hand to rejoin;
       - DIRTY or CONFLICTING: the pass ticks the PR's rebase box (`ticked`), Renovate recreates the
         branch on current main, and a later pass arms it. Needed since the preset's kit rule
-        (`rebaseWhen: never` in queue repos, v1.31.0): Renovate never moves that branch by itself.
+        (`rebaseWhen: never` in queue repos, v1.32.0): Renovate never moves that branch by itself.
+        An ARMED one that goes DIRTY later is ticked too (a conflict never disarms a PR);
         A refused tick is a red run -- untouched, the PR would sit forever;
       - CLEAN / UNSTABLE / HAS_HOOKS: GitHub would merge it the moment it is armed (gh's `--auto`
         merges an UNSTABLE PR at once -- past a red non-required check). Never in a hold repo (an
@@ -67,7 +68,7 @@ Gh = Callable[..., subprocess.CompletedProcess]
 
 # Renovate's own config block: the LAST `### Configuration` heading (prBodyTemplate puts it AFTER the
 # changelogs, whose upstream text may carry any heading or marker), then its `🚦 **Automerge**:` line
-_CONFIG = re.compile(r"^### Configuration[ \t]*$", re.M)
+_CONFIG = re.compile(r"^### Configuration[ \t]*\r?$", re.M)
 _AUTOMERGE_LINE = re.compile(r"^\U0001f6a6 \*\*Automerge\*\*: (.*?)\s*$", re.M)
 ENABLED = "Enabled."
 MANUAL = "manually_disabled"  # AutoMergeDisabledEvent.reasonCode of a hand `--disable-auto`
@@ -93,6 +94,17 @@ def is_renovate(p: dict) -> bool:
     User; the app is a Bot (GraphQL `author.__typename`), on a branch in this repo."""
     a = p.get("author") or {}
     return a.get("__typename") == "Bot" and str(a.get("login") or "") in RENOVATE and not p.get("isCrossRepository")
+
+
+def conflicted(p: dict) -> bool:
+    """GitHub reports a merge conflict with the base. Pure."""
+    return (str(p.get("mergeStateStatus") or "").upper() == "DIRTY"
+            or str(p.get("mergeable") or "").upper() == "CONFLICTING")
+
+
+def _opted_out(p: dict) -> bool:
+    names = {str(lb.get("name") or "").lower() for lb in p.get("labels") or []}
+    return OPT_OUT in names or OPT_OUT in str(p.get("title") or "").lower()
 
 
 def candidate(p: dict) -> bool:
@@ -136,8 +148,7 @@ def ticked(body: str) -> str | None:
 def verdict(p: dict, body: str, disabled: dict | None) -> tuple[bool, str]:
     """(arm?, why) for one candidate. Pure: the policy the tests pin. `disabled` = the PR's last
     AutoMergeDisabledEvent ({reasonCode, createdAt, actor}) or None."""
-    names = {str(lb.get("name") or "").lower() for lb in p.get("labels") or []}
-    if OPT_OUT in names or OPT_OUT in str(p.get("title") or "").lower():
+    if _opted_out(p):
         return False, f"opted out (`{OPT_OUT}`)"
     v = automerge_verdict(body)
     if v is None:
@@ -149,7 +160,7 @@ def verdict(p: dict, body: str, disabled: dict | None) -> tuple[bool, str]:
         return False, (f"auto-merge was turned off by hand ({who}, {disabled.get('createdAt')}): a hold, "
                        "never undone here -- re-arm by hand to rejoin")
     merge = str(p.get("mergeStateStatus") or "UNKNOWN").upper()
-    if merge == "DIRTY" or str(p.get("mergeable") or "").upper() == "CONFLICTING":
+    if conflicted(p):
         return False, CONFLICT
     if merge in _MERGEABLE_NOW:
         return False, (f"mergeable as it stands ({merge}): GitHub would merge it the moment it is armed, past "
@@ -195,12 +206,15 @@ def _arm(p: dict, write: Gh) -> str:
 
 def _ask_rebase(repo: str, n: int, body: str, write: Gh) -> tuple[str, int]:
     """Tick Renovate's rebase box on a conflicting automerge PR: (why, errors). Kit branches in
-    queue repos are `rebaseWhen: "never"` (the preset), so Renovate itself never moves them, and the
-    queue skips a conflicting PR it has not armed -- unasked, this PR would sit forever."""
+    queue repos are `rebaseWhen: "never"` (the preset), so Renovate itself never moves them, and
+    neither can the queue (its update of a conflicting PR is refused) -- unasked, armed or not, this
+    PR would sit forever. The body goes on stdin: a Renovate body runs to ~60k characters, and as one
+    `-f` argument a multi-byte one passes Linux's 128 KiB single-argument cap."""
     new = ticked(body)
     if new is None:
         return CONFLICT + " (its rebase box is already ticked, or absent)", 0
-    r = write("api", "-X", "PATCH", f"repos/{repo}/pulls/{n}", "-f", f"body={new}")
+    r = write("api", "-X", "PATCH", f"repos/{repo}/pulls/{n}", "--input", "-",
+              input_text=json.dumps({"body": new}))
     if r.returncode:
         msg = " ".join((r.stderr or r.stdout or "").split())[-200:]
         print(f"::error::#{n}: Renovate PR conflicts and its rebase box could not be ticked, so nothing "
@@ -213,7 +227,12 @@ def join(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str]) ->
     """Arm every Renovate automerge PR (module doc). Marks each armed row in `prs` so the rest of
     the pass treats it as armed. Returns the errors. Never raises: a look that fails is one error."""
     errors = 0
-    for p in sorted((p for p in prs if candidate(p)), key=lambda p: int(p["number"])):
+    # unarmed: decide whether it joins. ARMED and conflicting: GitHub never disarms on a conflict
+    # (trade-data's AutoMergeDisabledEvents: manually_disabled, closed, head_mismatch only), so an
+    # armed kit PR that went DIRTY is no candidate yet still needs its rebase box (reviewer, 11-14)
+    look = [p for p in prs if candidate(p) or (is_renovate(p) and p.get("autoMergeRequest")
+                                               and not p.get("isDraft") and conflicted(p))]
+    for p in sorted(look, key=lambda p: int(p["number"])):
         n = int(p["number"])
         try:
             body, disabled = _detail(repo, n, read)
@@ -222,6 +241,12 @@ def join(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str]) ->
             why = " ".join(str(getattr(e, "stderr", "") or e).split())[-200:]
             print(f"::error::#{n}: could not read Renovate PR #{n} to decide whether it joins the queue: {why}")
             summary.append(f"#{n}: Renovate PR NOT decided -- its body/timeline could not be read ({why})")
+            continue
+        if p.get("autoMergeRequest"):
+            if automerge_verdict(body) == ENABLED and not _opted_out(p):
+                why, failed = _ask_rebase(repo, n, body, write)
+                errors += failed
+                summary.append(f"#{n}: armed Renovate PR {why}")
             continue
         arm, why = verdict(p, body, disabled)
         if not arm:

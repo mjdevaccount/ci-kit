@@ -25,7 +25,7 @@ lockfile-only conflicts, so the page says so), `--label` (the conflict label; `c
 `--max-in-flight N` + `--required-checks a,b` (a serial queue: at most N armed PRs tested against
 current main at once, lowest PR number first; 0 = every armed PR. The policy and the measurement
 behind it: ci_kit/pr_queue.py). With a queue, every pass first ARMS each Renovate PR whose preset
-verdict is automerge (ci_kit/pr_renovate.py, v1.31.0): Renovate never arms or merges in a queue
+verdict is automerge (ci_kit/pr_renovate.py, v1.32.0): Renovate never arms or merges in a queue
 repo. A PR the queue picked but skipped for a running review hands its slot to the next eligible PR
 (`Plan.spare`), so one long review does not idle the queue.
 

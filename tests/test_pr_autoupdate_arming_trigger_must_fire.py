@@ -1,4 +1,4 @@
-"""Arming auto-merge starts a queue pass -- must fire, both directions (v1.31.0).
+"""Arming auto-merge starts a queue pass -- must fire, both directions (v1.32.0).
 
 pr-autoupdate ran on a push to main or a check workflow finishing. Arming is neither, so a newly
 armed PR sat until something else moved (Scraper#161, home-host#245, trade-infra#888 waited for a
