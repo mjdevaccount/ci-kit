@@ -194,7 +194,7 @@ jobs:
       - name: renovate-config-validator --strict on the preset and this repo's renovate.json
         env:
           # renovate: datasource=npm depName=renovate
-          RENOVATE_VERSION: 44.232.1
+          RENOVATE_VERSION: 44.233.0
         run: npx --yes --package "renovate@${RENOVATE_VERSION}" -- renovate-config-validator --strict --no-global renovate/default.json5 renovate.json
 
   gitleaks:
