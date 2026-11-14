@@ -14,7 +14,9 @@ measured thresholds are there). This module is its two actors:
         head was in flight against the old main (td#3072, Renovate's own automerge, 03:53Z
         11-14, invalidated head #3073);
       - names the head, its wait per pool, every parking and re-run in the summary, and returns an
-        error for a STALLED head so the run goes red (mcp ci-schedule-audit reads that streak).
+        error for a STALLED head so the run goes red (mcp ci-schedule-audit reads that streak);
+        a non-head STARVED in its park is named in every pass and paged ONCE per head, never red
+        (v1.35.0: a waiting state on every pass hid the real failures).
   * the review gate's admission (`python -m ci_kit.pr_admit`, its own module): parks a non-head
     PR's model review while the head needs the sealed pool (pr_queue.admit).
 
@@ -38,11 +40,12 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
+import re
 import subprocess
 from collections.abc import Callable
 
 from ci_kit import pr_queue, redclass
-from ci_kit.ntfy import page
+from ci_kit.ntfy import page, recent
 from ci_kit.pr_heal import PARKED  # ONE name; pr_heal reads it too
 
 PARKED_COLOR = "bfd4f2"
@@ -59,6 +62,10 @@ MAX_ATTEMPT = 4                    # a run re-run this often is never parked aga
 RENOVATE = ("renovate", "renovate[bot]", "app/renovate")  # the bot's logins (pr_renovate.py, out_of_queue)
 
 Gh = Callable[..., subprocess.CompletedProcess]
+Comments = Callable[[str, int], list[str]]
+# a starved park is reported ONCE per (PR, head): this marker (pr_hold's head-held pattern) records the page
+STARVED = "<!-- queue:parked-starved sha={sha} -->"
+_STARVED = re.compile(r"<!-- queue:parked-starved sha=([0-9a-f]{40}) -->")
 
 
 def _ts(s: str | None) -> float | None:
@@ -268,10 +275,11 @@ def out_of_queue(repo: str, prs: list[dict], before: str, sha: str, read: Gh, sk
 def pass_(repo: str, prs: list[dict], capacity: dict[str, int], read: Gh, write: Gh, summary: list[str],
           *, preempt_after_s: float, stall_s: float, behind: Callable[[dict], bool],
           before: str = "", sha: str = "", now: float | None = None, updated: frozenset[int] = frozenset(),
-          skip: frozenset[int] = frozenset()) -> int:
+          skip: frozenset[int] = frozenset(), comments: Comments | None = None) -> int:
     """One scheduler pass (see the module doc). `updated` = PRs this run merged main into: their
     push starts fresh runs, so nothing of theirs is re-run here. `skip` = members that cannot land
-    as they stand (pr_queue.blocked): never the head. Returns the errors."""
+    as they stand (pr_queue.blocked): never the head. `comments` reads a PR's comment bodies (the
+    starved-park marker; default pr_heal.comments_of). Returns the errors."""
     now = dt.datetime.now(dt.UTC).timestamp() if now is None else now
     errors = 0
     same = [p for p in prs if not p.get("isCrossRepository")]
@@ -309,8 +317,8 @@ def pass_(repo: str, prs: list[dict], capacity: dict[str, int], read: Gh, write:
     preempt = [] if off else s.preempt
     errors += _park(repo, preempt, write, summary)
     room = not any(j.status == "queued" for j in jobs) and not s.demand
-    errors += _refill(repo, same, hn, Refill({j.pr for j, _ in preempt}, set(updated), room, now, 2 * stall_s),
-                      read, write, summary, behind)
+    errors += _refill(repo, same, hn, Refill({j.pr for j, _ in preempt}, set(updated), room, now, 2 * stall_s,
+                                             comments), read, write, summary, behind)
     return errors
 
 
@@ -323,6 +331,35 @@ class Refill:
     room: bool
     now: float
     starve_s: float
+    comments: Comments | None = None
+
+
+def _starved(repo: str, p: dict, line: str, write: Gh, comments: Comments | None) -> str:
+    """A non-head parked past its bound: ONE page per (PR, head), then a marker; every later pass
+    only says it (v1.35.0). It was an error on every pass -- trade-data 11-14, 11 of 11 red runs
+    from 20:15Z were this one standing condition, which looked exactly like the 403 token refusals
+    earlier that day. Waiting for a busy pool is not the pass failing, so it never turns the run
+    red; the page is the alarm. Marker unreadable or refused: ntfy's own recent() dedups (6h)."""
+    n, sha = int(p["number"]), str(p.get("headRefOid") or "")
+    if comments is None:
+        from ci_kit.pr_heal import comments_of as comments  # lazy, as pr_heal's own readers
+    try:
+        marked = any(m == sha for b in comments(repo, n) for m in _STARVED.findall(b or ""))
+    except (subprocess.CalledProcessError, ValueError, OSError):
+        marked = False
+    if marked:
+        return "paged already for this head"
+    title = f"{repo.rsplit('/', 1)[-1]}: #{n} parked, starved of a free pool"
+    if recent(title):
+        return "paged already (ntfy, last 6h)"
+    try:
+        note = page(title, line[:900], str(p.get("url") or ""))
+    except Exception as e:  # noqa: BLE001 -- page() catches OSError only (a malformed URL is ValueError)
+        note = f"push FAILED: {e}"
+    body = STARVED.format(sha=sha) + f"\nPR queue: parked past its bound waiting for a free pool ({line}). Paged: {note}"
+    if write("pr", "comment", str(n), "-R", repo, "--body", body).returncode:
+        note += "; marker refused (ntfy dedups the next pages)"
+    return f"page {note}"
 
 
 def _park(repo: str, preempt: list[tuple[pr_queue.Job, str]], write: Gh, summary: list[str]) -> int:
@@ -353,8 +390,9 @@ def _refill(repo: str, prs: list[dict], hn: int | None, r: Refill, read: Gh, wri
     """Re-run parked work: the head's now, one non-head's when the pools have room. Never strands:
     a PR with the label and nothing parked left loses the label -- but not while a run is still
     active at its head (that run may be the admission about to end parked, found next pass). A
-    non-head parked longer than `starve_s` is an ERROR: the run goes red, which mcp's
-    ci-schedule-audit reads. Returns the errors."""
+    non-head parked longer than `starve_s` is named `PARKED STARVED` in every pass and paged once
+    per head (`_starved`); it is NOT an error -- the run stays green for a waiting state. Returns the
+    errors."""
     errors, refilled, first = 0, False, True
     for p in sorted((p for p in prs if any(lb.get("name") == PARKED for lb in p.get("labels") or [])),
                     key=pr_queue.landing_order):
@@ -380,9 +418,8 @@ def _refill(repo: str, prs: list[dict], hn: int | None, r: Refill, read: Gh, wri
             line = f"#{n}: parked ({len(runs)} run(s)) {(r.now - since) / 60:.0f} min, waits for a free pool"
             # only the NEXT in line can starve: the ones behind it wait for it, which is queue order
             if first and r.now - since > r.starve_s:
-                errors += 1
                 print(f"::warning::parked-pr-starved {line}")
-                line = "PARKED STARVED: " + line
+                line = f"PARKED STARVED: {line}; {_starved(repo, p, line, write, r.comments)}"
             first = False
             summary.append(line)
             continue

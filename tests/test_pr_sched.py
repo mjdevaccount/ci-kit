@@ -286,13 +286,62 @@ def test_an_updated_pr_loses_the_label_at_once(labels) -> None:
     assert labels == [(3080, False)] and not any("rerun" in w for w in gh.writes)
 
 
-def test_a_non_head_parked_too_long_turns_the_run_red(labels) -> None:
+def _starving(age_s: float) -> dict[str, object]:
     routes = {**_pools(0, NOW - 600), **_parked_routes(3080, deferred=True)}
-    routes[f"repos/o/r/actions/runs?head_sha={3080:040d}"]["workflow_runs"][0]["updated_at"] = _iso(NOW - 3600)
-    errors, summary = _pass(Gh(routes), [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))])
-    assert errors == 1 and any(s.startswith("PARKED STARVED") for s in summary)
-    routes[f"repos/o/r/actions/runs?head_sha={3080:040d}"]["workflow_runs"][0]["updated_at"] = _iso(NOW - 600)
-    assert _pass(Gh(routes), [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))])[0] == 0
+    routes[f"repos/o/r/actions/runs?head_sha={3080:040d}"]["workflow_runs"][0]["updated_at"] = _iso(NOW - age_s)
+    return routes
+
+
+@pytest.fixture
+def pages(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    sent: list[str] = []
+    monkeypatch.setattr(pr_sched, "page", lambda title, body, click: sent.append(title) or "published (200)")
+    monkeypatch.setattr(pr_sched, "recent", lambda title: False)
+    return sent
+
+
+def test_a_starved_park_pages_once_per_head_and_the_run_stays_green_must_fire(labels, pages) -> None:
+    # trade-data 11-14: 11 of 11 red pr-autoupdate runs from 20:15Z were ONE standing park
+    bodies: list[str] = []
+    gh = Gh(_starving(3600))
+    prs = [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))]
+    errors, summary = _pass(gh, prs, comments=lambda r, n: bodies)
+    assert errors == 0 and len(pages) == 1 and "#3080 parked" in pages[0]
+    assert any(s.startswith("PARKED STARVED: #3080") and "page published" in s for s in summary)
+    marker = next(w for w in gh.writes if w.startswith("pr comment 3080"))
+    assert pr_sched.STARVED.format(sha=f"{3080:040d}") in marker
+    bodies.append(marker)                                               # the next pass reads it back
+    for _ in range(3):
+        errors, summary = _pass(Gh(_starving(3600)), prs, comments=lambda r, n: bodies)
+        assert errors == 0 and len(pages) == 1                          # no second page for this head
+        assert any(s.startswith("PARKED STARVED: #3080") and "paged already for this head" in s for s in summary)
+
+
+def test_a_new_head_of_a_starved_pr_pages_again_and_a_young_park_never_must_not_fire(labels, pages) -> None:
+    old = pr_sched.STARVED.format(sha="c" * 40)
+    _, summary = _pass(Gh(_starving(3600)), [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))],
+                       comments=lambda r, n: [old])
+    assert len(pages) == 1                                              # a marker at an OLD head is not this one's
+    errors, summary = _pass(Gh(_starving(600)), [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))],
+                            comments=lambda r, n: [])
+    assert errors == 0 and len(pages) == 1 and not any(s.startswith("PARKED STARVED") for s in summary)
+
+
+def test_an_unreadable_or_refused_marker_falls_back_to_ntfy_dedup(labels, pages, monkeypatch) -> None:
+    def broken(r: str, n: int) -> list[str]:
+        raise subprocess.CalledProcessError(1, "gh")
+    monkeypatch.setattr(pr_sched, "recent", lambda title: True)       # paged in the last 6h
+    errors, summary = _pass(Gh(_starving(3600)), [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))], comments=broken)
+    assert errors == 0 and pages == [] and any("paged already (ntfy, last 6h)" in s for s in summary)
+
+
+def test_a_real_pass_failure_still_turns_the_run_red_beside_a_starved_park_must_fire(labels, pages) -> None:
+    # the run is red only when the pass itself failed: here the re-run of the parked HEAD is refused
+    routes = {**_starving(3600), **_parked_routes(3073, deferred=True)}
+    gh = Gh(routes, fail=("rerun",))
+    errors, summary = _pass(gh, [_pr(3073, labels=(pr_sched.PARKED,)), _pr(3080, labels=(pr_sched.PARKED,))],
+                            comments=lambda r, n: [])
+    assert errors == 1 and any("parked re-run REFUSED" in s for s in summary)
 
 
 def test_only_the_next_parked_pr_can_starve_the_rest_wait_their_turn_must_not_fire(labels) -> None:

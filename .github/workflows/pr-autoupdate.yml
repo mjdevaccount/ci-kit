@@ -147,7 +147,7 @@ on:
         type: number
         default: 3
       head-stall-minutes:
-        description: the queue head waiting this long on a pool a non-head job holds turns the run red (queue-head-starved)
+        description: the queue head waiting this long on a pool a non-head job holds turns the run red (queue-head-starved); twice this, the next parked non-head is PARKED STARVED: named every pass and paged once per head, the run stays green (v1.35.0)
         type: number
         default: 15
       train-workflow:
