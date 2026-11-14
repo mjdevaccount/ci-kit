@@ -50,9 +50,10 @@ import os
 import subprocess
 import sys
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass
 
-from ci_kit import pr_heal, pr_hold, pr_list, pr_queue, pr_sched, train_kick
+from ci_kit import doomed_runs, pr_heal, pr_hold, pr_list, pr_queue, pr_sched, train_kick
 from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
 from ci_kit.ntfy import page  # noqa: F401 -- re-exported: _update_one pages through this name
 
@@ -78,6 +79,8 @@ class Options:
     # the caller's merge-train workflow file, dispatched when this pass sees work for it (train_kick); '' = off
     train_workflow: str = ""
     train_min_batch: int = train_kick.MIN_BATCH
+    # cancel the `pull_request` runs at heads that cannot merge under strict protection (doomed_runs)
+    cancel_doomed: bool = False  # main() turns it ON (env CI_KIT_CANCEL_DOOMED, default true)
 
 
 @dataclass(frozen=True)
@@ -281,6 +284,34 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
                        f"{len(q.held)} held")
         summary += [f"#{p['number']}: in flight against current main" for p in q.in_flight]
         summary += [f"#{p['number']}: held, {why}" for p, why in q.held]
+    default = _lazy_default(repo, base)
+    if opts.cancel_doomed:
+        # before any update fires: a BEHIND/DIRTY armed head cannot merge under strict protection
+        errors += doomed_runs.sweep(repo, prs, default() if doomed_runs.doomed(prs) else "", opts.review_workflow,
+                                    _gh, summary)
+    attempted, updated, err = _drive(repo, q, head, opts, relock, summary)
+    errors += err
+    errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, pr_heal.write, summary)
+    if opts.scarce or parked:  # parked work is re-run even with the scheduler switched off: never strand
+        errors += pr_sched.pass_(
+            repo, prs, dict(opts.scarce), _gh_read, pr_heal.write, summary,
+            preempt_after_s=opts.preempt_after_min * 60, stall_s=opts.head_stall_min * 60,
+            behind=lambda p: (p.get("mergeStateStatus") or "UNKNOWN").upper() in ("BEHIND", "UNKNOWN"),
+            before=opts.before, sha=opts.sha, updated=frozenset(int(n) for n in updated), skip=skip)
+    errors += unlabel_resolved(repo, prs, attempted, opts, summary)
+    if opts.train_workflow:
+        # a PR this pass just updated is no longer green at its new head: never count it ready. The
+        # default branch is read HERE only, so a caller without hold/scarce sees exactly the old plan.
+        errors += train_kick.kick(repo, opts.train_workflow, [p for p in prs if p["number"] not in updated],
+                                  opts.required, default(), _gh, summary, opts.train_min_batch)
+    return 1 if errors else 0
+
+
+def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock: list[int],
+           summary: list[str]) -> tuple[set[int], set[int], int]:
+    """The update loop: (attempted, updated, errors). After each update the head it replaced is
+    a head that can never merge, so its `pull_request` runs are cancelled (doomed_runs)."""
+    errors = 0
     tracker = ""
     if opts.tracker:
         tracker = _gh("issue", "view", str(opts.tracker), "-R", repo, "--json", "body", "-q",
@@ -302,24 +333,24 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
         attempted.add(n)
         kind, line = _update_one(repo, p, opts, tracker, relock)
         updated |= {n} if kind == "updated" else set()
+        if kind == "updated" and opts.cancel_doomed:
+            errors += doomed_runs.superseded(repo, p, opts.review_workflow, _gh, summary)
         errors += kind == "error"
         if line:
             summary.append(line)
-    errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, pr_heal.write, summary)
-    if opts.scarce or parked:  # parked work is re-run even with the scheduler switched off: never strand
-        errors += pr_sched.pass_(
-            repo, prs, dict(opts.scarce), _gh_read, pr_heal.write, summary,
-            preempt_after_s=opts.preempt_after_min * 60, stall_s=opts.head_stall_min * 60,
-            behind=lambda p: (p.get("mergeStateStatus") or "UNKNOWN").upper() in ("BEHIND", "UNKNOWN"),
-            before=opts.before, sha=opts.sha, updated=frozenset(int(n) for n in updated), skip=skip)
-    errors += unlabel_resolved(repo, prs, attempted, opts, summary)
-    if opts.train_workflow:
-        # a PR this pass just updated is no longer green at its new head: never count it ready. The
-        # default branch is read HERE only, so a caller without hold/scarce sees exactly the old plan.
-        train_base = base or pr_hold.default_branch(repo, _gh_read) or "main"
-        errors += train_kick.kick(repo, opts.train_workflow, [p for p in prs if p["number"] not in updated],
-                                  opts.required, train_base, _gh, summary, opts.train_min_batch)
-    return 1 if errors else 0
+    return attempted, updated, errors
+
+
+def _lazy_default(repo: str, base: str | None) -> Callable[[], str]:
+    """The default branch, read at most once and only when asked: the plan's own `base` stays
+    exactly what hold/scarce made it (review of 1.32.0, finding 2)."""
+    got: list[str] = []
+
+    def read() -> str:
+        if not got:
+            got.append(base or pr_hold.default_branch(repo, _gh_read) or "main")
+        return got[0]
+    return read
 
 
 def _has(p: dict, label: str) -> bool:
@@ -454,7 +485,8 @@ def main(argv: list[str] | None = None) -> int:
                    hold=os.environ.get("CI_KIT_QUEUE_HOLD", "").strip().lower() in ("1", "true"),
                    # env vars, never flags: an older @v1 tool would refuse a flag it does not know
                    train_workflow=os.environ.get("CI_KIT_TRAIN_WORKFLOW", "").strip(),
-                   train_min_batch=int(os.environ.get("CI_KIT_TRAIN_MIN_BATCH", "").strip() or train_kick.MIN_BATCH))
+                   train_min_batch=int(os.environ.get("CI_KIT_TRAIN_MIN_BATCH", "").strip() or train_kick.MIN_BATCH),
+                   cancel_doomed=os.environ.get("CI_KIT_CANCEL_DOOMED", "true").strip().lower() not in ("false", "0", "no"))
     summary: list[str] = []
     relock: list[int] = []
     try:

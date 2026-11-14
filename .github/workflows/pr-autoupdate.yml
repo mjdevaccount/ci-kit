@@ -130,6 +130,14 @@ on:
         description: the train's own min-batch (dispatch only with at least this many candidates)
         type: number
         default: 2
+      cancel-doomed-runs:
+        description: >-
+          cancel the queued/running `pull_request` runs at an armed PR head that cannot merge -- BEHIND
+          or DIRTY on a strict-protected base, or the head the queue just replaced (ci_kit/doomed_runs.py;
+          never the review workflow, never a non-PR event, never an unarmed PR). Needs Actions RW to act
+          and Administration read to see `strict`; without either it says so and cancels nothing
+        type: boolean
+        default: true
       queue-hold:
         description: >-
           the QUEUE HOLD (ci_kit/pr_hold.py, v1.30.0): post commit status `queue/position` -- success on the queue
@@ -141,7 +149,7 @@ on:
         default: false
     secrets:
       token:
-        description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs -- and with train-workflow, which dispatches), commit statuses RW with queue-hold, on the caller repo
+        description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs --, with train-workflow, which dispatches, and with cancel-doomed-runs), administration read (cancel-doomed-runs reads whether the base is strict), commit statuses RW with queue-hold, on the caller repo
         required: true
       ntfy-url:
         description: an ntfy topic URL to page on a NEW conflict ('' = no page)
@@ -197,6 +205,7 @@ jobs:
       # env vars, never flags (the older-@v1-tool reason above)
       CI_KIT_TRAIN_WORKFLOW: ${{ inputs.train-workflow }}
       CI_KIT_TRAIN_MIN_BATCH: ${{ inputs.train-min-batch }}
+      CI_KIT_CANCEL_DOOMED: ${{ inputs.cancel-doomed-runs }}
       CI_KIT_EVENT: ${{ github.event_name }}
       CI_KIT_BEFORE: ${{ github.event.before }}
       CI_KIT_SHA: ${{ github.sha }}
