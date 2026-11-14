@@ -123,7 +123,7 @@ def apply(root: Path, art: Path, *, head: str, base: str, ref: str, regen_globs:
             changed += count_lines(old, new)
             # only a Pin file the PR itself changes, and only the hashes of a pin whose VERSION it moved
             if path in mine and declares(old):
-                before = git(root, "show", f"{fork}:{path}", check=False).stdout
+                before = git(root, "show", f"{base}:{path}", check=False).stdout  # the copy pr_regen.pinned read
                 hashes |= {path} if rehashed_only(old, new, before) else set()
     bad = scope(tier, files, conflicted, mine, regen_globs, changed, max_lines, test_globs, frozenset(hashes))
     if bad:
