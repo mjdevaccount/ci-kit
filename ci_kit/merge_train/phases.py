@@ -318,6 +318,21 @@ def board(o: Opts, p: Pass, d: Path, cands: list[dict]) -> list[tgit.Rider]:
     return riders
 
 
+def queue_position(o: Opts, p: Pass, m: int, tip: str) -> None:
+    """A train IS the queue landing: its PR gets the queue hold's `queue/position` success (ci-kit
+    ci_kit/pr_hold.py) the moment it opens, not on pr-autoupdate's next pass -- a train green
+    before that pass would have its merge refused by protection that requires the status (review
+    of td#3085: up to one merge-train cron, 20 min, of delay). Its branch is never pushed again, so
+    one post holds. Best effort: a refused post is SAID, not an error -- pr-autoupdate's pass posts
+    the same status (pr_hold.TRAIN) and turns red on its own if it cannot."""
+    from ci_kit import pr_hold  # lazy: pr_hold -> pr_queue -> nothing of the train
+    r = github.gh("api", "-X", "POST", f"repos/{o.repo}/statuses/{tip}", "-f", "state=success",
+                  "-f", f"context={pr_hold.CONTEXT}", "-f", f"description={pr_hold.TRAIN}", check=False)
+    if r.returncode:
+        p.say(f"train #{m}: could not post `{pr_hold.CONTEXT}` success ({(r.stderr or r.stdout).strip()[:200]}); "
+              "pr-autoupdate's next pass posts it")
+
+
 def compose(o: Opts, p: Pass, d: Path, cands: list[dict], main_sha: str, me: tgit.Identity) -> None:
     riders = board(o, p, d, cands)
     if len(riders) < o.min_batch:
@@ -362,6 +377,7 @@ def compose(o: Opts, p: Pass, d: Path, cands: list[dict], main_sha: str, me: tgi
         return
     url = r.stdout.strip().splitlines()[-1]
     m = int(url.rstrip("/").rsplit("/", 1)[-1])
+    queue_position(o, p, m, tip)
     for rr, sha in included:
         label(o, p, rr.number, add=RIDING, remove=NEEDS_UPDATE)
         comment(o, p, rr.number, f"Riding merge train #{m} ({url}) at head `{rr.head}` as `{sha[:12]}`. It lands as "
