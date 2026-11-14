@@ -153,16 +153,21 @@ class World:
                 if w[:2] == ("api", "graphql") and "enablePullRequestAutoMerge" in " ".join(w)]
 
     def posted(self) -> dict[int, tuple[str, str]]:
+        # read each `-f key=value` ARGUMENT, never a joined line: on Actions pr_hold also passes
+        # target_url (GITHUB_RUN_ID set), which a split on the joined line read into the description
         out = {}
         for w in self.writes:
-            line = " ".join(w)
-            if "/statuses/" in line:
-                n = int(line.split("/statuses/")[1].split(" ")[0])
-                out[n] = (line.split("state=")[1].split(" ")[0], line.split("description=")[1])
+            path = next((x for x in w if "/statuses/" in x), None)
+            if path:
+                field = {x.split("=", 1)[0]: x.split("=", 1)[1] for x in w if "=" in x}
+                out[int(path.rsplit("/", 1)[1])] = (field["state"], field["description"])
         return out
 
 
 def _run(monkeypatch: pytest.MonkeyPatch, prs: list[dict], world: World, **opts) -> tuple[int, list[str]]:
+    # the same pass on a laptop and on Actions: the runner's env adds a target_url to every status
+    for var in ("GITHUB_RUN_ID", "GITHUB_SERVER_URL", "GITHUB_REPOSITORY"):
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(pr_autoupdate, "_gh_read", world.read)
     monkeypatch.setattr(pr_autoupdate.pr_heal, "write", world.write)
     monkeypatch.setattr(pr_autoupdate.pr_list, "rows", lambda raw: prs)
