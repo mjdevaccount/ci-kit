@@ -259,7 +259,7 @@ def test_main_reads_queue_hold_from_env(monkeypatch: pytest.MonkeyPatch, env: st
     monkeypatch.setenv("CI_KIT_QUEUE_HOLD", env)
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
-    monkeypatch.setattr(pr_autoupdate, "run", lambda repo, summary, relock, opts: seen.append(opts.hold) or 0)
+    monkeypatch.setattr(pr_autoupdate, "run", lambda repo, summary, relock, opts, *heal: seen.append(opts.hold) or 0)
     pr_autoupdate.main(["--repo", "o/r"])
     assert seen == [on]
 

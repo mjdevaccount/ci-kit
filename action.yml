@@ -24,6 +24,9 @@ outputs:
   relock:
     description: ci-pr-autoupdate only -- JSON list of PRs newly labelled as conflicting
     value: ${{ steps.run.outputs.relock }}
+  heal:
+    description: ci-pr-autoupdate only -- JSON list of heal-ladder dispatches ({pr, head, mode, claude, checks, runs})
+    value: ${{ steps.run.outputs.heal }}
 
 runs:
   using: composite
