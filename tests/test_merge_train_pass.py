@@ -634,13 +634,20 @@ def test_main_unmoved_composes_as_before_must_not_fire(world: tuple[Repo, FakeGH
     assert not any("main moved" in s for s in p.summary)
 
 
-def test_a_closed_train_with_none_after_it_releases_the_held_head_at_once_must_fire(world: tuple[Repo, FakeGH]) -> None:
+def _held_behind_train_100(world: tuple[Repo, FakeGH]) -> tuple[Repo, FakeGH, str]:
+    """Train #100 open (two riders), queue head #5 held for it."""
     from ci_kit import pr_hold
     repo, fake = world
     _riders(repo, fake, 2)
     assert cli.run(_opts(), cli.Pass()) == 0
     head = repo.pr(5, {"h.txt": "5\n"})
     fake.add(5, head, statusCheckRollup=[*GREEN[:1], _queue("PENDING", pr_hold.held_for("#100"))])
+    return repo, fake, head
+
+
+def test_a_closed_train_with_none_after_it_releases_the_held_head_at_once_must_fire(world: tuple[Repo, FakeGH]) -> None:
+    from ci_kit import pr_hold
+    _, fake, head = _held_behind_train_100(world)
     fake.prs[100]["statusCheckRollup"] = [{**GREEN[0], "conclusion": "FAILURE"}, GREEN[1]]   # red: both ejected
     fake.calls.clear()
     p = cli.Pass()
@@ -651,12 +658,7 @@ def test_a_closed_train_with_none_after_it_releases_the_held_head_at_once_must_f
 
 
 def test_an_open_pending_train_keeps_the_head_held_must_not_fire(world: tuple[Repo, FakeGH]) -> None:
-    from ci_kit import pr_hold
-    repo, fake = world
-    _riders(repo, fake, 2)
-    assert cli.run(_opts(), cli.Pass()) == 0
-    head = repo.pr(5, {"h.txt": "5\n"})
-    fake.add(5, head, statusCheckRollup=[*GREEN[:1], _queue("PENDING", pr_hold.held_for("#100"))])
+    _, fake, head = _held_behind_train_100(world)
     fake.calls.clear()
     assert cli.run(_opts(), cli.Pass()) == 0
     assert not [c for c in _statuses(fake) if c[0] == head]
