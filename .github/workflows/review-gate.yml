@@ -77,7 +77,9 @@
 #
 # A PRIVATE GIT DEPENDENCY (v1.24.0): a caller whose lockfile installs a private GitHub repo by
 # https URL passes `git-ssh-repos: owner/name` and `secrets: git-ssh-key:` (a read-only deploy
-# key). Without them `install` cannot fetch it and every reviewed PR is red. The key lives in its
+# key). Without them `install` cannot fetch it and every reviewed PR is red. Two private repos
+# (v1.28.0): name both, and pass one deploy key per repo in the same order (a deploy key reads ONE
+# repo): `git-ssh-key: |` then each secret on its own line; each key gets its own agent and host alias. The key lives in its
 # own step, where no PR code runs; Install gets only the agent's socket, an env-scoped rewrite of
 # just those repos and GitHub's pinned host keys; the agent is killed before Review
 # (ci_kit/git_ssh.sh). Named repos + an empty key = loud red.
@@ -157,7 +159,9 @@ on:
       git-ssh-key:
         description: >-
           optional; a read-only (deploy) key for `git-ssh-repos`, held only by the step that
-          loads it into an ssh-agent; Install may use the agent, which is killed before Review
+          loads it into an ssh-agent; Install may use the agent, which is killed before Review.
+          Several private repos (v1.28.0): ONE key per repo, concatenated in the order
+          `git-ssh-repos` names them (a `|` block of two secrets); each gets its own agent
         required: false
       claude-code-oauth-token:
         description: the `subscription` credential (`claude setup-token`)
@@ -376,6 +380,8 @@ jobs:
           # '' unless the load step ran: no key here, only the agent's socket
           CI_KIT_GIT_SSH_SOCK: ${{ steps.gitssh.outputs.sock }}
           CI_KIT_GIT_SSH_KNOWN_HOSTS: ${{ steps.gitssh.outputs.known-hosts }}
+          # '' with one key; with one key per repo (v1.28.0) the per-repo host aliases route reads
+          CI_KIT_GIT_SSH_CONFIG: ${{ steps.gitssh.outputs.ssh-config }}
           CI_KIT_GIT_SSH_REPOS: ${{ inputs.git-ssh-repos }}
         run: |
           set -euo pipefail
