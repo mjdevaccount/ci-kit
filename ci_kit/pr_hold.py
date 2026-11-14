@@ -48,9 +48,12 @@ _HELD = re.compile(r"<!-- queue:head-held sha=([0-9a-f]{40})( paged)? -->")
 Gh = Callable[..., subprocess.CompletedProcess]
 
 
-def desired(prs: list[dict]) -> dict[int, tuple[str, str]]:
-    """PR number -> (state, description) for every same-repo open PR. Pure."""
-    same = [p for p in prs if not p.get("isCrossRepository")]
+def desired(prs: list[dict], base: str = "") -> dict[int, tuple[str, str]]:
+    """PR number -> (state, description) for every same-repo open PR into `base` (the protected
+    default branch; '' = every base). A stacked PR (into another PR's branch) is neither the head
+    nor held: protection on its base does not ask for the status, and as the head it would hold
+    every PR into main behind one that cannot land there. Pure."""
+    same = [p for p in prs if not p.get("isCrossRepository") and (not base or p.get("baseRefName") == base)]
     h = pr_queue.head(same)
     hn = int(h["number"]) if h else None
     out: dict[int, tuple[str, str]] = {}
@@ -95,7 +98,11 @@ def hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
          comments: Callable[[str, int], list[str]]) -> int:
     """One hold pass. Returns the errors. Never raises: a crash here must not stop the updates."""
     errors = 0
-    want = desired(prs)
+    try:
+        base = json.loads(read("api", f"repos/{repo}").stdout or "{}").get("default_branch") or ""
+    except (subprocess.CalledProcessError, ValueError, AttributeError):
+        base = ""  # unknown: hold every base, as if no PR were stacked
+    want = desired(prs, base)
     by_n = {int(p["number"]): p for p in prs}
     posted: list[str] = []
     for n, (state, desc) in sorted(want.items()):

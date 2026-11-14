@@ -12,8 +12,9 @@ import yaml
 from ci_kit import pr_autoupdate, pr_hold
 
 
-def _pr(n: int, *, armed: bool = True, draft: bool = False, branch: str = "", fork: bool = False) -> dict:
-    return {"number": n, "headRefOid": f"{n:040d}", "headRefName": branch or f"b{n}", "isDraft": draft,
+def _pr(n: int, *, armed: bool = True, draft: bool = False, branch: str = "", fork: bool = False,
+        base: str = "main") -> dict:
+    return {"number": n, "headRefOid": f"{n:040d}", "headRefName": branch or f"b{n}", "isDraft": draft, "baseRefName": base,
             "isCrossRepository": fork, "autoMergeRequest": {"enabledAt": "x"} if armed else None,
             "mergeStateStatus": "CLEAN", "url": f"https://x/pull/{n}", "labels": []}
 
@@ -29,6 +30,8 @@ class Gh:
         if self.read_fails:
             raise subprocess.CalledProcessError(1, "gh")
         path = next(a for a in args if a.startswith("repos/"))
+        if "/commits/" not in path:
+            return subprocess.CompletedProcess(args, 0, json.dumps({"default_branch": "main"}), "")
         sha = path.split("/commits/")[1].split("/")[0]
         return subprocess.CompletedProcess(args, 0, json.dumps(self.statuses.get(sha, [])), "")
 
@@ -143,3 +146,10 @@ def test_the_workflow_hands_queue_hold_to_the_tool_as_env() -> None:
     on = wf.get("on") or wf[True]
     assert on["workflow_call"]["inputs"]["queue-hold"]["default"] is False
     assert wf["jobs"]["update"]["env"]["CI_KIT_QUEUE_HOLD"] == "${{ inputs.queue-hold }}"
+
+
+def test_a_stacked_pr_is_neither_head_nor_held_must_not_fire() -> None:
+    # #3080 targets #3079's branch: as head it would hold every PR into main behind one that cannot land there
+    gh = Gh()
+    _pass(gh, [_pr(3080, base="b3079"), _pr(3082), _pr(3083)])
+    assert gh.posted() == {3082: "success", 3083: "pending"}
