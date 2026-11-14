@@ -91,11 +91,25 @@ def test_a_pr_that_became_head_clears_its_stale_pending_in_one_pass_must_fire() 
     assert gh.posted()[3083] == "success"
 
 
+WAITS = "waits its turn: the queue head is #3082"
+
+
 def test_a_status_already_right_is_not_reposted_must_not_fire() -> None:
-    gh = Gh({f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "success"}, {"context": "x", "state": "failure"}],
-             f"{3083:040d}": [{"context": pr_hold.CONTEXT, "state": "pending"}]})
+    gh = Gh({f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "success", "description": pr_hold.HEAD},
+                              {"context": "x", "state": "failure"}],
+             f"{3083:040d}": [{"context": pr_hold.CONTEXT, "state": "pending", "description": WAITS}]})
     errors, _ = _pass(gh, [_pr(3082), _pr(3083)])
     assert errors == 0 and gh.writes == []
+
+
+def test_a_right_state_with_a_stale_train_description_is_reposted_must_fire() -> None:
+    # pending is right for #3083, but it still names a train that is gone: the composer reads that
+    # prefix back as a hold (pr_hold.lane), so a state-only compare would leave it lying forever
+    gh = Gh({f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "success", "description": pr_hold.HEAD}],
+             f"{3083:040d}": [{"context": pr_hold.CONTEXT, "state": "pending", "description": pr_hold.held_for("#9")}]})
+    errors, _ = _pass(gh, [_pr(3082), _pr(3083)])
+    assert errors == 0 and gh.posted() == {3083: "pending"}
+    assert any(WAITS in w for w in gh.writes)
 
 
 def test_a_former_head_behind_a_newly_armed_lower_pr_goes_pending_must_fire() -> None:
@@ -298,7 +312,8 @@ def test_a_head_holding_success_that_never_merges_pages_on_the_second_pass_must_
     monkeypatch.setattr(pr_hold, "page", lambda title, body, click: pages.append(body) or "published (200)")
     done = [{"name": "unit tests", "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": _iso(NOW - 3600)}]
     head = _pr(3082, merge="BLOCKED", checks=done)
-    ok = {f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "success", "updated_at": _iso(NOW - 3000)}]}
+    ok = {f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "success", "description": pr_hold.HEAD,
+                            "updated_at": _iso(NOW - 3000)}]}
     errors, summary = _pass(Gh(ok), [head, _pr(3083)])
     assert errors == 1 and pages == [] and any("HEAD HELD: #3082" in s for s in summary)
     mark1 = pr_hold.HELD.format(sha=f"{3082:040d}", paged="")

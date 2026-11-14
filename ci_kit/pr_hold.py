@@ -183,16 +183,19 @@ def desired(prs: list[dict], base: str | None, skip: frozenset[int] = frozenset(
     return out
 
 
-def current(repo: str, sha: str, read: Gh) -> tuple[str | None, str]:
-    """(the commit's `queue/position` state, when it was set) from the COMBINED status (newest per
-    context, however many other statuses the commit carries). None = it has none; UNREAD = the read
-    failed, and then the state is posted anyway: a redundant post costs nothing, a missed one holds a PR."""
+def current(repo: str, sha: str, read: Gh) -> tuple[str | None, str, str]:
+    """(the commit's `queue/position` state, when it was set, its description) from the COMBINED
+    status (newest per context, however many other statuses the commit carries). None = it has
+    none; UNREAD = the read failed, and then the state is posted anyway: a redundant post costs
+    nothing, a missed one holds a PR. The DESCRIPTION is compared too: a stale "held for merge
+    train #N" on a PR whose state is still right (pending) is re-posted, never left naming a train
+    that is gone -- the composer reads that prefix back as a hold (lane)."""
     try:
         rows = json.loads(read("api", f"repos/{repo}/commits/{sha}/status").stdout or "{}").get("statuses") or []
     except (subprocess.CalledProcessError, ValueError, AttributeError, TypeError):
-        return UNREAD, ""
+        return UNREAD, "", ""
     s = next((s for s in rows if isinstance(s, dict) and s.get("context") == CONTEXT), None)
-    return (str(s.get("state")), str(s.get("updated_at") or "")) if s else (None, "")
+    return (str(s.get("state")), str(s.get("updated_at") or ""), str(s.get("description") or "")) if s else (None, "", "")
 
 
 def _epoch(s: str) -> float:
@@ -276,9 +279,9 @@ def _hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
         sha = str(by_n[n].get("headRefOid") or "")
         if len(sha) != 40:
             continue
-        was, since = current(repo, sha, read)
+        was, since, was_desc = current(repo, sha, read)
         unread += was == UNREAD
-        if was == state:
+        if was == state and was_desc == desc[:140]:
             why = stuck(by_n[n], since, required, now, stale_s) if desc == HEAD else ""
             if why:
                 errors += 1

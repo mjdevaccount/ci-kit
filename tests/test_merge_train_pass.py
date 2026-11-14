@@ -194,8 +194,8 @@ def _opts(**k) -> cli.Opts:
     return cli.Opts(repo="o/r", required=REQ, run_id=str(next(_RUNS)), **k)
 
 
-def _riders(repo: Repo, fake: FakeGH, n: int) -> None:
-    for i in range(1, n + 1):
+def _riders(repo: Repo, fake: FakeGH, n: int, first: int = 1) -> None:
+    for i in range(first, first + n):
         fake.add(i, repo.pr(i, {f"f{i}.txt": f"{i}\n"}))
 
 
@@ -589,7 +589,7 @@ def _statuses(fake: FakeGH) -> list[tuple[str, str, str]]:
 def test_compose_holds_the_queue_head_before_the_train_opens_must_fire(world: tuple[Repo, FakeGH]) -> None:
     from ci_kit import pr_hold
     repo, fake = world
-    _riders(repo, fake, 2)
+    _riders(repo, fake, 2, first=6)   # riders above #5: #5 is the queue head
     head = repo.pr(5, {"h.txt": "5\n"})
     fake.add(5, head, statusCheckRollup=[*GREEN[:1], _queue("SUCCESS", pr_hold.HEAD)])   # not reviewed: no rider
     p = cli.Pass()
@@ -605,10 +605,10 @@ def test_compose_holds_the_queue_head_before_the_train_opens_must_fire(world: tu
 
 def test_main_moving_while_composing_opens_no_train_and_gives_the_lane_back_must_fire(
         world: tuple[Repo, FakeGH], monkeypatch: pytest.MonkeyPatch) -> None:
-    # td#3115: a lock-maintenance PR landed during a 6-minute compose; the train opened stale at birth
+    # a lock-maintenance PR landed during a 6-minute compose; the train opened stale at birth
     from ci_kit import pr_hold
     repo, fake = world
-    _riders(repo, fake, 2)
+    _riders(repo, fake, 2, first=6)
     head = repo.pr(5, {"h.txt": "5\n"})
     fake.add(5, head, statusCheckRollup=[*GREEN[:1], _queue("SUCCESS", pr_hold.HEAD)])
     real = tgit.compose
@@ -638,7 +638,7 @@ def _held_behind_train_100(world: tuple[Repo, FakeGH]) -> tuple[Repo, FakeGH, st
     """Train #100 open (two riders), queue head #5 held for it."""
     from ci_kit import pr_hold
     repo, fake = world
-    _riders(repo, fake, 2)
+    _riders(repo, fake, 2, first=6)
     assert cli.run(_opts(), cli.Pass()) == 0
     head = repo.pr(5, {"h.txt": "5\n"})
     fake.add(5, head, statusCheckRollup=[*GREEN[:1], _queue("PENDING", pr_hold.held_for("#100"))])
@@ -662,3 +662,70 @@ def test_an_open_pending_train_keeps_the_head_held_must_not_fire(world: tuple[Re
     fake.calls.clear()
     assert cli.run(_opts(), cli.Pass()) == 0
     assert not [c for c in _statuses(fake) if c[0] == head]
+
+
+# ---- the lane goes back only to the head AS IT IS NOW, on every exit (incl. a raise) -----------
+def _composing_with_head_5(world: tuple[Repo, FakeGH]) -> tuple[Repo, FakeGH, str]:
+    from ci_kit import pr_hold
+    repo, fake = world
+    _riders(repo, fake, 2, first=6)
+    head = repo.pr(5, {"h.txt": "5\n"})
+    fake.add(5, head, statusCheckRollup=[*GREEN[:1], _queue("SUCCESS", pr_hold.HEAD)])
+    return repo, fake, head
+
+
+def test_a_lower_pr_armed_while_composing_keeps_the_given_back_lane_off_the_old_head_must_fire(
+        world: tuple[Repo, FakeGH], monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, fake, head = _composing_with_head_5(world)
+    real = tgit.compose
+
+    def racing(*a, **k):
+        got = real(*a, **k)
+        fake.add(3, repo.pr(3, {"c.txt": "3\n"}), statusCheckRollup=GREEN[:1])   # armed, lower: the head now
+        repo.advance_main({"lock.txt": "relocked\n"})
+        return got
+    monkeypatch.setattr(tgit, "compose", racing)
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 0, p.summary
+    back = [(s, d) for sha, s, d in _statuses(fake) if sha == head]
+    assert back[0][0] == "pending" and back[1:] == [("pending", "waits its turn: the queue head is #3")]
+    assert not [c for c in _statuses(fake) if c[0] == fake.prs[3]["headRefOid"]]   # the new head: pr_hold's
+    assert any("#5: lane NOT given back, no longer the head" in s for s in p.summary)
+
+
+@pytest.mark.parametrize("where", ["ls-remote", "push"])
+def test_a_raise_between_taking_the_lane_and_opening_the_train_gives_it_back_must_fire(
+        world: tuple[Repo, FakeGH], monkeypatch: pytest.MonkeyPatch, where: str) -> None:
+    from ci_kit import pr_hold
+    from ci_kit.merge_train import phases
+    _, fake, head = _composing_with_head_5(world)
+    if where == "ls-remote":
+        monkeypatch.setattr(phases, "_main_now", lambda d, base: (_ for _ in ()).throw(RuntimeError("ls-remote died")))
+    else:
+        real = tgit.git
+
+        def git_push_dies(d, *a, **k):
+            if a[:1] == ("push",) and any("refs/heads/train/" in x for x in a):
+                raise subprocess.CalledProcessError(128, ["git", *a], "", "push died")
+            return real(d, *a, **k)
+        monkeypatch.setattr(tgit, "git", git_push_dies)
+    with pytest.raises((RuntimeError, subprocess.CalledProcessError)):
+        cli.run(_opts(), cli.Pass())
+    assert [(s, d) for sha, s, d in _statuses(fake) if sha == head][1:] == [("success", pr_hold.HEAD)]
+    assert 100 not in fake.prs
+
+
+def test_a_held_pr_that_is_no_longer_the_head_gets_no_success_when_the_train_closes_must_fire(
+        world: tuple[Repo, FakeGH]) -> None:
+    # #5 held for train #100; #3 is armed later (lower: the head now); the train closes red. Before
+    # the fix release_lane gave #5 success -- a non-head holding the lane while #3 waits on it.
+    repo, fake, head = _held_behind_train_100(world)
+    fake.add(3, repo.pr(3, {"c.txt": "3\n"}), statusCheckRollup=GREEN[:1])
+    fake.prs[100]["statusCheckRollup"] = [{**GREEN[0], "conclusion": "FAILURE"}, GREEN[1]]
+    fake.calls.clear()
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 0, p.summary
+    assert fake.prs[100]["state"] == "closed"
+    assert [(s, d) for sha, s, d in _statuses(fake) if sha == head] == [("pending", "waits its turn: the queue head is #3")]
+    assert not [c for c in _statuses(fake) if c[0] == fake.prs[3]["headRefOid"]]
+    assert any("#5: train hold dropped" in s for s in p.summary)
