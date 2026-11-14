@@ -173,7 +173,7 @@ def decide(pr: dict, bodies: list[str], cfg: Config, claude_left: int, now: dt.d
         at = _when(mine[-1][3])
         if not done and not paged and at and (now - at).total_seconds() > cfg.stale_min * 60:
             return "stale", False, f"dispatched {mine[-1][3]} and no heal record since"
-        return "quiet", False, "already dispatched at this head"
+        return "quiet", False, "already dispatched at this head" + ("" if done else in_flight(bodies, head, at, now))
     if len({h for h, *_ in heals}) >= cfg.per_pr:
         return ("quiet" if paged else "capped"), False, f"{cfg.per_pr} heal(s) already spent on this PR"
     if mode == "conflict" and is_renovate(pr):
@@ -185,6 +185,19 @@ def decide(pr: dict, bodies: list[str], cfg: Config, claude_left: int, now: dt.d
     note = "tiers 1-3" if tier3 else ("tiers 1-2: " + (claude_blocked(pr) or ("tier 3 off" if cfg.claude_per_pass <= 0
                                                                                else f"tier 3 spent {used}/{cfg.claude_per_pr}")))
     return "dispatch", tier3, note
+
+
+def in_flight(bodies: list[str], head: str, at: dt.datetime | None, now: dt.datetime) -> str:
+    """The summary suffix for a heal still running at this head. Tier 3 holds the ONE sealed runner
+    (the review gate's full reviews queue behind it) for up to pr_fix.FIX_JOB_MIN minutes, and
+    nothing else says so: the claim's attempt marker names the run. Pure."""
+    from ci_kit.pr_fix import FIX_JOB_MIN  # lazy: pr_fix pulls in the review harness
+    age = f", {int((now - at).total_seconds() // 60)} min since dispatch" if at else ""
+    runs = [r for h, r in marks(bodies, _ATTEMPT) if h == head]
+    if runs:
+        return (f"; TIER 3 IN FLIGHT on the sealed runner (run {runs[-1]}{age}; holds it up to "
+                f"{FIX_JOB_MIN} min, full reviews queue behind it)")
+    return f"; in flight, no heal record yet{age}"
 
 
 def page_text(repo: str, pr: dict, checks: str, tried: str) -> tuple[str, str]:

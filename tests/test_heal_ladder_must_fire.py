@@ -321,3 +321,26 @@ def test_a_rerun_of_failed_jobs_reports_refused_never_silent() -> None:
     o = pr_ladder.outcome(True, "eligible", "uncovered", "x", *pr_ladder.claimed_fix("", "", "false", "ran", "1", "1"),
                           "", "", True)
     assert o[1] == "refused" and o[3] is True
+
+
+# ── v1.35.0: tier 3 holding the sealed runner is said in every pass while it runs ─────────────
+def test_tier_3_in_flight_is_named_in_the_pass_summary_must_fire() -> None:
+    from ci_kit.pr_fix import FIX_JOB_MIN
+    dispatched = heal_mark(H1, at="2026-11-14T17:40:00Z")                  # 20 min before NOW
+    attempt = pr_ladder.ATTEMPT.format(head=H1, run="4242")
+    summary: list[str] = []
+    rows, errs, _ = pr_ladder.dispatch("o/r", [Candidate(pr(), "red", "unit")], ON, lambda r, n: [dispatched, attempt],
+                                       lambda *a, input_text=None: _Done(), summary, lambda *a: "x", NOW)
+    assert rows == [] and errs == 0                                        # no second dispatch, no red
+    assert len(summary) == 1 and "TIER 3 IN FLIGHT on the sealed runner (run 4242, 20 min since dispatch" in summary[0]
+    assert f"up to {FIX_JOB_MIN} min" in summary[0]
+
+
+def test_a_finished_or_other_head_heal_is_not_in_flight_must_not_fire() -> None:
+    dispatched = heal_mark(H1, at="2026-11-14T17:40:00Z")
+    attempt = pr_ladder.ATTEMPT.format(head=H1, run="4242")
+    healed = pr_ladder.HEALED.format(head=H1, tier="claude", result="pushed")
+    assert "IN FLIGHT" not in pr_ladder.decide(pr(), [dispatched, attempt, healed], ON, 1, NOW)[2]
+    # an attempt at an OLD head says nothing about this one's tier 3
+    why = pr_ladder.decide(pr(), [dispatched, pr_ladder.ATTEMPT.format(head="c" * 40, run="1")], ON, 1, NOW)[2]
+    assert "IN FLIGHT" not in why and "in flight, no heal record yet" in why

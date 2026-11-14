@@ -30,7 +30,7 @@
 #       ntfy-url: ${{ secrets.NTFY_URL }}                           # tier 4
 #       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # tier 3 (or anthropic-api-key)
 #
-# FIVE JOBS, ONE TRUST BOUNDARY EACH:
+# SIX JOBS, ONE TRUST BOUNDARY EACH (the header said FIVE until v1.35.0; `claim` was missing):
 #   plan    SECURE pool, the job token (read). Re-checks the PR at run time -- open, armed, same
 #           repo, head unchanged, not autoland-off, not the db group, tier 3 not on a Renovate
 #           major -- fixes the base sha every later job merges, and gathers the failed jobs' logs.
@@ -38,9 +38,16 @@
 #           the install), the class every CI job already runs as, so it holds NO secret -- only, with
 #           `git-ssh-repos`, a read-only deploy key's ssh-agent for a private dependency (`uv lock`
 #           needs it; the key itself lives only in its load step, ci_kit/git_ssh.sh).
+#   claim   tier 3's ONE attempt per head, SECURE pool, the push token: writes the `attempt`
+#           marker (ci_kit/pr_ladder.py claim) BEFORE Claude runs, since `fix` holds no token.
 #   fix     tier 3, only when tier 2 had nothing to push and the plan allows it. The SEALED pool
 #           (one job per boot, rolled back), as the review gate's model job: Claude Code with the
-#           Claude credential and NO push token. It leaves an artifact, never a push.
+#           Claude credential and NO push token. It leaves an artifact, never a push. It holds the
+#           ONE sealed runner -- every full review queues behind it -- for up to 50 min:
+#           ci_kit/pr_fix.py FIX_JOB_MIN = the CLI's 40 + 2 to save the change (the Fix step, 42)
+#           + 8 of setup (install 4, Claude Code 2, the rest 2), each bounded below. While it runs,
+#           every pr-autoupdate pass says so: `#N: ... heal quiet: ... TIER 3 IN FLIGHT on the
+#           sealed runner (run R, M min since dispatch; holds it up to 50 min ...)`.
 #   push    a FRESH runner on the SECURE pool with the push token. Runs no PR code: redoes the
 #           merge, takes only the tier's files, re-checks their scope (ci_kit/pr_apply.py), commits
 #           a merge or fix commit and pushes it fast-forward. Never --force, never a rebase.
@@ -300,7 +307,7 @@ jobs:
       !cancelled() && needs.claim.outputs.claimed == 'true'
       && needs.claim.outputs.attempt == format('{0}', github.run_attempt)
     runs-on: ${{ vars.CI_SEALED_RUNNER && fromJSON('["self-hosted","home-sealed"]') || 'ubuntu-latest' }}
-    timeout-minutes: 50
+    timeout-minutes: 50   # pr_fix.FIX_JOB_MIN = FIX_STEP_MIN 42 + SETUP_MIN 8 (header)
     permissions:
       contents: read
       actions: read
@@ -337,6 +344,7 @@ jobs:
           dotnet-version: ${{ inputs.dotnet-version }}
       - name: Install the project (a deploy key only in its own load step)
         continue-on-error: true
+        timeout-minutes: 4    # pr_fix.SETUP_MIN
         uses: mjdevaccount/ci-kit/.github/actions/heal-install@v1
         with:
           kit: ${{ steps.kit.outputs.dir }}
@@ -345,6 +353,7 @@ jobs:
           git-ssh-key: ${{ secrets.git-ssh-key }}
       - name: Install Claude Code
         continue-on-error: true
+        timeout-minutes: 2    # pr_fix.SETUP_MIN
         env:
           CLAUDE_CODE_VERSION: ${{ inputs.claude-code-version }}
         run: npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" && claude --version
@@ -363,7 +372,7 @@ jobs:
           echo "credential=${c:-}" >> "$GITHUB_OUTPUT"
       - name: Fix
         id: fix
-        timeout-minutes: 42
+        timeout-minutes: 42   # pr_fix.FIX_STEP_MIN: the CLI's own 40 (CLI_TIMEOUT) + 2 to save the change
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
           # ONLY the chosen credential reaches the step (as the review gate)
