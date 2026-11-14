@@ -107,8 +107,15 @@ def window_faults(cfg: dict) -> list[str]:
     if (minute, dom, month, dow) != ("*", "*", "*", "*") or not 1 <= hi - lo + 1 <= 6 or hi >= 9:
         out.append("the kit window is not one early window every day")
     lock = cfg["lockFileMaintenance"]
-    if lock.get("schedule") != ["* 0-5 * * 6"] or lock.get("updateNotScheduled") is not False:
-        out.append("lock maintenance is not one weekly window, untouched outside it")
+    if lock.get("schedule") != ["* 0-5 * * 6"]:
+        out.append("lock maintenance is not one weekly window")
+    if "updateNotScheduled" in lock:  # global false strands a green lock PR where Renovate is the merger
+        out.append("updateNotScheduled is set for every repo, not only the queue repos")
+    held = [r for r in cfg["packageRules"] if r.get("matchUpdateTypes") == ["lockFileMaintenance"]
+            and r.get("updateNotScheduled") is False]
+    queue = next((r for r in cfg["packageRules"] if "automergeType" in r), {})
+    if len(held) != 1 or set(held[0].get("matchRepositories") or ()) != set(queue.get("matchRepositories") or ("?",)):
+        out.append("the queue repos' lock PR is re-pushed outside its window")
     vuln = cfg["vulnerabilityAlerts"]
     if vuln.get("schedule") != ["at any time"] or vuln.get("minimumReleaseAge") is not None or not vuln.get("enabled"):
         out.append("a security update waits for a window")
@@ -127,7 +134,13 @@ def test_each_window_fault_fires_must_fire() -> None:
     assert mut(lambda c: c["packageRules"][[r.get("groupName") for r in c["packageRules"]].index("ci-kit")].update(
         {"schedule": ["at any time"]}))
     assert mut(lambda c: c["lockFileMaintenance"].update({"schedule": ["* * * * 6", "* 0-17 * * 0"]}))
-    assert mut(lambda c: c["lockFileMaintenance"].pop("updateNotScheduled"))
+    assert mut(lambda c: c["lockFileMaintenance"].update({"updateNotScheduled": False}))
+
+    def _held(c: dict) -> dict:
+        return next(r for r in c["packageRules"] if r.get("matchUpdateTypes") == ["lockFileMaintenance"])
+    assert mut(lambda c: _held(c).pop("updateNotScheduled"))
+    assert mut(lambda c: _held(c).update({"matchRepositories": ["mjdevaccount/ci-kit"]}))
+    assert mut(lambda c: _held(c).pop("matchRepositories"))
     assert mut(lambda c: c["vulnerabilityAlerts"].update({"schedule": ["* 0-5 * * 6"]}))
     assert mut(lambda c: c["vulnerabilityAlerts"].update({"minimumReleaseAge": "3 days"}))
 
