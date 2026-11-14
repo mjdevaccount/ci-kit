@@ -29,6 +29,9 @@ import yaml
 WF = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "review-gate.yml"
 ALLOWED = "${{ needs.decide.outputs.mode != 'review' && 'review' || '' }}"
 NOT_PARKED = "steps.admit.outputs.defer != 'true'"
+SKIP_IF = "${{ !cancelled() && !(needs.decide.result == 'success' && needs.decide.outputs.finished == 'true') }}"
+FINISH_NEEDS = ("steps.mode.outputs.mode == 'finish'", "steps.carry.outputs.carried == 'true'",
+                "steps.verdict.outputs.result == 'pass'")
 
 
 def _wf() -> dict:
@@ -37,6 +40,23 @@ def _wf() -> dict:
 
 def _step(job: dict, sid: str) -> dict:
     return next(s for s in job["steps"] if s.get("id") == sid or s.get("name") == sid)
+
+
+def _carry_skip_faults(jobs: dict) -> list[str]:
+    """v1.35.0: `verdict` is skipped ONLY on a carried pass `decide` finished after a green Gate."""
+    out: list[str] = []
+    if " ".join(str(jobs["verdict"].get("if")).split()) != SKIP_IF:
+        out.append("verdict is skipped on something other than a finished carry")
+    dec = jobs["decide"]
+    ids = [s.get("id") or s.get("name") for s in dec["steps"]]
+    fin = next((s for s in dec["steps"] if s.get("id") == "finish"), {})
+    fif = " ".join(str(fin.get("if")).split())
+    if not fif.startswith("success() ") or "always()" in fif or "cancelled()" in fif \
+            or any(c not in fif for c in FINISH_NEEDS) or "Gate" not in ids or ids.index("Gate") > ids.index("finish"):
+        out.append("decide finishes something other than a carried pass after a green Gate")
+    if "steps.finish.outputs.done == 'true' && steps.upload.outcome == 'success'" not in str(dec["outputs"].get("finished")):
+        out.append("decide says finished before its comment and record landed")
+    return out
 
 
 def faults(wf: dict) -> list[str]:
@@ -91,6 +111,7 @@ def faults(wf: dict) -> list[str]:
             out.append(f"{job} still comments or pushes itself")
         if "steps.body.outputs.body" not in str((jobs[job].get("outputs") or {}).get("body")):
             out.append(f"{job} does not hand its body on")
+    out += _carry_skip_faults(jobs)
     res = str((wf.get("on") or wf[True])["workflow_call"]["outputs"]["result"]["value"])
     if "jobs.review.outputs.result" not in res or "jobs.decide.outputs.result" not in res:
         out.append("the workflow's result drops one job's")
@@ -133,6 +154,33 @@ def test_each_fault_fires() -> None:
     assert _mut(lambda j, w: j["review"]["steps"].append({"name": "Comment on the PR", "run": "true"}))
     assert _mut(lambda j, w: (w.get("on") or w[True])["workflow_call"]["outputs"]["result"].update(
         {"value": "${{ jobs.review.outputs.result }}"}))
+
+
+def _fin(jobs: dict) -> dict:
+    return _step(jobs["decide"], "finish")
+
+
+def test_the_carry_skip_fires_on_each_mutation() -> None:
+    # a skip keyed on `finished` alone (decide red but finished) would read a red decide's run green
+    assert _mut(lambda j, w: j["verdict"].update({"if": "${{ !cancelled() && needs.decide.outputs.finished != 'true' }}"}))
+    assert _mut(lambda j, w: j["verdict"].update({"if": "${{ needs.decide.outputs.mode != 'finish' }}"}))
+    assert _mut(lambda j, w: _fin(j).update({"if": "always() && " + " && ".join(FINISH_NEEDS)}))
+    assert _mut(lambda j, w: _fin(j).update({"if": "success() && steps.mode.outputs.mode == 'finish'"}))
+    assert _mut(lambda j, w: j["decide"]["outputs"].update({"finished": "${{ steps.finish.outputs.done }}"}))
+
+    def before_gate(j: dict, w: dict) -> None:
+        steps = j["decide"]["steps"]
+        steps.insert(0, steps.pop(steps.index(_fin(j))))
+    assert _mut(before_gate)
+
+
+def test_only_a_finished_carry_skips_the_verdict_job_must_not_fire() -> None:
+    # the skip condition, evaluated over every (decide result, finished) pair: one skips
+    def runs(result: str, finished: str) -> bool:
+        return not (result == "success" and finished == "true")
+    assert [runs(r, f) for r in ("success", "failure") for f in ("true", "")] == [False, True, True, True]
+    v = _wf()["jobs"]["verdict"]
+    assert "needs.decide.result == 'success'" in v["if"] and "needs.decide.outputs.finished == 'true'" in v["if"]
 
 
 def test_a_carry_and_a_blind_and_a_train_are_finished_by_decide() -> None:

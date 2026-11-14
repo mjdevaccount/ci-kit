@@ -59,7 +59,7 @@
 # `decide` said none was needed; its STEPS `review deferred` (red when the PR queue parked the
 # review) and `record verdict` (the carry record) were jobs of their own until v1.35.0 -- a runner
 # boot each for seconds of shell. A base-only update of a passed PR never waits for the one sealed
-# runner. Check names (caller job `reviewer`): `reviewer / review`, `reviewer / model review`,
+# runner, and since v1.35.0 `decide` finishes that carry itself and `verdict` is skipped (below). Check names (caller job `reviewer`): `reviewer / review`, `reviewer / model review`,
 # `reviewer / verdict`, and the caller's own `review gate` -- the REQUIRED one, unchanged.
 #
 # THE PR QUEUE (`queue-priority`, v1.29.0). The sealed pool is ONE runner. A PR numbered after
@@ -90,6 +90,7 @@
 # When the PR's OWN diff (merge-base..head) hashes the same as one a previous run PASSED, it passes
 # with "verdict carried from <sha>" and no model run (ci_kit.review.carry). The record is an
 # ARTIFACT written by the `record verdict` step of the `verdict` job, which never checks the PR out
+# -- or, for a carried pass (v1.35.0), by `decide`, which checks it out but executes none of it
 # (a comment is editable by any token holder).
 #
 # A PRIVATE GIT DEPENDENCY (v1.24.0): a caller whose lockfile installs a private GitHub repo by
@@ -244,6 +245,8 @@ jobs:
       unarmed: ${{ steps.decide.outputs.unarmed }}
       body: ${{ steps.body.outputs.body }}      # finish / train only: the `verdict` job posts it
       title: ${{ steps.body.outputs.title }}
+      # 'true' only once a carried PASS was commented AND its record uploaded here: `verdict` is skipped
+      finished: ${{ steps.finish.outputs.done == 'true' && steps.upload.outcome == 'success' && 'true' || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -480,6 +483,40 @@ jobs:
             block) echo "::error::review gate BLOCKED -- see the PR comment"; exit 1 ;;
             *) echo "::error::review gate BLIND ($RESULT) -- the reviewer did not finish looking"; exit 1 ;;
           esac
+
+      # A CARRY FINISHES HERE (v1.35.0): the one comment and the record, so the `verdict` job --
+      # a secure-pool boot for seconds of shell -- is skipped on a base-only update (most runs of
+      # the gate in a queue repo). `success()`, never always(): only after Gate passed. Both steps
+      # continue-on-error and set nothing on failure, so `finished` stays empty and `verdict` runs
+      # as before. The record goes to $RUNNER_TEMP, not the PR checkout this job holds.
+      - name: Finish the carry
+        id: finish
+        if: >-
+          success() && steps.mode.outputs.mode == 'finish' && steps.carry.outputs.carried == 'true'
+          && steps.verdict.outputs.result == 'pass'
+        continue-on-error: true
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          BODY: ${{ steps.body.outputs.body }}
+          HASH: ${{ steps.carry.outputs.hash }}
+          ORIGIN: ${{ steps.carry.outputs.origin }}
+        run: |
+          set -euo pipefail
+          python3 -m ci_kit.review.carry finish --repo "$GITHUB_REPOSITORY" --pr "$PR" \
+            --hash "$HASH" --origin "$ORIGIN" --record-out "$RUNNER_TEMP/verdict.json"  # find_record reads verdict.json
+          echo "done=true" >> "$GITHUB_OUTPUT"
+          echo "carried pass finished in this job: the \`verdict\` job is skipped" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the carried record
+        id: upload
+        if: steps.finish.outputs.done == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: review-verdict-${{ github.event.pull_request.number }}
+          path: ${{ runner.temp }}/verdict.json
+          retention-days: 90
 
   review:
     # THE FULL MODEL REVIEW, and only that (v1.29.0): `decide` above runs everything else. THE
@@ -729,9 +766,16 @@ jobs:
     # skip the record of a BLOCK, nor the park's own red. Their failure modes are the old jobs':
     # record is continue-on-error (a failure only means the next run reviews in full), the park is
     # red. Readers that keyed on the JOB names (ci_kit/redclass, ci_kit/pr_sched) read the STEP too.
+    #
+    # SKIPPED ON A FINISHED CARRY (v1.35.0): when `decide` succeeded AND says it already commented
+    # and uploaded the record of a carried pass. Safe because nothing is left to judge: `decide`
+    # succeeds in mode finish only if its Gate read `pass`, `model review` is skipped in that mode,
+    # and the caller's `review gate` (if: always()) reads the call's result -- all three jobs
+    # succeeded or skipped = success, never pending. Any other outcome (decide red or cancelled,
+    # BLIND, a comment or upload that failed, any other mode) runs this job exactly as before.
     name: verdict
     needs: [decide, review]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !(needs.decide.result == 'success' && needs.decide.outputs.finished == 'true') }}
     runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:

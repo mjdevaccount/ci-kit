@@ -37,6 +37,13 @@ SIBLINGS. `siblings` lists open PRs whose changed files intersect this one's, as
 workflow appends to the reviewer's prompt. The reviewer stays read-only: it gets the list, not
 `gh`.
 
+FINISH (v1.35.0). A carried pass is finished in `decide` itself: `finish` upserts the ONE sticky
+`<!-- review-gate -->` comment and writes the record to a path under $RUNNER_TEMP (never the PR
+checkout), and the workflow uploads it; then the `verdict` job is SKIPPED -- one runner boot less
+per base-only update. `decide` executes no PR code (PYTHONSAFEPATH=1, git reads only), so a record
+written there has the `record` job's guarantee. Any failure here exits nonzero and the `verdict`
+job runs as before (it comments and records again): the shortcut can only fall back, never pass.
+
 Exit 2 = this script could not finish looking (git/gh failed). The workflow reads that as "no
 carry" -> a full review, never as a pass.
 """
@@ -140,6 +147,27 @@ def sibling_lines(me: int, my_files: set[str], prs: list[dict]) -> list[str]:
     return out[:MAX_SIBLINGS]
 
 
+MARKER = "<!-- review-gate -->"
+
+
+def upsert_comment(repo: str, pr: int, body: str) -> None:
+    """Edit the newest comment that starts with MARKER, else create one (the `verdict` job's rule)."""
+    ids = subprocess.run(
+        ["gh", "api", f"repos/{repo}/issues/{pr}/comments", "--paginate",
+         "-q", f'.[] | select(.body | startswith("{MARKER}")) | .id'],
+        check=True, capture_output=True, text=True).stdout.split()
+    if ids:
+        cmd = ["gh", "api", "-X", "PATCH", f"repos/{repo}/issues/comments/{ids[-1]}", "-f", f"body={body}"]
+    else:
+        cmd = ["gh", "api", "-X", "POST", f"repos/{repo}/issues/{pr}/comments", "-f", f"body={body}"]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+
+def record(pr: int, h: str, origin: str, result: str) -> dict:
+    """The artifact `find_record` reads back: the same four keys the `verdict` job writes."""
+    return {"pr": pr, "hash": h, "head_sha": origin, "result": result}
+
+
 def _emit(name: str, value: str) -> None:
     out = os.environ.get("GITHUB_OUTPUT")
     if not out:
@@ -155,6 +183,12 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("carry")
     s = sub.add_parser("siblings")
+    f = sub.add_parser("finish")  # a carried PASS only: comment + record, body from env BODY
+    f.add_argument("--repo", required=True)
+    f.add_argument("--pr", type=int, required=True)
+    f.add_argument("--hash", required=True)
+    f.add_argument("--origin", required=True)
+    f.add_argument("--record-out", required=True)
     for p in (c, s):
         p.add_argument("--repo", required=True)
         p.add_argument("--pr", type=int, required=True)
@@ -166,6 +200,16 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--workflow", default="review-gate.yml")
     args = ap.parse_args(argv)
     try:
+        if args.cmd == "finish":
+            body = os.environ.get("BODY", "")
+            if not body.startswith(MARKER) or not args.hash:
+                print("::warning::finish: no carried body or hash; the verdict job finishes", file=sys.stderr)
+                return 2
+            upsert_comment(args.repo, args.pr, body)
+            Path(args.record_out).write_text(json.dumps(record(args.pr, args.hash, args.origin, "pass")),
+                                             encoding="utf-8")
+            print(f"carried pass finished in decide: comment + record ({args.hash})")
+            return 0
         if args.cmd == "carry":
             h = own_diff_hash(args.base, args.head)
             carried, why = carry_decision(h, find_record(args.repo, args.branch, args.pr, args.run_id,

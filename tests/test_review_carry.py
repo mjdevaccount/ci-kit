@@ -161,3 +161,57 @@ def test_the_lookup_reads_the_callers_workflow_not_the_kits(monkeypatch: pytest.
     monkeypatch.setattr(carry.subprocess, "run", fake)
     assert carry.find_record("o/r", "br", 5, current_run="1", workflow="ci-review.yml") is None
     assert seen[0][seen[0].index("--workflow") + 1] == "ci-review.yml"
+
+
+# ── finish (v1.35.0): a carried pass is commented and recorded in `decide`; `verdict` is skipped ──
+BODY = "<!-- review-gate -->\n### review gate\n\n**PASS, verdict carried from abc**"
+
+
+def _gh(monkeypatch: pytest.MonkeyPatch, existing: str, fail: str = "") -> list[list[str]]:
+    seen: list[list[str]] = []
+
+    def fake(cmd: list[str], check: bool = False, **kw: object) -> _Done:
+        seen.append(cmd)
+        if fail and fail in cmd:
+            if check:
+                raise subprocess.CalledProcessError(1, cmd, "", "HTTP 403")
+            return _Done(1, err="HTTP 403")
+        return _Done(0, existing if "--paginate" in cmd else "{}")
+
+    monkeypatch.setattr(carry.subprocess, "run", fake)
+    return seen
+
+
+def _finish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str = BODY) -> int:
+    monkeypatch.setenv("BODY", body)
+    return carry.main(["finish", "--repo", "o/r", "--pr", "5", "--hash", "H", "--origin", "abc",
+                       "--record-out", str(tmp_path / "verdict.json")])
+
+
+def test_finish_edits_the_sticky_comment_and_writes_the_record_find_record_reads(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _gh(monkeypatch, "11\n42\n")
+    assert _finish(tmp_path, monkeypatch) == 0
+    assert seen[-1][:4] == ["gh", "api", "-X", "PATCH"] and seen[-1][4].endswith("/comments/42")
+    assert seen[-1][-1] == f"body={BODY}"
+    assert json.loads((tmp_path / "verdict.json").read_text(encoding="utf-8")) == {
+        "pr": 5, "hash": "H", "head_sha": "abc", "result": "pass"}
+
+
+def test_finish_creates_the_comment_when_none_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _gh(monkeypatch, "")
+    assert _finish(tmp_path, monkeypatch) == 0
+    assert seen[-1][:5] == ["gh", "api", "-X", "POST", "repos/o/r/issues/5/comments"]
+
+
+def test_finish_refuses_a_body_that_is_not_the_gates_must_fire(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # exit 2, nothing posted, no record: `finished` stays empty and the verdict job runs
+    seen = _gh(monkeypatch, "42\n")
+    assert _finish(tmp_path, monkeypatch, body="") == 2
+    assert seen == [] and not (tmp_path / "verdict.json").exists()
+
+
+def test_a_refused_comment_leaves_no_record_must_fire(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _gh(monkeypatch, "42\n", fail="PATCH")
+    assert _finish(tmp_path, monkeypatch) == 2
+    assert not (tmp_path / "verdict.json").exists()
