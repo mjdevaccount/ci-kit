@@ -285,12 +285,12 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
         summary += [f"#{p['number']}: in flight against current main" for p in q.in_flight]
         summary += [f"#{p['number']}: held, {why}" for p, why in q.held]
     default = _lazy_default(repo, base)
-    if opts.cancel_doomed:
-        # before any update fires: a BEHIND/DIRTY armed head cannot merge under strict protection
-        errors += doomed_runs.sweep(repo, prs, default() if doomed_runs.doomed(prs) else "", opts.review_workflow,
-                                    _gh, summary)
-    attempted, updated, err = _drive(repo, q, head, opts, relock, summary)
-    errors += err
+    cancel = doomed_runs.Canceller(repo, opts.review_workflow, _gh, summary) if opts.cancel_doomed else None
+    if cancel and doomed_runs.doomed(prs, behind=True):
+        # before any update fires: a head that cannot merge and whose result nothing reads
+        cancel.sweep(prs, default(), bool(opts.train_workflow))
+    attempted, updated, err = _drive(repo, q, head, opts, relock, summary, cancel)
+    errors += err + (cancel.errors if cancel else 0)
     errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, pr_heal.write, summary)
     if opts.scarce or parked:  # parked work is re-run even with the scheduler switched off: never strand
         errors += pr_sched.pass_(
@@ -308,7 +308,7 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
 
 
 def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock: list[int],
-           summary: list[str]) -> tuple[set[int], set[int], int]:
+           summary: list[str], cancel: doomed_runs.Canceller | None = None) -> tuple[set[int], set[int], int]:
     """The update loop: (attempted, updated, errors). After each update the head it replaced is
     a head that can never merge, so its `pull_request` runs are cancelled (doomed_runs)."""
     errors = 0
@@ -333,8 +333,8 @@ def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock:
         attempted.add(n)
         kind, line = _update_one(repo, p, opts, tracker, relock)
         updated |= {n} if kind == "updated" else set()
-        if kind == "updated" and opts.cancel_doomed:
-            errors += doomed_runs.superseded(repo, p, opts.review_workflow, _gh, summary)
+        if kind == "updated" and cancel:
+            cancel.superseded(p)
         errors += kind == "error"
         if line:
             summary.append(line)

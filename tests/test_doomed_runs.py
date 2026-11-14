@@ -33,13 +33,20 @@ class _Done:
 
 
 def fake_gh(calls: list[tuple], *, classic: tuple[int, str, str] = (0, '{"strict": true}', ""),
-            rules: tuple[int, str] = (0, "[]"), runs: list[dict] | None = None, cancel: tuple[int, str] = (0, "")):
+            rules: tuple[int, str] = (0, "[]"), runs: list[dict] | None = None, cancel: tuple[int, str] = (0, ""),
+            workflows: tuple[int, list] = (0, []), behind_by: int | None = 3):
     def gh(*a: str, check: bool = True) -> _Done:
         calls.append(a)
         if a[1].endswith("/protection/required_status_checks"):
             return _Done(*classic)
         if "/rules/branches/" in a[1]:
             return _Done(rules[0], rules[1], "" if not rules[0] else "HTTP 403")
+        if a[1].startswith("repos/o/r/actions/workflows"):
+            return _Done(workflows[0], json.dumps({"workflows": workflows[1]}), "HTTP 502" if workflows[0] else "")
+        if "/compare/" in a[1]:
+            if behind_by is None:
+                return _Done(1, "", "HTTP 502")
+            return _Done(0, json.dumps({"behind_by": behind_by}))
         if a[1].startswith("repos/o/r/actions/runs?head_sha="):
             sha = a[1].split("head_sha=")[1].split("&")[0]
             return _Done(0, json.dumps({"workflow_runs": [r for r in runs or [] if r["head_sha"] == sha]}))
@@ -47,6 +54,12 @@ def fake_gh(calls: list[tuple], *, classic: tuple[int, str, str] = (0, '{"strict
             return _Done(cancel[0], "", cancel[1])
         raise AssertionError(f"unexpected gh call {a}")
     return gh
+
+
+def sweep(gh, prs: list[dict], summary: list[str] | None = None, train: bool = False, review: str = "") -> int:
+    c = dr.Canceller("o/r", review, gh, summary if summary is not None else [])
+    c.sweep(prs, "main", train)
+    return c.errors
 
 
 def cancelled(calls: list[tuple]) -> list[str]:
@@ -72,43 +85,71 @@ def test_strict_is_read_and_unknown_is_never_false(classic, rules, want) -> None
 # ---- doomed(): pure, both directions
 
 
-def test_only_an_armed_behind_or_dirty_head_is_doomed() -> None:
+def test_only_an_armed_dirty_head_or_a_trainless_behind_one_is_doomed() -> None:
     prs = [pr(1), pr(2, "DIRTY"), pr(3, "CLEAN"), pr(4, "BLOCKED"), pr(5, "UNKNOWN"), pr(6, "UNSTABLE"),
            pr(7, autoMergeRequest=None), pr(8, headRefName="train/9"), pr(9, labels=[{"name": RIDING}]),
            pr(10, labels=[{"name": PARKED}]), pr(11, isCrossRepository=True)]
-    assert [p["number"] for p, _ in dr.doomed(prs)] == [1, 2]
+    assert [p["number"] for p, _ in dr.doomed(prs, behind=True)] == [1, 2]
+    assert [p["number"] for p, _ in dr.doomed(prs, behind=False)] == [2]
 
 
-def test_only_active_pull_request_runs_at_that_head_and_never_the_review() -> None:
+def test_only_active_pull_request_runs_of_this_pr_at_that_head_and_never_the_review() -> None:
     runs = [run(1), run(2, status="queued"), run(3, status="completed"), run(4, event="pull_request_target"),
             run(5, event="push"), run(6, event="schedule"), run(7, sha="b" * 40),
-            run(8, path=".github/workflows/review-gate.yml")]
-    assert [r["id"] for r in dr.cancellable(runs, SHA, "review-gate.yml")] == [1, 2]
-    assert [r["id"] for r in dr.cancellable(runs, SHA, "")] == [1, 2, 8]
+            run(8, path=".github/workflows/review-gate.yml"),
+            {**run(9), "pull_requests": [{"number": 2}]}, {**run(10), "pull_requests": [{"number": 1}]}]
+    assert [r["id"] for r in dr.cancellable(runs, SHA, 1, "review-gate.yml")] == [1, 2, 10]
+    assert [r["id"] for r in dr.cancellable(runs, SHA, 1, "")] == [1, 2, 8, 10]
 
 
 # ---- sweep(): the I/O, both directions
 
 
-def test_a_behind_pr_on_a_strict_base_has_its_runs_cancelled() -> None:
+def test_a_behind_pr_on_a_strict_trainless_base_has_its_runs_cancelled() -> None:
     calls: list[tuple] = []
     summary: list[str] = []
-    assert dr.sweep("o/r", [pr(1)], "main", "review-gate.yml", fake_gh(calls, runs=[run(11), run(12, event="push")]),
-                    summary) == 0
+    gh = fake_gh(calls, runs=[run(11), run(12, event="push"), run(13, path=".github/workflows/review-gate.yml")])
+    assert sweep(gh, [pr(1)], summary, review="review-gate.yml") == 0
     assert cancelled(calls) == ["11"]
     assert any("o/r#1: cancelled run 11" in s and "behind the base" in s for s in summary)
 
 
+def test_a_merge_train_reads_behind_heads_so_they_are_never_cancelled() -> None:
+    # finding 1 of the session review: a train takes a BEHIND PR whose checks are green at its head
+    for kw in ({"workflows": (0, [{"name": "merge-train", "path": ".github/workflows/merge-train.yml"}])},
+               {"workflows": (1, [])}):  # unreadable = a train, never a guess
+        calls: list[tuple] = []
+        assert sweep(fake_gh(calls, runs=[run(11)], **kw), [pr(1)]) == 0
+        assert cancelled(calls) == []
+    calls = []
+    assert sweep(fake_gh(calls, runs=[run(11)]), [pr(1)], train=True) == 0
+    assert cancelled(calls) == []
+    # ...while a DIRTY head on the same trained repo is (the train never takes a conflicting PR)
+    calls = []
+    trained = fake_gh(calls, runs=[run(11)], workflows=(0, [{"name": "merge-train", "path": "x"}]))
+    assert sweep(trained, [pr(1, "DIRTY")]) == 0
+    assert cancelled(calls) == ["11"]
+
+
+def test_behind_is_re_proven_by_git_before_a_cancel() -> None:
+    calls: list[tuple] = []
+    summary: list[str] = []
+    assert sweep(fake_gh(calls, runs=[run(11)], behind_by=0), [pr(1)], summary) == 0
+    assert cancelled(calls) == [] and any("already contains" in s for s in summary)
+    calls = []
+    assert sweep(fake_gh(calls, runs=[run(11)], behind_by=None), [pr(1)]) == 1  # could not compare: red, no cancel
+    assert cancelled(calls) == []
+
+
 def test_a_clean_head_is_never_touched() -> None:
     calls: list[tuple] = []
-    assert dr.sweep("o/r", [pr(1, "CLEAN")], "main", "", fake_gh(calls, runs=[run(11)]), []) == 0
+    assert sweep(fake_gh(calls, runs=[run(11)]), [pr(1, "CLEAN")]) == 0
     assert calls == []  # not even the protection read
 
 
 def test_a_non_strict_base_cancels_nothing() -> None:
     calls: list[tuple] = []
-    gh = fake_gh(calls, classic=(1, "", "HTTP 404: Branch not protected"), runs=[run(11)])
-    assert dr.sweep("o/r", [pr(1)], "main", "", gh, []) == 0
+    assert sweep(fake_gh(calls, classic=(1, "", "HTTP 404: Branch not protected"), runs=[run(11)]), [pr(1)]) == 0
     assert cancelled(calls) == []
 
 
@@ -116,34 +157,39 @@ def test_unreadable_protection_cancels_nothing_and_names_the_grant() -> None:
     calls: list[tuple] = []
     summary: list[str] = []
     gh = fake_gh(calls, classic=(1, "", "HTTP 403: Resource not accessible"), rules=(1, ""), runs=[run(11)])
-    assert dr.sweep("o/r", [pr(1)], "main", "", gh, summary) == 0
+    assert sweep(gh, [pr(1)], summary) == 0
     assert cancelled(calls) == []
     assert any("Administration: read" in s for s in summary)
 
 
 def test_a_refused_cancel_is_red_and_a_finished_run_is_not() -> None:
     summary: list[str] = []
-    assert dr.sweep("o/r", [pr(1)], "main", "", fake_gh([], runs=[run(11)], cancel=(1, "HTTP 500: boom")), summary) == 1
+    assert sweep(fake_gh([], runs=[run(11)], cancel=(1, "HTTP 500: boom")), [pr(1)], summary) == 1
     assert any("REFUSED" in s for s in summary)
-    assert dr.sweep("o/r", [pr(1)], "main", "", fake_gh([], runs=[run(11)],
-                                                        cancel=(1, "HTTP 409: Cannot cancel a completed run")), []) == 0
+    assert sweep(fake_gh([], runs=[run(11)], cancel=(1, "HTTP 409: Cannot cancel a completed run")), [pr(1)]) == 0
+    # a rate-limit 403 is a refusal, not a missing grant
+    assert sweep(fake_gh([], runs=[run(11)], cancel=(1, "HTTP 403: API rate limit exceeded")), [pr(1)]) == 1
 
 
-def test_no_actions_grant_is_one_warning_not_a_red() -> None:
+def test_no_actions_grant_is_one_warning_and_keeps_earlier_errors() -> None:
     calls: list[tuple] = []
     summary: list[str] = []
     gh = fake_gh(calls, runs=[run(11), run(12)], cancel=(1, "HTTP 403: Resource not accessible by personal access token"))
-    assert dr.sweep("o/r", [pr(1)], "main", "", gh, summary) == 0
-    assert cancelled(calls) == ["11"]  # stops at the first refusal
-    assert any("OFF for this pass" in s and "Actions: Read and write" in s for s in summary)
+    c = dr.Canceller("o/r", "", gh, summary)
+    c.errors = 1  # an earlier PR's failed read (finding 4: a refusal must not erase it)
+    c.sweep([pr(1)], "main", False)
+    c.superseded(pr(1, "CLEAN"))
+    assert cancelled(calls) == ["11"]  # stops at the first refusal, for the rest of the pass
+    assert c.errors == 1
+    assert sum("OFF for this pass" in s for s in summary) == 1
 
 
 def test_the_head_the_queue_replaced_is_cancelled_strict_or_not() -> None:
     calls: list[tuple] = []
     summary: list[str] = []
-    assert dr.superseded("o/r", pr(1, "CLEAN"), "", fake_gh(calls, classic=(1, "", "HTTP 404"), runs=[run(11)]),
-                         summary) == 0
-    assert cancelled(calls) == ["11"]
+    c = dr.Canceller("o/r", "", fake_gh(calls, classic=(1, "", "HTTP 404"), runs=[run(11)]), summary)
+    c.superseded(pr(1, "CLEAN"))
+    assert c.errors == 0 and cancelled(calls) == ["11"]
     assert any("the queue updated this PR" in s for s in summary)
 
 
@@ -161,15 +207,15 @@ def _wire(monkeypatch: pytest.MonkeyPatch, prs: list[dict], seen: list) -> None:
     monkeypatch.setattr(upd, "unlabel_resolved", lambda *a, **k: 0)
     monkeypatch.setattr(upd, "reviewing", lambda *a: False)
     monkeypatch.setattr(upd, "_update_one", lambda repo, p, *a: seen.append(("update", p["number"])) or ("updated", ""))
-    monkeypatch.setattr(dr, "sweep", lambda repo, prs, base, rw, gh, s: seen.append(("sweep", base)) or 0)
-    monkeypatch.setattr(dr, "superseded", lambda repo, p, rw, gh, s: seen.append(("superseded", p["number"])) or 0)
+    monkeypatch.setattr(dr.Canceller, "sweep", lambda self, prs, base, train: seen.append(("sweep", base, train)))
+    monkeypatch.setattr(dr.Canceller, "superseded", lambda self, p: seen.append(("superseded", p["number"])))
 
 
 def test_run_sweeps_before_the_update_and_cancels_the_replaced_head(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list = []
     _wire(monkeypatch, [pr(1)], seen)
     assert upd.run("o/r", [], [], Options(cancel_doomed=True)) == 0
-    assert seen == [("sweep", "trunk"), ("update", 1), ("superseded", 1)]
+    assert seen == [("sweep", "trunk", False), ("update", 1), ("superseded", 1)]
 
 
 def test_run_with_the_rule_off_cancels_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,3 +237,10 @@ def test_main_turns_the_rule_on_by_default(monkeypatch: pytest.MonkeyPatch, env,
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     assert upd.main(["--repo", "o/r"]) == 0
     assert got[0].cancel_doomed is want
+
+
+def test_a_cancel_error_turns_the_pass_red(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list = []
+    _wire(monkeypatch, [pr(1)], seen)
+    monkeypatch.setattr(dr.Canceller, "sweep", lambda self, prs, base, train: setattr(self, "errors", 1))
+    assert upd.run("o/r", [], [], Options(cancel_doomed=True)) == 1

@@ -132,10 +132,11 @@ on:
         default: 2
       cancel-doomed-runs:
         description: >-
-          cancel the queued/running `pull_request` runs at an armed PR head that cannot merge -- BEHIND
-          or DIRTY on a strict-protected base, or the head the queue just replaced (ci_kit/doomed_runs.py;
-          never the review workflow, never a non-PR event, never an unarmed PR). Needs Actions RW to act
-          and Administration read to see `strict`; without either it says so and cancels nothing
+          cancel the queued/running `pull_request` runs at a head that cannot merge and whose result
+          nothing reads -- the head the queue just replaced; an armed DIRTY head on a strict base; an armed
+          BEHIND head on a strict base in a repo with NO merge train (ci_kit/doomed_runs.py; never the
+          review workflow, never a non-PR event, never an unarmed PR). Needs Actions RW to act and
+          Administration read to see `strict`; without either it says so and cancels nothing
         type: boolean
         default: true
       queue-hold:
