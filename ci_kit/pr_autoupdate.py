@@ -257,7 +257,7 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
     # a PARKED PR (the scheduler cancelled or deferred its run) is eligible like a machinery red:
     # nothing in it is the author's to fix, and the update is its fresh run
     parked = frozenset(int(p["number"]) for p in prs if _has(p, pr_sched.PARKED))
-    base = pr_hold.default_branch(repo, _gh_read) if opts.hold or opts.scarce or opts.train_workflow else None
+    base = pr_hold.default_branch(repo, _gh_read) if opts.hold or opts.scarce else None
     try:  # reads only; the hold (the head's `queue/position` success) runs whatever happens here
         heal, errors = pr_heal.assess_armed(repo, armed, opts.required, opts.rerun_limit, _gh_read,
                                             pr_heal.comments_of, summary)
@@ -314,9 +314,11 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
             before=opts.before, sha=opts.sha, updated=frozenset(int(n) for n in updated), skip=skip)
     errors += unlabel_resolved(repo, prs, attempted, opts, summary)
     if opts.train_workflow:
-        # a PR this pass just updated is no longer green at its new head: never count it ready
+        # a PR this pass just updated is no longer green at its new head: never count it ready. The
+        # default branch is read HERE only, so a caller without hold/scarce sees exactly the old plan.
+        train_base = base or pr_hold.default_branch(repo, _gh_read) or "main"
         errors += train_kick.kick(repo, opts.train_workflow, [p for p in prs if p["number"] not in updated],
-                                  opts.required, base or "main", _gh, summary, opts.train_min_batch)
+                                  opts.required, train_base, _gh, summary, opts.train_min_batch)
     return 1 if errors else 0
 
 

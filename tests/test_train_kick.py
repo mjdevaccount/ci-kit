@@ -27,8 +27,11 @@ def pr(n: int, done: str = "2026-11-14T10:00:00Z", **k) -> dict:
     return base
 
 
-def runs(*created: str, status: str = "completed") -> list[dict]:
-    return [{"id": i, "status": status, "created_at": c} for i, c in enumerate(created, 1)]
+def runs(*created: str, status: str = "completed", event: str = "schedule", conclusion: str | None = None) -> list[dict]:
+    if conclusion is None:
+        conclusion = "success" if status == "completed" else ""
+    return [{"id": i, "status": status, "created_at": c, "event": event, "conclusion": conclusion or None}
+            for i, c in enumerate(created, 1)]
 
 
 # ---- decide(): pure, both directions
@@ -74,6 +77,36 @@ def test_a_pass_created_after_the_newest_ready_already_judged_this_set() -> None
     assert train_kick.decide(rearmed, REQ, "main", runs("2026-11-14T10:05:00Z"))[0]
 
 
+def test_a_skipped_run_judged_nothing_and_never_dedups() -> None:
+    # the live shape (trade-data 11-14): 9 of the newest 10 runs are workflow_run completions the
+    # train job's `if:` skipped. Read as passes, they would stop every wake.
+    skipped = runs(*[f"2026-11-14T10:{m:02d}:00Z" for m in range(10, 19)], event="workflow_run",
+                   conclusion="skipped")
+    real = runs("2026-11-14T09:07:00Z")
+    assert train_kick.decide([pr(1), pr(2)], REQ, "main", skipped + real)[0]
+    # a skipped run still in flight is not "a pass already running" either
+    queued = runs("2026-11-14T10:30:00Z", status="queued", event="workflow_run")
+    assert train_kick.decide([pr(1), pr(2)], REQ, "main", queued + real)[0]
+    # ...while a real pass after the ready time still dedups
+    assert not train_kick.decide([pr(1), pr(2)], REQ, "main", skipped + runs("2026-11-14T10:05:00Z"))[0]
+
+
+def test_a_cancelled_pass_judged_nothing() -> None:
+    gone = runs("2026-11-14T10:05:00Z", event="workflow_dispatch", conclusion="cancelled")
+    assert train_kick.decide([pr(1), pr(2)], REQ, "main", gone)[0]
+    done = runs("2026-11-14T10:05:00Z", event="workflow_dispatch")
+    assert not train_kick.decide([pr(1), pr(2)], REQ, "main", done)[0]
+
+
+def test_a_pass_is_dated_by_its_start_not_its_creation() -> None:
+    # created before the ready time, started (and so READ the PRs) after it: it judged this set
+    r = [{"id": 1, "status": "completed", "conclusion": "success", "event": "workflow_dispatch",
+          "created_at": "2026-11-14T09:55:00Z", "run_started_at": "2026-11-14T10:02:00Z"}]
+    assert not train_kick.decide([pr(1), pr(2)], REQ, "main", r)[0]
+    r[0]["run_started_at"] = "2026-11-14T09:58:00Z"
+    assert train_kick.decide([pr(1), pr(2)], REQ, "main", r)[0]
+
+
 def test_the_queue_hold_status_is_never_a_readiness_signal() -> None:
     # `queue/position` is re-posted every pass; read as readiness it would wake the train every pass
     hold = {"__typename": "StatusContext", "context": "queue/position", "state": "PENDING",
@@ -101,7 +134,9 @@ def _gh(calls: list[tuple], *, runs_rc: int = 0, run_list: list[dict] | None = N
     def fake(*a: str, check: bool = True, env: dict | None = None) -> _Done:
         calls.append(a)
         if a[0] == "api" and "/actions/workflows/" in a[1]:
-            return _Done(runs_rc, json.dumps({"workflow_runs": run_list or []}), "HTTP 403" if runs_rc else "")
+            event = a[1].split("event=")[1].split("&")[0]  # the server filters by event; so does the fake
+            rows = [r for r in run_list or [] if r.get("event") == event]
+            return _Done(runs_rc, json.dumps({"workflow_runs": rows}), "HTTP 404: Not Found" if runs_rc else "")
         if a[:2] == ("workflow", "run"):
             return _Done(dispatch_rc, "", "HTTP 403: Resource not accessible" if dispatch_rc else "")
         raise AssertionError(f"unexpected gh call {a}")
@@ -130,6 +165,26 @@ def test_an_unreadable_run_list_is_red_and_dispatches_nothing() -> None:
     assert train_kick.kick("o/r", "merge-train.yml", [pr(1), pr(2)], REQ, "main", _gh(calls, runs_rc=1), summary) == 1
     assert not [c for c in calls if c[:2] == ("workflow", "run")]
     assert any("Actions: Read and write" in s for s in summary)
+
+
+def test_kick_reads_each_pass_event_and_dedups_on_them() -> None:
+    calls: list[tuple] = []
+    summary: list[str] = []
+    rows = runs("2026-11-14T10:05:00Z", event="workflow_dispatch")
+    rows += runs(*[f"2026-11-14T10:{m:02d}:00Z" for m in range(20, 40)], event="workflow_run", conclusion="skipped")
+    assert train_kick.kick("o/r", "merge-train.yml", [pr(1), pr(2)], REQ, "main",
+                           _gh(calls, run_list=rows), summary) == 0
+    reads = [c[1] for c in calls if c[0] == "api"]
+    assert reads == [f"repos/o/r/actions/workflows/merge-train.yml/runs?event={e}&per_page=5"
+                     for e in train_kick.PASS_EVENTS]
+    assert not [c for c in calls if c[:2] == ("workflow", "run")]
+    assert any("unchanged since the last pass" in s for s in summary)
+
+
+def test_a_wrong_workflow_name_is_named_in_the_red() -> None:
+    summary: list[str] = []
+    assert train_kick.kick("o/r", "merge_train.yml", [pr(1), pr(2)], REQ, "main", _gh([], runs_rc=1), summary) == 1
+    assert any("train-workflow" in s and "404" in s for s in summary)
 
 
 def test_a_refused_dispatch_is_red() -> None:
@@ -162,6 +217,25 @@ def test_run_without_a_train_workflow_never_kicks(monkeypatch: pytest.MonkeyPatc
     _wire(monkeypatch, seen)
     assert upd.run("o/r", [], [], Options()) == 0
     assert seen == []
+
+
+def test_a_train_workflow_never_changes_the_queue_plans_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    # with hold/scarce off the plan ran with base=None before v1.32.0; naming a train workflow must
+    # not change that (review of 1.32.0, finding 2) -- the default branch is read for the kick only
+    reads: list[tuple] = []
+    seen: list = []
+    _wire(monkeypatch, seen)
+    inner = upd._gh_read
+    monkeypatch.setattr(upd, "_gh_read", lambda *a: reads.append(a) or inner(*a))
+    blocked: list = []
+    real = upd.pr_queue.blocked
+    monkeypatch.setattr(upd.pr_queue, "blocked", lambda prs, req, skip, base: blocked.append(base) or real(prs, req, skip, base))
+    assert upd.run("o/r", [], [], Options(train_workflow="merge-train.yml")) == 0
+    assert blocked == [None]
+    assert seen == [("merge-train.yml", "trunk", 2)]
+    reads.clear()
+    assert upd.run("o/r", [], [], Options()) == 0
+    assert ("api", "repos/o/r") not in reads
 
 
 def test_main_reads_the_train_workflow_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
