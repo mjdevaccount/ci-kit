@@ -6,15 +6,40 @@
 #   on:
 #     push: { branches: [main] }
 #     pull_request_target: { types: [auto_merge_enabled] }   # arming starts a pass (v1.32.0)
+#     workflow_run:                                 # a held PR is reconsidered when its checks finish
+#       workflows: [CI, review-gate]                # only workflows that can finish LAST on a PR head
+#       types: [completed]
 #     workflow_dispatch:
 #   concurrency: { group: pr-autoupdate, cancel-in-progress: false }
 #   permissions: { contents: read, pull-requests: read, checks: read, statuses: read }
 #   jobs:
 #     update:
+#       # a skipped job takes no runner: main's own CI (the push already ran this sha) and a
+#       # cancelled run can change nothing. Decide that HERE, never in a separate "gate" job: on a
+#       # single-use pool a gate job costs a whole runner, as much as the pass it was to save.
+#       if: >-
+#         github.event_name != 'workflow_run'
+#         || (github.event.workflow_run.event == 'pull_request'
+#             && github.event.workflow_run.conclusion != 'cancelled')
 #       uses: mjdevaccount/ci-kit/.github/workflows/pr-autoupdate.yml@v1
 #       secrets:
 #         token: ${{ secrets.PR_UPDATE_TOKEN }}     # whatever YOUR repo names it
 #         ntfy-url: ${{ secrets.NTFY_URL }}         # optional
+#
+# NO GATE JOB (v1.34.0). trade-data ran a `gate` job ahead of this one to debounce non-last check
+# completions: 289 gates on 2026-11-14 (00:00-17:38Z), 142 said go. Each was a single-use
+# secure-pool runner (~1.64 runner-min whatever its length), so the 147 no-gos cost more than the
+# passes they skipped, and every go paid twice. A pass that runs on a non-last completion is a
+# no-op for that PR (pr_queue holds a PR whose required checks are running), and the job-level
+# concurrency group collapses a burst to one running + one pending pass, which reads the newest
+# state. Also list in `workflow_run` only workflows that can finish last: trade-data's
+# `image (PR build)` finished last on 0 of 55 PR heads, so its completions only added runs.
+#
+# THE MERGE TRAIN (v1.34.0, `train-workflow`): name the caller's merge-train workflow and each pass
+# dispatches it when the train would find work (ci_kit/train_kick.py: 2+ candidates by the train's
+# own rule, none landing on its own, no train open, no pass queued, and a candidate ready since the
+# last pass). The train's cron then needs only an hourly backstop. The token needs Actions: Read
+# and write (dispatch); a refused read or dispatch is a red run.
 #
 # The secret NAMES are the caller's: this workflow declares `token` and `ntfy-url` and the caller
 # maps its own repository secrets onto them (`secrets: inherit` works only if the caller's secrets
@@ -119,6 +144,26 @@ on:
         description: the queue head waiting this long on a pool a non-head job holds turns the run red (queue-head-starved)
         type: number
         default: 15
+      train-workflow:
+        description: >-
+          the caller's merge-train workflow file (e.g. merge-train.yml): each pass dispatches it when the train
+          would find work (ci_kit/train_kick.py), so its cron can be an hourly backstop. '' = off. Needs the
+          token's Actions: Read and write
+        type: string
+        default: ""
+      train-min-batch:
+        description: the train's own min-batch (dispatch only with at least this many candidates)
+        type: number
+        default: 2
+      cancel-doomed-runs:
+        description: >-
+          cancel the queued/running `pull_request` runs at a head that cannot merge and whose result
+          nothing reads -- the head the queue just replaced; an armed DIRTY head on a strict base; an armed
+          BEHIND head on a strict base in a repo with NO merge train (ci_kit/doomed_runs.py; never the
+          review workflow, never a non-PR event, never an unarmed PR). Needs Actions RW to act and
+          Administration read to see `strict`; without either it says so and cancels nothing
+        type: boolean
+        default: true
       queue-hold:
         description: >-
           the QUEUE HOLD (ci_kit/pr_hold.py, v1.30.0): post commit status `queue/position` -- success on the queue
@@ -153,7 +198,7 @@ on:
         default: 90
     secrets:
       token:
-        description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs), commit statuses RW with queue-hold, on the caller repo
+        description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs --, with train-workflow, which dispatches, and with cancel-doomed-runs), administration read (cancel-doomed-runs reads whether the base is strict), commit statuses RW with queue-hold, on the caller repo
         required: true
       ntfy-url:
         description: an ntfy topic URL to page on a NEW conflict ('' = no page)
@@ -210,6 +255,10 @@ jobs:
       CI_KIT_SCARCE_POOLS: ${{ inputs.scarce-pools }}
       # an env var, never a flag: an older @v1 tool would refuse a flag it does not know
       CI_KIT_QUEUE_HOLD: ${{ inputs.queue-hold }}
+      # env vars, never flags (the older-@v1-tool reason above)
+      CI_KIT_TRAIN_WORKFLOW: ${{ inputs.train-workflow }}
+      CI_KIT_TRAIN_MIN_BATCH: ${{ inputs.train-min-batch }}
+      CI_KIT_CANCEL_DOOMED: ${{ inputs.cancel-doomed-runs }}
       # the heal ladder: env vars, never flags (an older @v1 tool refuses a flag it does not know)
       CI_KIT_HEAL: ${{ inputs.heal }}
       CI_KIT_HEAL_CLAUDE_PER_PASS: ${{ inputs.heal-claude-per-pass }}

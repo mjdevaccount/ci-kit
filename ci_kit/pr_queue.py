@@ -82,13 +82,17 @@ def landing_order(p: dict) -> int:
 
 
 def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = (),
-         machinery: frozenset[int] = frozenset()) -> Plan:
+         machinery: frozenset[int] = frozenset(), restarted: frozenset[int] = frozenset()) -> Plan:
     """Split the armed PRs into update / in flight / held. Pure: the policy the tests pin.
 
     `machinery` = PRs whose every failing check is MACHINERY (ci_kit/redclass.py, read by
     pr_heal): such a PR BEHIND main is eligible as if green -- the update gives it fresh checks,
     which is the rerun it needs, with no rerun permission. Its failing checks are no author's
-    to fix, so "the author's fix re-queues it" would wait forever."""
+    to fix, so "the author's fix re-queues it" would wait forever.
+
+    `restarted` = BEHIND PRs whose running checks this pass just CANCELLED (ci_kit/doomed_runs:
+    they could never merge). "Checks still running" no longer holds them -- nothing is running
+    and no completion is coming to wake the next pass -- so they are eligible now, in order."""
     out = Plan()
     if max_in_flight <= 0:
         out.update = list(armed)
@@ -106,7 +110,7 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = (),
                 out.held.append((p, f"current with main, checks {checks}"))
         elif checks == "failing" and p.get("number") not in machinery:
             out.held.append((p, "behind, a check is failing on its head (the author's fix re-queues it)"))
-        elif checks == "running":
+        elif checks == "running" and p.get("number") not in restarted:
             out.held.append((p, "behind, checks still running (an update would cancel them)"))
         else:
             eligible.append(p)

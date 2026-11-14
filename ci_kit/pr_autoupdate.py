@@ -52,9 +52,10 @@ import os
 import subprocess
 import sys
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass
 
-from ci_kit import pr_heal, pr_hold, pr_ladder, pr_list, pr_queue, pr_renovate, pr_sched
+from ci_kit import doomed_runs, pr_heal, pr_hold, pr_ladder, pr_list, pr_queue, pr_renovate, pr_sched, train_kick
 from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
 from ci_kit.ntfy import page  # noqa: F401 -- re-exported: _update_one pages through this name
 
@@ -77,6 +78,11 @@ class Options:
     before: str = ""  # a push to main's previous sha (the out-of-queue merge check)
     sha: str = ""
     hold: bool = False  # the queue hold: required status `queue/position`, success on the head only (pr_hold)
+    # the caller's merge-train workflow file, dispatched when this pass sees work for it (train_kick); '' = off
+    train_workflow: str = ""
+    train_min_batch: int = train_kick.MIN_BATCH
+    # cancel the `pull_request` runs at heads that cannot merge under strict protection (doomed_runs)
+    cancel_doomed: bool = False  # main() turns it ON (env CI_KIT_CANCEL_DOOMED, default true)
     ladder: pr_ladder.Config = pr_ladder.Config()  # the heal ladder (pr_ladder): off unless the caller runs pr-heal.yml
 
 
@@ -215,7 +221,7 @@ def add_label(repo: str, n: int, label: str, color: str = LABEL_COLOR,
 
 
 def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Options,
-                machinery: frozenset[int] = frozenset()) -> pr_queue.Plan:
+                machinery: frozenset[int] = frozenset(), restarted: frozenset[int] = frozenset()) -> pr_queue.Plan:
     """pr_queue's plan with the MERGE TRAIN's PRs taken out (ci_kit/merge_train). A train PR is
     never updated (a merge commit from main would break its one-commit-per-PR chain; a stale train
     is recomposed instead), a PR riding one is left alone, and while a train is open nothing else is
@@ -233,7 +239,7 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
     if riding:
         summary.append(f"riding a merge train, not updated: {', '.join('#' + str(n) for n in sorted(riding))}")
     q = pr_queue.plan([p for p in armed if p not in trains and p["number"] not in riding],
-                      opts.max_in_flight, opts.required, machinery)
+                      opts.max_in_flight, opts.required, machinery, restarted)
     if trains:
         held = [p for p in q.update if (p.get("mergeStateStatus") or "").upper() != "DIRTY"
                 and not any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
@@ -274,12 +280,20 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
         raise
     errors += joined
     machinery = pr_heal.machinery(heal)
+    default = _lazy_default(repo, base)
+    cancel = doomed_runs.Canceller(repo, opts.review_workflow, _gh, summary) if opts.cancel_doomed else None
+    if cancel and doomed_runs.doomed(prs, behind=True):
+        # BEFORE the plan: a head that cannot merge and whose result nothing reads. A BEHIND PR whose
+        # running checks it cancels is updated THIS pass (`restarted`), never held for a completion
+        # that will not come (session review, round 2: a caller skipping cancelled runs never woke)
+        cancel.sweep(prs, default(), bool(opts.train_workflow))
     # ONE head for the hold, the updater and the scheduler: the lowest armed PR that can land
     skip = pr_queue.blocked(prs, opts.required, machinery | parked, base)
     if opts.hold:
         errors += pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of, skip,
                                base=base, stale_s=opts.head_stall_min * 120, required=opts.required)
-    q = _train_plan(prs, armed, summary, opts, machinery | parked)
+    q = _train_plan(prs, armed, summary, opts, machinery | parked,
+                    frozenset(cancel.restarted) if cancel else frozenset())
     head = _head_first(repo, prs, q, opts, summary, skip)
     if opts.max_in_flight > 0:
         summary.append(f"queue: {len(q.in_flight)}/{opts.max_in_flight} in flight "
@@ -287,6 +301,31 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
                        f"{len(q.held)} held")
         summary += [f"#{p['number']}: in flight against current main" for p in q.in_flight]
         summary += [f"#{p['number']}: held, {why}" for p, why in q.held]
+    attempted, updated, conflicts, err = _drive(repo, q, head, opts, relock, summary, cancel)
+    errors += err + (cancel.errors if cancel else 0)
+    e, taken = _ladder(repo, heal, conflicts + [p for p in renovate_pool(prs, opts) if _dirty(p)], opts, summary, healing)
+    errors += e
+    errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, pr_heal.write, summary, frozenset(taken))
+    if opts.scarce or parked:  # parked work is re-run even with the scheduler switched off: never strand
+        errors += pr_sched.pass_(
+            repo, prs, dict(opts.scarce), _gh_read, pr_heal.write, summary,
+            preempt_after_s=opts.preempt_after_min * 60, stall_s=opts.head_stall_min * 60,
+            behind=lambda p: (p.get("mergeStateStatus") or "UNKNOWN").upper() in ("BEHIND", "UNKNOWN"),
+            before=opts.before, sha=opts.sha, updated=frozenset(int(n) for n in updated), skip=skip)
+    errors += unlabel_resolved(repo, prs, attempted, opts, summary)
+    if opts.train_workflow:
+        # a PR this pass just updated is no longer green at its new head: never count it ready. The
+        # default branch is read HERE only, so a caller without hold/scarce sees exactly the old plan.
+        errors += train_kick.kick(repo, opts.train_workflow, [p for p in prs if p["number"] not in updated],
+                                  opts.required, default(), _gh, summary, opts.train_min_batch)
+    return 1 if errors else 0
+
+
+def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock: list[int], summary: list[str],
+           cancel: doomed_runs.Canceller | None = None) -> tuple[set[int], set[int], list[dict], int]:
+    """The update loop: (attempted, updated, conflicts, errors). After each update the head it
+    replaced is a head that can never merge, so its `pull_request` runs are cancelled (doomed_runs)."""
+    errors = 0
     tracker = ""
     if opts.tracker:
         tracker = _gh("issue", "view", str(opts.tracker), "-R", repo, "--json", "body", "-q",
@@ -308,21 +347,25 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
         attempted.add(n)
         kind, line = _update_one(repo, p, opts, tracker, relock)
         updated |= {n} if kind == "updated" else set()
+        if kind == "updated" and cancel:
+            cancel.superseded(p)
         conflicts += [p] if kind == "conflict" else []
         errors += kind == "error"
         if line:
             summary.append(line)
-    e, taken = _ladder(repo, heal, conflicts + [p for p in renovate_pool(prs, opts) if _dirty(p)], opts, summary, healing)
-    errors += e
-    errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, pr_heal.write, summary, frozenset(taken))
-    if opts.scarce or parked:  # parked work is re-run even with the scheduler switched off: never strand
-        errors += pr_sched.pass_(
-            repo, prs, dict(opts.scarce), _gh_read, pr_heal.write, summary,
-            preempt_after_s=opts.preempt_after_min * 60, stall_s=opts.head_stall_min * 60,
-            behind=lambda p: (p.get("mergeStateStatus") or "UNKNOWN").upper() in ("BEHIND", "UNKNOWN"),
-            before=opts.before, sha=opts.sha, updated=frozenset(int(n) for n in updated), skip=skip)
-    errors += unlabel_resolved(repo, prs, attempted, opts, summary)
-    return 1 if errors else 0
+    return attempted, updated, conflicts, errors
+
+
+def _lazy_default(repo: str, base: str | None) -> Callable[[], str]:
+    """The default branch, read at most once and only when asked: the plan's own `base` stays
+    exactly what hold/scarce made it (review of 1.34.0, finding 2)."""
+    got: list[str] = []
+
+    def read() -> str:
+        if not got:
+            got.append(base or pr_hold.default_branch(repo, _gh_read) or "main")
+        return got[0]
+    return read
 
 
 def _ladder(repo: str, heal: pr_heal.Heal, conflicts: list[dict], opts: Options, summary: list[str],
@@ -497,6 +540,10 @@ def main(argv: list[str] | None = None) -> int:
                    before=os.environ.get("CI_KIT_BEFORE", ""),
                    sha=os.environ.get("CI_KIT_SHA", "") if os.environ.get("CI_KIT_EVENT") == "push" else "",
                    hold=os.environ.get("CI_KIT_QUEUE_HOLD", "").strip().lower() in ("1", "true"),
+                   # env vars, never flags: an older @v1 tool would refuse a flag it does not know
+                   train_workflow=os.environ.get("CI_KIT_TRAIN_WORKFLOW", "").strip(),
+                   train_min_batch=int(os.environ.get("CI_KIT_TRAIN_MIN_BATCH", "").strip() or train_kick.MIN_BATCH),
+                   cancel_doomed=os.environ.get("CI_KIT_CANCEL_DOOMED", "true").strip().lower() not in ("false", "0", "no"),
                    ladder=pr_ladder.Config.from_env())
     summary: list[str] = []
     relock: list[int] = []
