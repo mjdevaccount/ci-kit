@@ -318,9 +318,12 @@ def test_a_train_job_is_never_preempted(labels) -> None:
 
 
 # ── out-of-queue merges ───────────────────────────────────────────────────────────────────────
-def _oq(merged: list[int], *, behind_by: int = 0, head: int = 3073, ref: str = "b", login: str = "agent") -> str:
+def _oq(merged: list[int], *, behind_by: int = 0, head: int = 3073, ref: str = "b", login: str = "agent",
+        armed: bool = False) -> str:
     gh = Gh({"repos/o/r/commits/sha1/pulls": [{"number": n, "merged_at": "x", "head": {"ref": f"{ref}{n}"},
-                                                "user": {"login": login}} for n in merged],
+                                                "user": {"login": login},
+                                                "auto_merge": {"merge_method": "squash"} if armed else None}
+                                               for n in merged],
              "repos/o/r/compare/": {"behind_by": behind_by}})
     return pr_sched.out_of_queue("o/r", [_pr(head), _pr(3090)], "b" * 40, "sha1", gh.read)
 
@@ -329,10 +332,18 @@ def test_a_later_pr_merged_past_an_in_flight_head_pages_must_fire() -> None:
     assert "#3080" in _oq([3080])
 
 
-def test_renovates_own_merge_pages_whatever_its_number_td3072_must_fire() -> None:
-    # td#3072 (Renovate, platformAutomerge off: never armed) landed past head #3073, 03:53Z 11-14
+def test_an_unarmed_renovate_merge_pages_whatever_its_number_td3072_must_fire() -> None:
+    # td#3072 (Renovate merging ITSELF, never armed) landed past head #3073, 03:53Z 11-14; so does a
+    # CLEAN Renovate PR mcp pr_reconcile lands unarmed. dies to: dropping the unarmed-Renovate clause
     assert "#3072" in _oq([3072], ref="renovate/x-")
     assert "#3072" in _oq([3072], login="renovate[bot]")
+
+
+def test_an_armed_renovate_merge_was_the_head_itself_must_not_fire() -> None:
+    # since v1.32.0 ci_kit/pr_renovate.py arms Renovate's automerge PRs and they land as queue members:
+    # paging every Renovate merge would page the head's own landing. dies to: ignoring `auto_merge`
+    assert _oq([3072], ref="renovate/x-", login="renovate[bot]", armed=True) == ""
+    assert "#3080" in _oq([3080], ref="renovate/x-", armed=True)   # past the head: still out of turn
 
 
 def test_the_heads_own_landing_a_train_or_a_stale_head_does_not_page_must_not_fire() -> None:

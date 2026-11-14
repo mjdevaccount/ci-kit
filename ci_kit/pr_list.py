@@ -14,8 +14,9 @@ query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     pullRequests(states: OPEN, first: 100, orderBy: {field: CREATED_AT, direction: ASC}) {
       nodes {
-        number title url isCrossRepository headRefOid headRefName mergeStateStatus
+        id number title url isCrossRepository headRefOid headRefName mergeStateStatus
         isDraft mergeable baseRefName createdAt
+        author { __typename login }
         autoMergeRequest { enabledAt }
         labels(first: 30) { nodes { name } }
         commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
@@ -44,9 +45,9 @@ def rows(answer: dict) -> list[dict]:
         commits = (n.get("commits") or {}).get("nodes") or []
         rollup = (commits[0]["commit"].get("statusCheckRollup") or {}) if commits else {}
         out.append({
-            **{k: n.get(k) for k in ("number", "title", "url", "isCrossRepository", "headRefOid",
+            **{k: n.get(k) for k in ("id", "number", "title", "url", "isCrossRepository", "headRefOid",
                                      "headRefName", "mergeStateStatus", "autoMergeRequest",
-                                     "isDraft", "mergeable", "baseRefName", "createdAt")},
+                                     "isDraft", "mergeable", "baseRefName", "createdAt", "author")},
             "labels": (n.get("labels") or {}).get("nodes") or [],
             "statusCheckRollup": ((rollup.get("contexts") or {}).get("nodes")) or [],
         })

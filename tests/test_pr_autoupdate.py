@@ -206,7 +206,8 @@ def test_the_pr_list_reads_with_the_read_token_and_falls_back_to_the_push_token(
     # 2026-10-24: a fine-grained PAT is refused the check runs in statusCheckRollup
     seen: list[str | None] = []
 
-    def fake(args: list[str], check: bool, capture_output: bool, text: bool, env: dict[str, str] | None):
+    def fake(args: list[str], check: bool, capture_output: bool, text: bool, env: dict[str, str] | None,
+             encoding: str = "", errors: str = ""):
         seen.append((env or {}).get("GH_TOKEN"))
         rc = 1 if env is not None else 0
         if rc and check:
