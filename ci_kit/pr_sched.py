@@ -334,12 +334,15 @@ class Refill:
     comments: Comments | None = None
 
 
-def _starved(repo: str, p: dict, line: str, write: Gh, comments: Comments | None) -> str:
-    """A non-head parked past its bound: ONE page per (PR, head), then a marker; every later pass
-    only says it (v1.35.0). It was an error on every pass -- trade-data 11-14, 11 of 11 red runs
-    from 20:15Z were this one standing condition, which looked exactly like the 403 token refusals
-    earlier that day. Waiting for a busy pool is not the pass failing, so it never turns the run
-    red; the page is the alarm. Marker unreadable or refused: ntfy's own recent() dedups (6h)."""
+def _starved(repo: str, p: dict, line: str, write: Gh, comments: Comments | None) -> tuple[str, int]:
+    """A non-head parked past its bound: (summary suffix, errors). ONE page per (PR, head) -- the
+    alarm -- and every later pass only names it (v1.35.0). It used to be an error on every pass, and
+    one standing park painted every run red, indistinguishable from a real machinery failure.
+
+    A verdict computed and a verdict DELIVERED are two events: the marker is written ONLY after a
+    confirmed publish. NTFY_URL unset, or a push that failed, is an error (the run goes red, as before
+    v1.35.0) and writes no marker, so the next pass tries again. Published but the marker refused:
+    ntfy's own recent() (6h) is the dedup the next pass reads before paging again."""
     n, sha = int(p["number"]), str(p.get("headRefOid") or "")
     if comments is None:
         from ci_kit.pr_heal import comments_of as comments  # lazy, as pr_heal's own readers
@@ -348,18 +351,21 @@ def _starved(repo: str, p: dict, line: str, write: Gh, comments: Comments | None
     except (subprocess.CalledProcessError, ValueError, OSError):
         marked = False
     if marked:
-        return "paged already for this head"
+        return "paged already for this head", 0
     title = f"{repo.rsplit('/', 1)[-1]}: #{n} parked, starved of a free pool"
     if recent(title):
-        return "paged already (ntfy, last 6h)"
+        return "paged already (ntfy, last 6h)", 0
     try:
         note = page(title, line[:900], str(p.get("url") or ""))
     except Exception as e:  # noqa: BLE001 -- page() catches OSError only (a malformed URL is ValueError)
         note = f"push FAILED: {e}"
+    if not note.startswith("published"):
+        print(f"::error::#{n}: parked past its bound and the page was NOT delivered: {note}")
+        return f"page NOT delivered ({note}); no marker, the next pass pages again", 1
     body = STARVED.format(sha=sha) + f"\nPR queue: parked past its bound waiting for a free pool ({line}). Paged: {note}"
     if write("pr", "comment", str(n), "-R", repo, "--body", body).returncode:
-        note += "; marker refused (ntfy dedups the next pages)"
-    return f"page {note}"
+        note += "; marker refused (the next pass reads ntfy's recent() before paging again)"
+    return f"page {note}", 0
 
 
 def _park(repo: str, preempt: list[tuple[pr_queue.Job, str]], write: Gh, summary: list[str]) -> int:
@@ -391,8 +397,7 @@ def _refill(repo: str, prs: list[dict], hn: int | None, r: Refill, read: Gh, wri
     a PR with the label and nothing parked left loses the label -- but not while a run is still
     active at its head (that run may be the admission about to end parked, found next pass). A
     non-head parked longer than `starve_s` is named `PARKED STARVED` in every pass and paged once
-    per head (`_starved`); it is NOT an error -- the run stays green for a waiting state. Returns the
-    errors."""
+    per head (`_starved`); waiting is NOT an error, an undelivered page is. Returns the errors."""
     errors, refilled, first = 0, False, True
     for p in sorted((p for p in prs if any(lb.get("name") == PARKED for lb in p.get("labels") or [])),
                     key=pr_queue.landing_order):
@@ -419,7 +424,9 @@ def _refill(repo: str, prs: list[dict], hn: int | None, r: Refill, read: Gh, wri
             # only the NEXT in line can starve: the ones behind it wait for it, which is queue order
             if first and r.now - since > r.starve_s:
                 print(f"::warning::parked-pr-starved {line}")
-                line = f"PARKED STARVED: {line}; {_starved(repo, p, line, write, r.comments)}"
+                said, err = _starved(repo, p, line, write, r.comments)
+                errors += err
+                line = f"PARKED STARVED: {line}; {said}"
             first = False
             summary.append(line)
             continue

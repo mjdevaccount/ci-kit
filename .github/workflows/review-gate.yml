@@ -512,6 +512,8 @@ jobs:
         id: upload
         if: steps.finish.outputs.done == 'true'
         continue-on-error: true
+        # a hung upload must not eat the job's timeout: past 1 min it fails, `finished` stays empty
+        timeout-minutes: 1
         uses: actions/upload-artifact@v7
         with:
           name: review-verdict-${{ github.event.pull_request.number }}
@@ -858,6 +860,8 @@ jobs:
       - name: upload the verdict record
         if: always() && steps.record.outcome == 'success'
         continue-on-error: true
+        # a hung upload must not eat the 5-min job: `review deferred` and the verdict below still run
+        timeout-minutes: 1
         uses: actions/upload-artifact@v7
         with:
           name: review-verdict-${{ github.event.pull_request.number }}

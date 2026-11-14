@@ -292,16 +292,21 @@ def _starving(age_s: float) -> dict[str, object]:
     return routes
 
 
+class _Pages(list):
+    """Titles page() was asked to send; `result` is what ci_kit.ntfy.page returns (set per test)."""
+    result = "published (200)"
+
+
 @pytest.fixture
-def pages(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    sent: list[str] = []
-    monkeypatch.setattr(pr_sched, "page", lambda title, body, click: sent.append(title) or "published (200)")
+def pages(monkeypatch: pytest.MonkeyPatch) -> _Pages:
+    sent = _Pages()
+    monkeypatch.setattr(pr_sched, "page", lambda title, body, click: sent.append(title) or sent.result)
     monkeypatch.setattr(pr_sched, "recent", lambda title: False)
     return sent
 
 
 def test_a_starved_park_pages_once_per_head_and_the_run_stays_green_must_fire(labels, pages) -> None:
-    # trade-data 11-14: 11 of 11 red pr-autoupdate runs from 20:15Z were ONE standing park
+    # one standing park used to turn every pass red
     bodies: list[str] = []
     gh = Gh(_starving(3600))
     prs = [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))]
@@ -596,6 +601,23 @@ def test_a_verdict_job_red_on_anything_besides_the_park_is_judgment_must_not_fir
     assert not pr_sched._deferred({**STEP_PARK, "conclusion": "success"})
 
 
+def test_a_skipped_deferred_step_in_a_red_verdict_job_is_not_a_park_must_not_fire() -> None:
+    # the step NAME is present but did not fail: the job is red for its own verdict, not parked
+    skipped = {**STEP_PARK, "steps": [{"name": "review deferred", "conclusion": "skipped"},
+                                      {"name": "The review's own verdict", "conclusion": "failure"}]}
+    assert not pr_sched._deferred(skipped)
+    assert redclass.job_class(skipped)[0] == redclass.JUDGMENT
+
+
+def test_a_failed_best_effort_upload_beside_the_park_stays_parked_must_fire() -> None:
+    # continue-on-error upload listed as `failure` by the jobs API: still the queue's park, not JUDGMENT
+    up = {**STEP_PARK, "steps": [{"name": "upload the verdict record", "conclusion": "failure"},
+                                 *STEP_PARK["steps"]]}
+    assert redclass.job_class(up)[0] == redclass.PARKED and pr_sched._deferred(up)
+    alone = {**STEP_PARK, "steps": [{"name": "upload the verdict record", "conclusion": "failure"}]}
+    assert redclass.job_class(alone)[0] != redclass.PARKED and not pr_sched._deferred(alone)
+
+
 def test_the_parked_run_is_found_by_its_step(labels) -> None:
     run = _run(50 + 3073, 3073, status="completed", conclusion="failure")
     gh = Gh({f"repos/o/r/actions/runs?head_sha={3073:040d}": {"workflow_runs": [run]},
@@ -612,3 +634,28 @@ def test_the_review_is_settled_when_its_verdict_job_is(verdict: str, settled: bo
              "repos/o/r/actions/runs/9/jobs": {"jobs": [_rjob("reviewer / review", "completed", labels=()),
                                                          _rjob("reviewer / verdict", verdict, labels=())]}})
     assert pr_sched.review_settled("o/r", "b3078", gh.read) is settled
+
+
+@pytest.mark.parametrize("result", ["NTFY_URL unset: NOT pushed", "push FAILED: <urlopen error refused>"])
+def test_an_undelivered_starved_page_is_red_and_writes_no_marker_must_fire(labels, pages, result) -> None:
+    # a verdict computed is not a verdict delivered: no page, no marker -- the run is red, as before v1.35.0
+    pages.result = result
+    gh = Gh(_starving(3600))
+    errors, summary = _pass(gh, [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))], comments=lambda r, n: [])
+    assert errors == 1 and len(pages) == 1
+    assert not any(w.startswith("pr comment 3080") for w in gh.writes)
+    assert any(s.startswith("PARKED STARVED: #3080") and "page NOT delivered" in s for s in summary)
+    # and the next pass tries again (nothing says "paged already")
+    errors, _ = _pass(Gh(_starving(3600)), [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))], comments=lambda r, n: [])
+    assert errors == 1 and len(pages) == 2
+
+
+def test_a_published_page_whose_marker_is_refused_falls_back_to_ntfy_recent_must_not_fire(
+        labels, pages, monkeypatch) -> None:
+    gh = Gh(_starving(3600), fail=("pr comment",))
+    errors, summary = _pass(gh, [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))], comments=lambda r, n: [])
+    assert errors == 0 and len(pages) == 1 and any("marker refused" in s for s in summary)
+    monkeypatch.setattr(pr_sched, "recent", lambda title: title == pages[0])   # ntfy now holds that title
+    errors, summary = _pass(Gh(_starving(3600), fail=("pr comment",)), [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))],
+                            comments=lambda r, n: [])
+    assert errors == 0 and len(pages) == 1 and any("paged already (ntfy, last 6h)" in s for s in summary)

@@ -78,6 +78,11 @@ MACHINERY, CONSEQUENCE, JUDGMENT, PARKED = "machinery", "consequence", "judgment
 # since v1.35.0 a STEP of the gate's `verdict` job, named the same
 DEFERRED_JOB = re.compile(r"(^|/ )review deferred$")
 DEFERRED_STEP = "review deferred"
+# The gate's continue-on-error steps beside the park (the verdict record's upload). A failed one is
+# best-effort, never the PR's: the jobs API may still list it as `failure` (the contexts docs define
+# `conclusion` as post-continue-on-error; the REST step shape is not documented), so a park beside it
+# stays PARKED.
+BEST_EFFORT_STEP = re.compile(r"^upload the verdict record$", re.I)
 
 # A step that prepares the job and runs none of the PR's code. Its failure is the runner's or the
 # network's, never the change's -- but only with the log's word for it (below).
@@ -119,8 +124,9 @@ def job_class(job: dict, annotations: list[str] = (), log_error: str = "", log_t
         return MACHINERY, "the job never started (startup failure)"
     steps = [s for s in job.get("steps") or [] if isinstance(s, dict)]
     failed = [s for s in steps if _concl(s) == "failure"]
+    parked = [s for s in failed if not BEST_EFFORT_STEP.search(str(s.get("name") or ""))]
     if c == "failure" and (DEFERRED_JOB.search(str(job.get("name") or ""))
-                           or (failed and all(str(s.get("name") or "") == DEFERRED_STEP for s in failed))):
+                           or (parked and all(str(s.get("name") or "") == DEFERRED_STEP for s in parked))):
         return PARKED, "parked by the PR queue so the queue head gets the runner -- not a failure of this PR"
     own = [s for s in failed if not SETUP_STEP.search(str(s.get("name") or ""))
            and not AGGREGATOR_STEP.search(str(s.get("name") or ""))]
