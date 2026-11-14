@@ -70,7 +70,12 @@ def _shadow(tmp_path: pathlib.Path) -> pathlib.Path:
 
 
 def _run(cwd: pathlib.Path, safe: bool) -> str:
-    env = {k: v for k, v in os.environ.items() if k != "PYTHONSAFEPATH"}
+    # The kit under test rides an ABSOLUTE PYTHONPATH, as the gate's fetched kit does. Inherited, a
+    # RELATIVE entry (`PYTHONPATH=.` from a checkout where ci_kit is not installed) resolves against
+    # the shadow cwd below, so the "installed" gate would BE the shadow and the safe run fail.
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONSAFEPATH", "PYTHONPATH")}
+    import ci_kit
+    env["PYTHONPATH"] = str(pathlib.Path(ci_kit.__file__).resolve().parent.parent)
     if safe:
         env["PYTHONSAFEPATH"] = "1"
     p = subprocess.run([sys.executable, "-m", "ci_kit.review.verdict", "--print-schema"], cwd=cwd, env=env,

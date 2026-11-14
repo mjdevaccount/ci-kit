@@ -37,6 +37,19 @@ last check finished is the same alarm (a required check that never reports, td#2
 merge GitHub refuses for a reason no check shows): with the hold on, no other PR's merge moves
 main to shake it loose, so the hold must say so itself.
 
+THE TRAIN OWNS THE LANE (v1.35.0). While a merge train PR is open and LIVE, the single-lane head is
+HELD too: pending, its description naming the train (TRAIN_HELD). Measured: every unlanded train
+in a day closed "stale: main moved" because the head held success beside an open train and
+landed (one 3.4 min after the train opened; a Renovate bump 4 min after another) -- the train's
+whole CI thrown away, and its riders recomposed. The train never waits on the head (its own
+`queue/position` is TRAIN success, and the train reads no `queue/position`), so this cannot
+deadlock. BOUNDED (`live_train`): a train that is red, BEHIND/DIRTY (main moved anyway), or open
+past `train_stale_s` (merge-train's own `stale-minutes`) RELEASES the lane, and the summary says
+which (`hold: lane RELEASED ...`); merge-train closes such a train on its next pass. The composer
+takes the lane itself before it opens a train and gives it back when a train closes with none
+after it (merge_train.phases.take_lane / release_lane), so the minutes until this pass runs are
+covered too.
+
 KEEP `queue/position` OUT of the merge train's `required-checks` (and pr-autoupdate's): a member
 waiting its turn reads pending, so a train would never collect it. A train's own PR gets success the
 moment merge-train opens it (merge_train.phases.queue_position); every pass re-posts it. The PR list is GraphQL's first
@@ -58,6 +71,7 @@ import subprocess
 from collections.abc import Callable
 
 from ci_kit import pr_queue
+from ci_kit.merge_train import policy
 from ci_kit.ntfy import page, recent
 
 CONTEXT = "queue/position"
@@ -65,6 +79,7 @@ HEAD = "head of the PR queue: may merge"
 TRAIN = "a merge train lands for the queue"
 SKIPPED = "skipped by the queue: a conflict or a failing required check; head again once fixed"
 UNREAD = "unread"
+TRAIN_HELD = "held for merge train"  # the prefix of every lane-held description: the composer reads it back
 _READ: str | None = "<read it>"  # hold(base=...) default: read the default branch here
 HELD = "<!-- queue:head-held sha={sha}{paged} -->"
 _HELD = re.compile(r"<!-- queue:head-held sha=([0-9a-f]{40})( paged)? -->")
@@ -76,12 +91,71 @@ def _train(p: dict) -> bool:
     return str(p.get("headRefName") or "").startswith("train/")
 
 
-def desired(prs: list[dict], base: str | None, skip: frozenset[int] = frozenset()) -> dict[int, tuple[str, str]]:
+def held_for(train: str, bound_min: float = 0) -> str:
+    """The description a head held for a train carries. `train` = '#M' or 'composing on <sha>'."""
+    tail = f" (lane released after {bound_min:.0f} min)" if bound_min else ""
+    return f"{TRAIN_HELD} {train}: merges after it lands or closes{tail}"
+
+
+def _age_s(p: dict, now: float) -> float:
+    return now - _epoch(str(p.get("createdAt") or "")) if p.get("createdAt") else 0.0
+
+
+def dead(t: dict, required: tuple[str, ...], now: float, stale_s: float) -> str:
+    """'' while train PR `t` can still land, else why not: a required check red, main moved under it
+    (BEHIND / DIRTY), or open past `stale_s` (merge-train's own stale-minutes). Pure."""
+    age = _age_s(t, now)
+    state, names = policy.checks(t.get("statusCheckRollup"), required)
+    merge = str(t.get("mergeStateStatus") or "").upper()
+    return (f"red ({', '.join(names[:3])})" if state == "red" else
+            f"{merge}: main moved under it" if merge in ("BEHIND", "DIRTY") else
+            f"open {age / 60:.0f} min, past the {stale_s / 60:.0f}-min bound" if age > stale_s else "")
+
+
+def live_train(prs: list[dict], base: str | None, required: tuple[str, ...], now: float,
+               stale_s: float) -> tuple[dict | None, str]:
+    """(the open train that holds the lane, or None; the summary line). Pure. The newest same-repo
+    train into `base`; it RELEASES the lane when it cannot land as it stands -- a required check red,
+    main moved under it (BEHIND / DIRTY), or open past `stale_s` -- so a stuck train never holds the
+    head longer than merge-train's own bound. `base` None (unread) holds nothing: fail-safe."""
+    if base is None:
+        return None, ""
+    trains = [p for p in prs if _train(p) and not p.get("isCrossRepository") and p.get("baseRefName") == base]
+    if not trains:
+        return None, ""
+    t = max(trains, key=lambda p: int(p["number"]))
+    m, age = int(t["number"]), _age_s(t, now)
+    why = dead(t, required, now, stale_s)
+    if why:
+        return None, f"hold: lane RELEASED, merge train #{m} is {why} -- the queue head lands on its own"
+    return t, f"hold: lane HELD for merge train #{m} (open {age / 60:.0f} of {stale_s / 60:.0f} min)"
+
+
+def lane(prs: list[dict], base: str) -> list[tuple[dict, str, str]]:
+    """(pr, state, description) for each PR HOLDING the single lane as last posted: `queue/position`
+    success (the head), or pending held for a train (TRAIN_HELD). Pure, from the rollup's
+    StatusContext (pr_list reads its description). Trains, forks and other bases hold no lane."""
+    out = []
+    for p in prs:
+        if p.get("isCrossRepository") or _train(p) or p.get("baseRefName") != base:
+            continue
+        for c in p.get("statusCheckRollup") or []:
+            if c.get("context") != CONTEXT:
+                continue
+            state, desc = str(c.get("state") or "").lower(), str(c.get("description") or "")
+            if state == "success" or (state == "pending" and desc.startswith(TRAIN_HELD)):
+                out.append((p, state, desc))
+    return out
+
+
+def desired(prs: list[dict], base: str | None, skip: frozenset[int] = frozenset(),
+            train: dict | None = None, bound_min: float = 0) -> dict[int, tuple[str, str]]:
     """PR number -> (state, description) for every same-repo open PR into `base` (the protected
     default branch). A stacked PR (into another PR's branch) is neither the head nor held:
     protection on its base does not ask for the status, and as the head it would hold every PR
     into main behind one that cannot land there. `base` None = the default branch is unknown: the
-    head of EVERY base (and every train) gets success and nothing is held -- fail-safe. Pure."""
+    head of EVERY base (and every train) gets success and nothing is held -- fail-safe. `train` =
+    live_train's LIVE train: the head is then held for it (pending, TRAIN_HELD). Pure."""
     same = [p for p in prs if not p.get("isCrossRepository")]
     if base is None:
         heads = [pr_queue.head([p for p in same if p.get("baseRefName") == b], skip)
@@ -96,6 +170,8 @@ def desired(prs: list[dict], base: str | None, skip: frozenset[int] = frozenset(
         n = int(p["number"])
         if _train(p):
             out[n] = ("success", TRAIN)
+        elif n == hn and train is not None:
+            out[n] = ("pending", held_for(f"#{train['number']}", bound_min))
         elif n == hn:
             out[n] = ("success", HEAD)
         elif pr_queue.member(p) and n in skip:
@@ -107,16 +183,19 @@ def desired(prs: list[dict], base: str | None, skip: frozenset[int] = frozenset(
     return out
 
 
-def current(repo: str, sha: str, read: Gh) -> tuple[str | None, str]:
-    """(the commit's `queue/position` state, when it was set) from the COMBINED status (newest per
-    context, however many other statuses the commit carries). None = it has none; UNREAD = the read
-    failed, and then the state is posted anyway: a redundant post costs nothing, a missed one holds a PR."""
+def current(repo: str, sha: str, read: Gh) -> tuple[str | None, str, str]:
+    """(the commit's `queue/position` state, when it was set, its description) from the COMBINED
+    status (newest per context, however many other statuses the commit carries). None = it has
+    none; UNREAD = the read failed, and then the state is posted anyway: a redundant post costs
+    nothing, a missed one holds a PR. The DESCRIPTION is compared too: a stale "held for merge
+    train #N" on a PR whose state is still right (pending) is re-posted, never left naming a train
+    that is gone -- the composer reads that prefix back as a hold (lane)."""
     try:
         rows = json.loads(read("api", f"repos/{repo}/commits/{sha}/status").stdout or "{}").get("statuses") or []
     except (subprocess.CalledProcessError, ValueError, AttributeError, TypeError):
-        return UNREAD, ""
+        return UNREAD, "", ""
     s = next((s for s in rows if isinstance(s, dict) and s.get("context") == CONTEXT), None)
-    return (str(s.get("state")), str(s.get("updated_at") or "")) if s else (None, "")
+    return (str(s.get("state")), str(s.get("updated_at") or ""), str(s.get("description") or "")) if s else (None, "", "")
 
 
 def _epoch(s: str) -> float:
@@ -168,12 +247,12 @@ def default_branch(repo: str, read: Gh) -> str | None:
 def hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
          comments: Callable[[str, int], list[str]], skip: frozenset[int] = frozenset(), *,
          base: str | None = _READ, stale_s: float = 1800, required: tuple[str, ...] = (),
-         now: float | None = None) -> int:
+         now: float | None = None, train_stale_s: float = 90 * 60) -> int:
     """One hold pass; `skip` = pr_queue.blocked(...). Returns the errors. NEVER raises: the caller
     runs it even when the pass around it crashes, and a crash in here (a missing gh binary, an
     answer of the wrong shape) is one error -- a red run -- never a silent skip."""
     try:
-        return _hold(repo, prs, read, write, summary, comments, skip, base, stale_s, required, now)
+        return _hold(repo, prs, read, write, summary, comments, skip, base, stale_s, required, now, train_stale_s)
     except Exception as e:  # noqa: BLE001 -- the guard IS the point: the run goes red, it never crashes the pass
         print(f"::error::{CONTEXT}: the hold pass crashed: {type(e).__name__}: {e}")
         summary.append(f"hold ({CONTEXT}): CRASHED ({type(e).__name__}: {e}) -- statuses as last posted")
@@ -182,7 +261,7 @@ def hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
 
 def _hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
           comments: Callable[[str, int], list[str]], skip: frozenset[int], base: str | None, stale_s: float,
-          required: tuple[str, ...], now: float | None) -> int:
+          required: tuple[str, ...], now: float | None, train_stale_s: float) -> int:
     errors = 0
     now = dt.datetime.now(dt.UTC).timestamp() if now is None else now
     base = default_branch(repo, read) if base == _READ else base
@@ -190,7 +269,8 @@ def _hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
         errors += 1
         print(f"::error::{CONTEXT}: could not read {repo}'s default branch -- every base's head marked, nothing held")
         summary.append(f"hold ({CONTEXT}): default branch UNREAD -- every base's head marked, nothing held this pass")
-    want = desired(prs, base, skip)
+    train, lane = live_train(prs, base, required, now, train_stale_s)
+    want = desired(prs, base, skip, train, train_stale_s / 60)
     by_n = {int(p["number"]): p for p in prs}
     posted: list[str] = []
     unread = 0
@@ -199,9 +279,9 @@ def _hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
         sha = str(by_n[n].get("headRefOid") or "")
         if len(sha) != 40:
             continue
-        was, since = current(repo, sha, read)
+        was, since, was_desc = current(repo, sha, read)
         unread += was == UNREAD
-        if was == state:
+        if was == state and was_desc == desc[:140]:
             why = stuck(by_n[n], since, required, now, stale_s) if desc == HEAD else ""
             if why:
                 errors += 1
@@ -216,8 +296,10 @@ def _hold(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str],
         print(f"::error::{CONTEXT} on #{n} ({state}) was refused: {err}")
         if desc == HEAD:
             summary.append(_escalate(repo, by_n[n], sha, f"`{CONTEXT}` success was refused: {err}", write, comments))
-    heads = sorted(n for n, (_, d) in want.items() if d == HEAD)
+    heads = sorted(n for n, (_, d) in want.items() if d == HEAD or d.startswith(TRAIN_HELD))
     summary.append(f"hold ({CONTEXT}): head #{', #'.join(map(str, heads))}" if heads else f"hold ({CONTEXT}): no queue head")
+    if lane:
+        summary.append(lane)
     skipped = sorted(n for n, (_, d) in want.items() if d == SKIPPED)
     if skipped:
         summary.append("hold skips (cannot land as they stand): #" + ", #".join(map(str, skipped)))

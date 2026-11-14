@@ -88,9 +88,25 @@
   // began again. A wait that cannot end is a queue, not a gate. The age guard for a lock
   // refresh belongs to the package manager (npm --before / uv exclude-newer; renovate#41652),
   // not to a status that reads a timestamp no lock entry has. CI still gates the merge.
+  //
+  // ONCE A WEEK, ONE EARLY WINDOW (v1.35.0, 2026-11-14): Saturday 00:00-05:59 ET. Across the
+  // whole weekend window every run re-generated the lock whenever upstream moved and pushed it
+  // again (each push a full CI run), and a lock PR that landed opened the next one hours later.
+  // Now at most one lock PR per repo per week is CREATED, in the window. Outside it the two kinds
+  // of repo differ, on purpose:
+  //   - a serial-queue repo (rule at the end) adds `updateNotScheduled: false`: the open lock PR
+  //     is not re-pushed outside the window, so it cannot land mid merge-train compose; the queue
+  //     lands it as-is. Renovate does not merge there anyway (`pr-comment`).
+  //   - every other repo keeps the default (true): Renovate itself is the merger, and its
+  //     automerge runs inside the same branch pass that `updateNotScheduled: false` would skip
+  //     (lib/workers/repository/update/branch/index.ts returns `update-not-scheduled` before
+  //     tryBranchAutomerge / checkAutoMerge), so `false` there would strand a green lock PR
+  //     until next Saturday.
+  // A conflict still gets one recreate (a rebase request bypasses the skip). Security fixes do
+  // NOT ride this PR: vulnerabilityAlerts above opens its own PR at any time with no age wait.
   lockFileMaintenance: {
     enabled: true,
-    schedule: ["* * * * 6", "* 0-17 * * 0"],
+    schedule: ["* 0-5 * * 6"],
     automerge: true,
     minimumReleaseAge: null,
   },
@@ -276,12 +292,21 @@
     // ANY DAY, NO AGE WAIT (2026-11-03, edge-ci#7: ci-kit v1.11.0 "Awaiting Schedule" on a
     // Tuesday while ci-pin-drift stayed red estate-wide). We publish these, so there is no
     // yanked or hijacked upstream to wait out, and deploy-reconcile is already RTH-fenced, which
-    // covers the deploy risk the weekend window exists for. No later rule sets `schedule`.
+    // covers the deploy risk the weekend window exists for.
+    // ONCE A DAY, NOT AT ANY TIME (v1.35.0, 2026-11-14): every day 04:00-07:59 ET (KIT_WINDOW; the
+    // same value in every first-party rule below, tests/test_renovate_first_party_rules.py pins it). A
+    // burst of kit releases on one day made one PR per release -- a full CI run in every consumer
+    // and, in a queue repo, a place in the one-at-a-time lane. A daily window folds a day's releases
+    // into ONE PR per kit per repo: in a queue repo the open PR is never re-pushed (`never`, the
+    // last rule) so a newer release waits for the next window; elsewhere `updateNotScheduled`
+    // (default true) moves the open PR to the newest release in place. Early in the day on
+    // purpose: hourly ("hot") repos get four runs, and the PR lands before the working day.
+    // ci-pin-drift's grace is 48h for this (ci_kit/pin_drift.py).
     {
       description: "first-party kits",
       matchPackageNames: ["/^mjdevaccount\\//i"],
       groupName: null,
-      schedule: ["at any time"],
+      schedule: ["* 4-7 * * *"],
       minimumReleaseAge: null,
     },
     // By DATASOURCE, not manager (2026-11-14): which manager parses a pyproject is Renovate's call,
@@ -308,7 +333,7 @@
       description: "first-party packages on a registry (llm-ports on PyPI)",
       matchSourceUrls: ["https://github.com/mjdevaccount/**"],
       groupName: null,
-      schedule: ["at any time"],
+      schedule: ["* 4-7 * * *"],
       minimumReleaseAge: null,
     },
     // ONE PR PER KIT PER RELEASE (2026-11-12). With groupName null, Renovate keys a branch on
@@ -321,10 +346,10 @@
     // https://github.com/mjdevaccount/<kit>, which is how the rule above already caught #2995.
     // Not bare depNames: npm has an unrelated `edge-platform`. Same holds as the two rules above
     // (any time, no age wait). AFTER them on purpose: a later rule wins.
-    { description: "first-party kit ci-kit, one PR per release", matchSourceUrls: ["https://github.com/mjdevaccount/ci-kit", "https://github.com/mjdevaccount/ci-kit.git"], groupName: "ci-kit", schedule: ["at any time"], minimumReleaseAge: null },
-    { description: "first-party kit edge-platform, one PR per release", matchSourceUrls: ["https://github.com/mjdevaccount/edge-platform", "https://github.com/mjdevaccount/edge-platform.git"], groupName: "edge-platform", schedule: ["at any time"], minimumReleaseAge: null },
-    { description: "first-party kit llm-ports, one PR per release", matchSourceUrls: ["https://github.com/mjdevaccount/llm-ports", "https://github.com/mjdevaccount/llm-ports.git"], groupName: "llm-ports", schedule: ["at any time"], minimumReleaseAge: null },
-    { description: "first-party kit market-ports, one PR per release", matchSourceUrls: ["https://github.com/mjdevaccount/market-ports", "https://github.com/mjdevaccount/market-ports.git"], groupName: "market-ports", schedule: ["at any time"], minimumReleaseAge: null },
+    { description: "first-party kit ci-kit, one PR a day", matchSourceUrls: ["https://github.com/mjdevaccount/ci-kit", "https://github.com/mjdevaccount/ci-kit.git"], groupName: "ci-kit", schedule: ["* 4-7 * * *"], minimumReleaseAge: null },
+    { description: "first-party kit edge-platform, one PR a day", matchSourceUrls: ["https://github.com/mjdevaccount/edge-platform", "https://github.com/mjdevaccount/edge-platform.git"], groupName: "edge-platform", schedule: ["* 4-7 * * *"], minimumReleaseAge: null },
+    { description: "first-party kit llm-ports, one PR a day", matchSourceUrls: ["https://github.com/mjdevaccount/llm-ports", "https://github.com/mjdevaccount/llm-ports.git"], groupName: "llm-ports", schedule: ["* 4-7 * * *"], minimumReleaseAge: null },
+    { description: "first-party kit market-ports, one PR a day", matchSourceUrls: ["https://github.com/mjdevaccount/market-ports", "https://github.com/mjdevaccount/market-ports.git"], groupName: "market-ports", schedule: ["* 4-7 * * *"], minimumReleaseAge: null },
 
     // ---- container images in compose files DEPLOY ON MERGE ---------------------------------
     // trade-infra's compose is shipped by deploy-reconcile within the hour, unattended.
@@ -617,6 +642,21 @@
       automergeType: "pr-comment",
       automergeComment: "Renovate does not merge PRs in this repository (ci-kit renovate/default.json5, merge-queue repos): ci-kit pr-autoupdate arms this PR and the merge train / pr-autoupdate queue lands it in PR-number order. `autoland-off` holds it.",
     },
+    // ---- the weekly lock PR in a queue repo waits as-is outside its window (v1.35.0) -----------
+    // Scoped HERE, not on lockFileMaintenance: see the window comment there. In these repos
+    // Renovate never merges (`pr-comment` above), so skipping the branch pass outside the window
+    // costs nothing but the re-push: the open lock PR is not regenerated mid merge-train compose.
+    {
+      description: "serial-queue repos: the weekly lock PR is not re-pushed outside its window",
+      matchRepositories: [
+        "mjdevaccount/trade-data", "mjdevaccount/trade-infra", "mjdevaccount/trade-ui",
+        "mjdevaccount/edge-host", "mjdevaccount/home-host", "mjdevaccount/TradingEdge.Scraper",
+        "mjdevaccount/claude-plugins", "mjdevaccount/local-mcp", "mjdevaccount/mattpc-llm-stack",
+        "mjdevaccount/cred-broker", "mjdevaccount/edge-ci", "mjdevaccount/ci-kit",
+      ],
+      matchUpdateTypes: ["lockFileMaintenance"],
+      updateNotScheduled: false,
+    },
     // ---- a first-party kit branch in a queue repo is pushed ONCE (2026-11-14) -----------------
     // `conflicted` above did not stop the #1 runner waste: trade-data's renovate/ci-kit ran 194 CI
     // runs / 469 job-min on 11-13 and 96 / 223 on 11-14, and only ~1/6 of it was a release's first
@@ -629,7 +669,7 @@
     // 11-14: re-pushes of an already-pushed version 33 runs / 77 min, relocks 35 / 96; 11-13: 77 /
     // 149 and 84 / 262. `never` = one push + one relock per PR; the queue (pr-autoupdate) is what
     // makes it current with main, as for every PR here. A newer release while the PR is open waits
-    // for it to land (the next run opens the next PR; pin-drift's 24h grace covers the gap). A
+    // for it to land (the next run opens the next PR; pin-drift's 48h grace covers the gap). A
     // CONFLICT is not stranded: Renovate never moves this branch by itself, so ci-kit pr-autoupdate
     // ticks the PR's rebase box (ci_kit/pr_renovate.py) and Renovate recreates it once. Scoped to
     // the queue repos: elsewhere nothing else updates a branch, and Renovate's own rebase is the updater.

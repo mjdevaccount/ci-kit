@@ -4,7 +4,8 @@
 without `actions: read` is refused -- and GitHub refuses a fine-grained PAT the check runs at all
 ("Resource not accessible by personal access token", live 2026-10-24 on every caller with an
 open PR). This query asks a check run for its name/status/conclusion and a commit status for its
-context/state, nothing more, and returns rows shaped like `gh pr list --json` so pr_queue,
+context/state/description (the description: the queue hold's lane handoff, v1.35.0), nothing more,
+and returns rows shaped like `gh pr list --json` so pr_queue,
 pr_autoupdate and the merge train (ci_kit/merge_train) read them unchanged.
 """
 from __future__ import annotations
@@ -23,7 +24,7 @@ query($owner: String!, $name: String!) {
         commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
           __typename
           ... on CheckRun { name status conclusion startedAt completedAt }
-          ... on StatusContext { context state createdAt }
+          ... on StatusContext { context state description createdAt }
         } } } } } }
       }
     }

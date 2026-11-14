@@ -206,11 +206,21 @@ def test_lag_on_a_fresh_release_is_pending_exit_0(new_repo, tmp_path: Path) -> N
 def test_lag_past_the_grace_still_fires(new_repo, tmp_path: Path) -> None:
     # the class this guard exists for: a bump nobody landed. Annotated tag, real tagger date.
     rem = _remote(new_repo, "v1.1.0")
-    _release(rem, "v1.2.0", age_h=30)
+    _release(rem, "v1.2.0", age_h=50)
     lock = _consumer(tmp_path, LOCK)
     r = run_tool("pin_drift", tmp_path, "--file", str(lock), "--remote", str(rem))
     assert r.returncode == 1, r.stdout + r.stderr
     assert "behind ci-kit v1.2.0" in r.stdout and "PENDING" not in r.stdout
+
+
+def test_a_release_waiting_for_the_daily_kit_window_is_pending_must_not_fire(new_repo, tmp_path: Path) -> None:
+    # v1.35.0: Renovate opens a kit bump only 04:00-07:59 ET; a release at 08:00 waits ~20h for the
+    # window plus the queue's landing. 30h was red under the old 24h default; under 48h it is pending.
+    rem = _remote(new_repo, "v1.1.0")
+    _release(rem, "v1.2.0", age_h=30)
+    lock = _consumer(tmp_path, LOCK)
+    r = run_tool("pin_drift", tmp_path, "--file", str(lock), "--remote", str(rem))
+    assert r.returncode == 0 and "PENDING" in r.stdout, r.stdout + r.stderr
 
 
 def test_grace_reads_the_oldest_missing_release_not_the_newest(new_repo, tmp_path: Path) -> None:

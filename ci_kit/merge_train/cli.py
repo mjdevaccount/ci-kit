@@ -23,7 +23,11 @@ workflow finishing on a train branch, and when a PR gets the `merge-train` label
      `train-needs-update`), pushed to `train/<run>`, opened as a
      PR labelled `merge-train` with a constituent table and its composition record, NOT armed,
      and every rider labelled `in-train` and commented with a `rode` marker. A conflicting PR is
-     commented once per head and skipped; with one candidate nothing runs.
+     commented once per head and skipped; with one candidate nothing runs. THE LANE (v1.35.0):
+     before the push the queue head is held for the train (`queue/position` pending, ops.take_lane)
+     and main is read again; moved = no train, the lane given back (phases.compose).
+  5. RELEASE THE LANE when no train is open after the pass (ops.release_lane): a head still held
+     for a train that closed gets its success back in this pass, not pr-autoupdate's next one.
 
 A TRAIN NEVER force-pushes main and never bypasses protection: it lands only through GitHub's
 own merge of the train PR (requested by this CLI after the land-time re-check), whose required
@@ -116,10 +120,13 @@ def run(o: Opts, p: Pass) -> int:
     for x, why in no:
         if x.get("autoMergeRequest") and not policy.is_train(x):
             p.say(f"#{x['number']}: {why}")
+    opened = 0
     if len(cands) >= o.min_batch:
-        phases.compose(o, p, d, cands, main_sha, me)
+        opened = phases.compose(o, p, d, cands, main_sha, me)
     else:
         p.say(f"fewer than {o.min_batch} candidates: no train (a single PR lands on its own auto-merge)")
+    if not opened:  # no train open after this pass: a head still held for one gets its success back now
+        ops.release_lane(o, p, prs)
     return 1 if p.errors else 0
 
 

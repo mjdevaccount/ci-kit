@@ -17,6 +17,7 @@ someone looks.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ci_kit.merge_train import (
@@ -43,7 +44,9 @@ from ci_kit.merge_train.ops import (
     comments_of,
     fetch,
     fetch_head,
+    give_back,
     label,
+    take_lane,
 )
 from ci_kit.review.verdict import MARKER
 
@@ -333,11 +336,65 @@ def queue_position(o: Opts, p: Pass, m: int, tip: str) -> None:
               "pr-autoupdate's next pass posts it")
 
 
-def compose(o: Opts, p: Pass, d: Path, cands: list[dict], main_sha: str, me: tgit.Identity) -> None:
+def _main_now(d: Path, base: str) -> str:
+    """The base branch's sha on the remote NOW (one ls-remote, no fetch)."""
+    got = tgit.out(d, "ls-remote", "origin", f"refs/heads/{base}").split()
+    return got[0] if got else ""
+
+
+def _open_prs(o: Opts) -> list[dict]:
+    """The open PRs re-read just before the lane is taken: the head may have changed during boarding."""
+    from ci_kit import pr_list
+    from ci_kit.pr_autoupdate import _gh_read  # lazy: pr_autoupdate imports merge_train
+    return pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(o.repo)).stdout))
+
+
+def _reread(o: Opts) -> list[dict] | None:
+    """_open_prs for give_back; None (named by give_back as an ERROR) when the read itself fails."""
+    try:
+        return _open_prs(o)
+    except Exception as e:  # noqa: BLE001 -- runs in a finally: a raise here would mask the original one
+        print(f"::warning::re-reading the open PRs to give the lane back failed: {type(e).__name__}: {e}")
+        return None
+
+
+def _open_train(o: Opts, p: Pass, d: Path, main_sha: str, tip: str, branch: str, title: str,
+                body: str) -> tuple[tuple[int, str], str]:
+    """With the lane taken: re-read main, push the train branch, open its PR. ((number, url), '') or
+    ((0, ''), why no train opened)."""
+    now = _main_now(d, o.base)
+    if now != main_sha:
+        p.say(f"main moved {main_sha[:12]} -> {now[:12] or '?'} while composing: no train opened (it would be "
+              "stale at birth); the next pass composes on the new main")
+        return (0, ""), "no train opened"
+    tgit.git(d, "push", "-q", "origin", f"{tip}:refs/heads/{branch}")
+    for name, (color, desc) in LABELS.items():
+        github.gh("label", "create", name, "-R", o.repo, "--color", color, "--description", desc, check=False)
+    r = github.gh("pr", "create", "-R", o.repo, "--base", o.base, "--head", branch, "--title", title,
+                  "--body-file", "-", "--label", TRAIN_LABEL, check=False, input_text=body)
+    if r.returncode:
+        p.error(f"open the train PR for {branch}: {(r.stderr or r.stdout).strip()[:300]}")
+        tgit.git(d, "push", "-q", "origin", f":refs/heads/{branch}", check=False)
+        cancel_runs(o, p, branch)  # a push-triggered run on a branch no PR will ever land
+        return (0, ""), "the train PR was not opened"
+    url = r.stdout.strip().splitlines()[-1]
+    return (int(url.rstrip("/").rsplit("/", 1)[-1]), url), ""
+
+
+def compose(o: Opts, p: Pass, d: Path, cands: list[dict], main_sha: str, me: tgit.Identity) -> int:
+    """Board, compose and open the train; the train PR's number, or 0 when none opened.
+
+    THE LANE (v1.35.0). Before the train is pushed, every PR holding `queue/position` is held for it
+    (ops.take_lane), THEN main is read again: moved = the train would be stale at birth (a
+    lock-maintenance PR landed during a 6-minute compose), so nothing is pushed, the lane is given
+    back, and the next pass composes on the new main. Given back on EVERY exit without a train,
+    a raise included (try/finally), and only to a PR that is still the head (ops.give_back). Taken
+    first, read second: once the head reads pending it cannot land, so a main that has not moved by
+    the read cannot move under the train."""
     riders = board(o, p, d, cands)
     if len(riders) < o.min_batch:
         p.say(f"{len(riders)} PR(s) ready to ride (< {o.min_batch}): no train; auto-merge lands a single PR")
-        return
+        return 0
     tip, included, skipped = tgit.compose(d, main_sha, riders, me)
     for r, why in skipped:
         p.say(f"#{r.number}: skipped -- {why}")
@@ -347,7 +404,7 @@ def compose(o: Opts, p: Pass, d: Path, cands: list[dict], main_sha: str, me: tgi
               f"Not in this merge train: {why}. It lands through its own auto-merge, or rides a later train.")
     if len(included) < o.min_batch:
         p.say(f"{len(included)} PR(s) composed cleanly (< {o.min_batch}): no train")
-        return
+        return 0
     branch = f"{TRAIN_PREFIX}{o.run_id}"
     rows = "\n".join(f"| #{r.number} | {r.title[:80]} | `{r.head}` | `{sha[:12]}` | passed at head ({r.reviewed_at}) |"
                      for r, sha in included)
@@ -364,23 +421,22 @@ def compose(o: Opts, p: Pass, d: Path, cands: list[dict], main_sha: str, me: tgi
     title = "merge train: " + " ".join(f"#{r.number}" for r, _ in included)
     if o.dry_run:
         p.say(f"(dry run) would open {branch} at {tip[:12]}: {title}")
-        return
-    tgit.git(d, "push", "-q", "origin", f"{tip}:refs/heads/{branch}")
-    for name, (color, desc) in LABELS.items():
-        github.gh("label", "create", name, "-R", o.repo, "--color", color, "--description", desc, check=False)
-    r = github.gh("pr", "create", "-R", o.repo, "--base", o.base, "--head", branch, "--title", title,
-                  "--body-file", "-", "--label", TRAIN_LABEL, check=False, input_text=body)
-    if r.returncode:
-        p.error(f"open the train PR for {branch}: {(r.stderr or r.stdout).strip()[:300]}")
-        tgit.git(d, "push", "-q", "origin", f":refs/heads/{branch}", check=False)
-        cancel_runs(o, p, branch)  # a push-triggered run on a branch no PR will ever land
-        return
-    url = r.stdout.strip().splitlines()[-1]
-    m = int(url.rstrip("/").rsplit("/", 1)[-1])
+        return 0
+    taken = take_lane(o, p, _open_prs(o), f"composing on {main_sha[:12]}")
+    (m, url), why = (0, ""), "the compose stopped (raised) before the train PR opened"
+    try:
+        (m, url), why = _open_train(o, p, d, main_sha, tip, branch, title, body)
+    finally:  # ANY exit without a train (a moved main, a refused PR, a raising ls-remote/push/gh) gives the lane back
+        if not m:
+            give_back(o, p, taken, why, _reread(o))
+    if not m:
+        return 0
     queue_position(o, p, m, tip)
+    take_lane(o, p, [pr for pr, _, _ in taken], f"#{m}")  # the hold now names the train it waits for
     for rr, sha in included:
         label(o, p, rr.number, add=RIDING, remove=NEEDS_UPDATE)
         comment(o, p, rr.number, f"Riding merge train #{m} ({url}) at head `{rr.head}` as `{sha[:12]}`. It lands as "
                                  "its own commit when the train is green and it still wants to land; pr-autoupdate "
                                  f"leaves it alone meanwhile.\n{policy.RODE.format(train=m, head=rr.head)}")
     p.say(f"train #{m} opened: {title} ({url})")
+    return m

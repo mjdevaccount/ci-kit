@@ -14,11 +14,14 @@ measured thresholds are there). This module is its two actors:
         head was in flight against the old main (td#3072, Renovate's own automerge, 03:53Z
         11-14, invalidated head #3073);
       - names the head, its wait per pool, every parking and re-run in the summary, and returns an
-        error for a STALLED head so the run goes red (mcp ci-schedule-audit reads that streak).
+        error for a STALLED head so the run goes red (mcp ci-schedule-audit reads that streak);
+        a non-head STARVED in its park is named in every pass and paged ONCE per head, never red
+        (v1.35.0: a waiting state on every pass hid the real failures).
   * the review gate's admission (`python -m ci_kit.pr_admit`, its own module): parks a non-head
     PR's model review while the head needs the sealed pool (pr_queue.admit).
 
-PARKED IS RED, AND LABELLED. A parked review fails `review deferred`; a preempted run is
+PARKED IS RED, AND LABELLED. A parked review fails `review deferred` (the review gate's `verdict`
+job's step since v1.35.0, a job before); a preempted run is
 cancelled. Both block the merge exactly as a missing check does -- nothing is waived -- and both
 read as "CI failed" to an author's agent or an auto-fix bot, so the PR carries the `parked` label
 (`queue:parked`; its description says it re-runs itself) from the moment it is parked until the
@@ -37,11 +40,12 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
+import re
 import subprocess
 from collections.abc import Callable
 
 from ci_kit import pr_queue, redclass
-from ci_kit.ntfy import page
+from ci_kit.ntfy import page, recent
 from ci_kit.pr_heal import PARKED  # ONE name; pr_heal reads it too
 
 PARKED_COLOR = "bfd4f2"
@@ -49,14 +53,19 @@ PARKED_DESCRIPTION = "PR queue: CI/review parked so the queue head gets the runn
 # the label's description while a pass cannot re-run: the review gate's admission reads it and parks
 # nothing (a park nobody can re-run would strand the PR). ensure_label restores the description.
 PARKED_OFF = "PR queue OFF: the push token cannot re-run runs (Actions: write). Admission parks nothing"
-DEFERRED_JOB = "review deferred"   # the review gate's job that fails when it parks a review
-RECORD_JOB = "record verdict"      # the review gate's job that writes the verdict a carry reads
+DEFERRED_JOB = "review deferred"   # the review gate's job (a STEP of `verdict` since v1.35.0) that fails on a park
+RECORD_JOB = "record verdict"      # the review gate's job (a STEP of `verdict` since v1.35.0) that writes the record
+VERDICT_JOB = "verdict"            # the review gate's aggregate: completed = record written and any park red
 PRE_JOB = "review"                 # the review gate's first job (the name mcp review_gate_auth reads)
 MAX_ATTEMPT = 4                    # a run re-run this often is never parked again (no starving)
 
 RENOVATE = ("renovate", "renovate[bot]", "app/renovate")  # the bot's logins (pr_renovate.py, out_of_queue)
 
 Gh = Callable[..., subprocess.CompletedProcess]
+Comments = Callable[[str, int], list[str]]
+# a starved park is reported ONCE per (PR, head): this marker (pr_hold's head-held pattern) records the page
+STARVED = "<!-- queue:parked-starved sha={sha} -->"
+_STARVED = re.compile(r"<!-- queue:parked-starved sha=([0-9a-f]{40}) -->")
 
 
 def _ts(s: str | None) -> float | None:
@@ -150,22 +159,31 @@ def parked_runs(repo: str, p: dict, read: Gh) -> tuple[list[dict], bool]:
             continue
         if r.get("conclusion") == "cancelled":
             out.append(r)
-        elif r.get("conclusion") == "failure" and any(
-                _tail(j.get("name")) == DEFERRED_JOB and j.get("conclusion") == "failure"
-                for j in run_jobs(repo, int(r["id"]), read)):
+        elif r.get("conclusion") == "failure" and any(_deferred(j) for j in run_jobs(repo, int(r["id"]), read)):
             out.append({**r, "deferred": True})
     return out, active
 
 
+def _deferred(j: dict) -> bool:
+    """A failed `review deferred`: the job (until v1.35.0) or the `verdict` job's step of that name."""
+    if j.get("conclusion") != "failure":
+        return False
+    return _tail(j.get("name")) == DEFERRED_JOB or any(
+        isinstance(s, dict) and s.get("name") == DEFERRED_JOB and s.get("conclusion") == "failure"
+        for s in j.get("steps") or [])
+
+
 def review_settled(repo: str, branch: str, read: Gh) -> bool:
     """No review run on this branch still owes a verdict: each active run of the review gate has
-    finished `record verdict` (or parked). An update now cancels only the gate's tail, and the next
+    finished `record verdict` (or parked) -- since v1.35.0 its `verdict` job, which holds both.
+    An update now cancels only the gate's tail, and the next
     run can carry -- the 03:58Z case: head #3073 BEHIND, verdict recorded, update held for the tail."""
     for run in active_runs(repo, read, branch):
         names = {_tail(j.get("name")): j for j in run_jobs(repo, int(run["id"]), read)}
         if PRE_JOB not in names:
             continue  # not the review gate
-        done = [n for n in (RECORD_JOB, DEFERRED_JOB) if (names.get(n) or {}).get("status") == "completed"]
+        # since v1.35.0 both are steps of `verdict`: it completed (or was skipped: a carry) = settled
+        done = [n for n in (RECORD_JOB, DEFERRED_JOB, VERDICT_JOB) if (names.get(n) or {}).get("status") == "completed"]
         if not done:
             return False
     return True
@@ -257,10 +275,11 @@ def out_of_queue(repo: str, prs: list[dict], before: str, sha: str, read: Gh, sk
 def pass_(repo: str, prs: list[dict], capacity: dict[str, int], read: Gh, write: Gh, summary: list[str],
           *, preempt_after_s: float, stall_s: float, behind: Callable[[dict], bool],
           before: str = "", sha: str = "", now: float | None = None, updated: frozenset[int] = frozenset(),
-          skip: frozenset[int] = frozenset()) -> int:
+          skip: frozenset[int] = frozenset(), comments: Comments | None = None) -> int:
     """One scheduler pass (see the module doc). `updated` = PRs this run merged main into: their
     push starts fresh runs, so nothing of theirs is re-run here. `skip` = members that cannot land
-    as they stand (pr_queue.blocked): never the head. Returns the errors."""
+    as they stand (pr_queue.blocked): never the head. `comments` reads a PR's comment bodies (the
+    starved-park marker; default pr_heal.comments_of). Returns the errors."""
     now = dt.datetime.now(dt.UTC).timestamp() if now is None else now
     errors = 0
     same = [p for p in prs if not p.get("isCrossRepository")]
@@ -298,8 +317,8 @@ def pass_(repo: str, prs: list[dict], capacity: dict[str, int], read: Gh, write:
     preempt = [] if off else s.preempt
     errors += _park(repo, preempt, write, summary)
     room = not any(j.status == "queued" for j in jobs) and not s.demand
-    errors += _refill(repo, same, hn, Refill({j.pr for j, _ in preempt}, set(updated), room, now, 2 * stall_s),
-                      read, write, summary, behind)
+    errors += _refill(repo, same, hn, Refill({j.pr for j, _ in preempt}, set(updated), room, now, 2 * stall_s,
+                                             comments), read, write, summary, behind)
     return errors
 
 
@@ -312,6 +331,41 @@ class Refill:
     room: bool
     now: float
     starve_s: float
+    comments: Comments | None = None
+
+
+def _starved(repo: str, p: dict, line: str, write: Gh, comments: Comments | None) -> tuple[str, int]:
+    """A non-head parked past its bound: (summary suffix, errors). ONE page per (PR, head) -- the
+    alarm -- and every later pass only names it (v1.35.0). It used to be an error on every pass, and
+    one standing park painted every run red, indistinguishable from a real machinery failure.
+
+    A verdict computed and a verdict DELIVERED are two events: the marker is written ONLY after a
+    confirmed publish. NTFY_URL unset, or a push that failed, is an error (the run goes red, as before
+    v1.35.0) and writes no marker, so the next pass tries again. Published but the marker refused:
+    ntfy's own recent() (6h) is the dedup the next pass reads before paging again."""
+    n, sha = int(p["number"]), str(p.get("headRefOid") or "")
+    if comments is None:
+        from ci_kit.pr_heal import comments_of as comments  # lazy, as pr_heal's own readers
+    try:
+        marked = any(m == sha for b in comments(repo, n) for m in _STARVED.findall(b or ""))
+    except (subprocess.CalledProcessError, ValueError, OSError):
+        marked = False
+    if marked:
+        return "paged already for this head", 0
+    title = f"{repo.rsplit('/', 1)[-1]}: #{n} parked, starved of a free pool"
+    if recent(title):
+        return "paged already (ntfy, last 6h)", 0
+    try:
+        note = page(title, line[:900], str(p.get("url") or ""))
+    except Exception as e:  # noqa: BLE001 -- page() catches OSError only (a malformed URL is ValueError)
+        note = f"push FAILED: {e}"
+    if not note.startswith("published"):
+        print(f"::error::#{n}: parked past its bound and the page was NOT delivered: {note}")
+        return f"page NOT delivered ({note}); no marker, the next pass pages again", 1
+    body = STARVED.format(sha=sha) + f"\nPR queue: parked past its bound waiting for a free pool ({line}). Paged: {note}"
+    if write("pr", "comment", str(n), "-R", repo, "--body", body).returncode:
+        note += "; marker refused (the next pass reads ntfy's recent() before paging again)"
+    return f"page {note}", 0
 
 
 def _park(repo: str, preempt: list[tuple[pr_queue.Job, str]], write: Gh, summary: list[str]) -> int:
@@ -342,8 +396,8 @@ def _refill(repo: str, prs: list[dict], hn: int | None, r: Refill, read: Gh, wri
     """Re-run parked work: the head's now, one non-head's when the pools have room. Never strands:
     a PR with the label and nothing parked left loses the label -- but not while a run is still
     active at its head (that run may be the admission about to end parked, found next pass). A
-    non-head parked longer than `starve_s` is an ERROR: the run goes red, which mcp's
-    ci-schedule-audit reads. Returns the errors."""
+    non-head parked longer than `starve_s` is named `PARKED STARVED` in every pass and paged once
+    per head (`_starved`); waiting is NOT an error, an undelivered page is. Returns the errors."""
     errors, refilled, first = 0, False, True
     for p in sorted((p for p in prs if any(lb.get("name") == PARKED for lb in p.get("labels") or [])),
                     key=pr_queue.landing_order):
@@ -369,9 +423,10 @@ def _refill(repo: str, prs: list[dict], hn: int | None, r: Refill, read: Gh, wri
             line = f"#{n}: parked ({len(runs)} run(s)) {(r.now - since) / 60:.0f} min, waits for a free pool"
             # only the NEXT in line can starve: the ones behind it wait for it, which is queue order
             if first and r.now - since > r.starve_s:
-                errors += 1
                 print(f"::warning::parked-pr-starved {line}")
-                line = "PARKED STARVED: " + line
+                said, err = _starved(repo, p, line, write, r.comments)
+                errors += err
+                line = f"PARKED STARVED: {line}; {said}"
             first = False
             summary.append(line)
             continue

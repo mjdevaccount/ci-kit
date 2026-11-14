@@ -51,6 +51,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -81,6 +82,8 @@ class Options:
     # the caller's merge-train workflow file, dispatched when this pass sees work for it (train_kick); '' = off
     train_workflow: str = ""
     train_min_batch: int = train_kick.MIN_BATCH
+    # the merge train's own `stale-minutes`: an open train holds the queue head at most this long (pr_hold)
+    train_stale_min: float = 90.0
     # cancel the `pull_request` runs at heads that cannot merge under strict protection (doomed_runs)
     cancel_doomed: bool = False  # main() turns it ON (env CI_KIT_CANCEL_DOOMED, default true)
     ladder: pr_ladder.Config = pr_ladder.Config()  # the heal ladder (pr_ladder): off unless the caller runs pr-heal.yml
@@ -232,7 +235,9 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
     review of ci-kit#70, finding 7). So is a PR a train SKIPPED because the lines around its change
     moved since its review (`train-needs-update`): no train takes it until its own update and
     review, which this hold would otherwise keep from ever happening (round 2, finding 3). A repo
-    with no train sees exactly the old plan."""
+    with no train sees exactly the old plan. A train that can no longer land (red,
+    BEHIND/DIRTY, or open past the train's own stale-minutes; pr_hold.dead) holds nothing (v1.35.0): the lane the
+    queue head needs is released with the hold's, never half of it."""
     trains = [p for p in prs if str(p.get("headRefName") or "").startswith(TRAIN_PREFIX)
               and not p.get("isCrossRepository")]
     riding = {p["number"] for p in armed if any(lb.get("name") == RIDING for lb in p.get("labels") or [])}
@@ -240,6 +245,11 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
         summary.append(f"riding a merge train, not updated: {', '.join('#' + str(n) for n in sorted(riding))}")
     q = pr_queue.plan([p for p in armed if p not in trains and p["number"] not in riding],
                       opts.max_in_flight, opts.required, machinery, restarted)
+    why = pr_hold.dead(trains[-1], opts.required, time.time(), opts.train_stale_min * 60) if trains else ""
+    if why:  # a dead train (red, main moved, past its bound) holds nothing: pr_hold.dead, ONE rule with the hold
+        summary.append(f"merge train #{trains[-1]['number']} open but not live, updates not held "
+                       f"(lane RELEASED: it is {why})")
+        trains = []
     if trains:
         held = [p for p in q.update if (p.get("mergeStateStatus") or "").upper() != "DIRTY"
                 and not any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
@@ -276,7 +286,8 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
         if opts.hold:
             pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of,
                          pr_queue.blocked(prs, opts.required, parked, base), base=base,
-                         stale_s=opts.head_stall_min * 120, required=opts.required)
+                         stale_s=opts.head_stall_min * 120, required=opts.required,
+                         train_stale_s=opts.train_stale_min * 60)
         raise
     errors += joined
     machinery = pr_heal.machinery(heal)
@@ -291,7 +302,8 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
     skip = pr_queue.blocked(prs, opts.required, machinery | parked, base)
     if opts.hold:
         errors += pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of, skip,
-                               base=base, stale_s=opts.head_stall_min * 120, required=opts.required)
+                               base=base, stale_s=opts.head_stall_min * 120, required=opts.required,
+                               train_stale_s=opts.train_stale_min * 60)
     q = _train_plan(prs, armed, summary, opts, machinery | parked,
                     frozenset(cancel.restarted) if cancel else frozenset())
     head = _head_first(repo, prs, q, opts, summary, skip)
@@ -543,6 +555,7 @@ def main(argv: list[str] | None = None) -> int:
                    # env vars, never flags: an older @v1 tool would refuse a flag it does not know
                    train_workflow=os.environ.get("CI_KIT_TRAIN_WORKFLOW", "").strip(),
                    train_min_batch=int(os.environ.get("CI_KIT_TRAIN_MIN_BATCH", "").strip() or train_kick.MIN_BATCH),
+                   train_stale_min=float(os.environ.get("CI_KIT_TRAIN_STALE_MIN", "").strip() or 90),
                    cancel_doomed=os.environ.get("CI_KIT_CANCEL_DOOMED", "true").strip().lower() not in ("false", "0", "no"),
                    ladder=pr_ladder.Config.from_env())
     summary: list[str] = []

@@ -92,3 +92,44 @@ def test_tier_3_runs_only_behind_a_claim_made_in_this_attempt() -> None:
     cond = jobs["fix"]["if"]
     assert "needs.claim.outputs.claimed == 'true'" in cond and "github.run_attempt" in cond
     assert jobs["claim"]["outputs"]["attempt"] == "${{ github.run_attempt }}"
+
+
+# ── v1.35.0: the header counts the jobs; the sealed hold is bounded by the code that fills it ─
+def test_the_header_counts_the_jobs_it_lists() -> None:
+    words = {3: "THREE", 4: "FOUR", 5: "FIVE", 6: "SIX", 7: "SEVEN"}
+    head = HEAL.read_text(encoding="utf-8").split("name: pr-heal", 1)[0]
+    jobs = _jobs()
+    assert f"# {words[len(jobs)]} JOBS, ONE TRUST BOUNDARY EACH" in head
+    for j in jobs:
+        assert f"#   {j} " in head, f"the header does not describe job `{j}`"
+
+
+def sealed_faults(jobs: dict) -> list[str]:
+    from ci_kit import pr_fix
+    fix = jobs["fix"]
+    step = {s.get("name"): s for s in fix["steps"]}
+    out = []
+    if step["Fix"].get("timeout-minutes") != pr_fix.FIX_STEP_MIN or pr_fix.FIX_STEP_MIN * 60 <= pr_fix.CLI_TIMEOUT:
+        out.append("the Fix step is not bounded by the CLI's own timeout plus the save")
+    bounded = sum(s.get("timeout-minutes", 0) for n, s in step.items() if n != "Fix")
+    if not bounded or bounded > pr_fix.SETUP_MIN or any(
+            "timeout-minutes" not in step[n] for n in ("Install the project (a deploy key only in its own load step)",
+                                                       "Install Claude Code")):
+        out.append("a setup step that can stall is unbounded, or the bounds exceed SETUP_MIN")
+    if fix.get("timeout-minutes") != pr_fix.FIX_JOB_MIN:
+        out.append("the fix job's bound is not FIX_JOB_MIN")
+    return out
+
+
+def test_the_sealed_hold_is_sized_from_the_code_must_not_fire() -> None:
+    assert sealed_faults(_jobs()) == []
+
+
+def test_each_sealed_bound_fault_fires_must_fire() -> None:
+    import copy
+    for mut in (lambda j: j["fix"].update({"timeout-minutes": 360}),
+                lambda j: next(s for s in j["fix"]["steps"] if s.get("name") == "Fix").pop("timeout-minutes"),
+                lambda j: next(s for s in j["fix"]["steps"] if s.get("name") == "Install Claude Code").pop("timeout-minutes")):
+        jobs = copy.deepcopy(_jobs())
+        mut(jobs)
+        assert sealed_faults(jobs)

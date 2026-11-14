@@ -76,13 +76,24 @@ Comments = Callable[[str, int], list[str]]
 Write = Callable[..., subprocess.CompletedProcess]
 
 
+# THE STALE DEADLINE IS DERIVED, NOT GUESSED (v1.35.0). A dispatch is "stale" (paged) only after
+# the longest a LIVE heal can take: every pr-heal.yml job's timeout-minutes, in order (they run
+# one after another; tests/test_heal_ladder_must_fire.py pins this table to the workflow and the
+# fix job to pr_fix.FIX_JOB_MIN), plus the wait for a sealed runner before the fix job starts --
+# measured up to 38 min while full reviews held the pool. 90 was below the 95 of the timeouts
+# alone: a heal still inside its limits was paged as lost.
+HEAL_JOB_MIN = {"plan": 5, "regen": 20, "claim": 5, "fix": 50, "push": 10, "report": 5}
+SEALED_QUEUE_MIN = 40
+STALE_MIN = sum(HEAL_JOB_MIN.values()) + SEALED_QUEUE_MIN
+
+
 @dataclass(frozen=True)
 class Config:
     on: bool = False
     claude_per_pass: int = 1     # tier-3 dispatches per pass (0 = tier 3 off)
     claude_per_pr: int = 2       # tier-3 dispatches per PR, all heads
     per_pr: int = 6              # heal dispatches per PR, all heads
-    stale_min: float = 90.0      # a dispatch with no record after this long is paged
+    stale_min: float = STALE_MIN  # a dispatch with no record after this long is paged (derived above)
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Config:
@@ -94,7 +105,7 @@ class Config:
         return cls(on=(e.get("CI_KIT_HEAL") or "").strip().lower() in ("1", "true"),
                    claude_per_pass=int(num("CI_KIT_HEAL_CLAUDE_PER_PASS", 1)),
                    claude_per_pr=int(num("CI_KIT_HEAL_CLAUDE_PER_PR", 2)),
-                   per_pr=int(num("CI_KIT_HEAL_PER_PR", 6)), stale_min=num("CI_KIT_HEAL_STALE_MIN", 90))
+                   per_pr=int(num("CI_KIT_HEAL_PER_PR", 6)), stale_min=num("CI_KIT_HEAL_STALE_MIN", STALE_MIN))
 
 
 # ── pure ──────────────────────────────────────────────────────────────────────────────────────
@@ -173,7 +184,7 @@ def decide(pr: dict, bodies: list[str], cfg: Config, claude_left: int, now: dt.d
         at = _when(mine[-1][3])
         if not done and not paged and at and (now - at).total_seconds() > cfg.stale_min * 60:
             return "stale", False, f"dispatched {mine[-1][3]} and no heal record since"
-        return "quiet", False, "already dispatched at this head"
+        return "quiet", False, "already dispatched at this head" + ("" if done else in_flight(bodies, head, at, now))
     if len({h for h, *_ in heals}) >= cfg.per_pr:
         return ("quiet" if paged else "capped"), False, f"{cfg.per_pr} heal(s) already spent on this PR"
     if mode == "conflict" and is_renovate(pr):
@@ -185,6 +196,19 @@ def decide(pr: dict, bodies: list[str], cfg: Config, claude_left: int, now: dt.d
     note = "tiers 1-3" if tier3 else ("tiers 1-2: " + (claude_blocked(pr) or ("tier 3 off" if cfg.claude_per_pass <= 0
                                                                                else f"tier 3 spent {used}/{cfg.claude_per_pr}")))
     return "dispatch", tier3, note
+
+
+def in_flight(bodies: list[str], head: str, at: dt.datetime | None, now: dt.datetime) -> str:
+    """The summary suffix for a heal still running at this head. Tier 3 holds the ONE sealed runner
+    (the review gate's full reviews queue behind it) for up to pr_fix.FIX_JOB_MIN minutes, and
+    nothing else says so: the claim's attempt marker names the run. Pure."""
+    from ci_kit.pr_fix import FIX_JOB_MIN  # lazy: pr_fix pulls in the review harness
+    age = f", {int((now - at).total_seconds() // 60)} min since dispatch" if at else ""
+    runs = [r for h, r in marks(bodies, _ATTEMPT) if h == head]
+    if runs:
+        return (f"; TIER 3 IN FLIGHT on the sealed runner (run {runs[-1]}{age}; holds it up to "
+                f"{FIX_JOB_MIN} min, full reviews queue behind it)")
+    return f"; in flight, no heal record yet{age}"
 
 
 def page_text(repo: str, pr: dict, checks: str, tried: str) -> tuple[str, str]:

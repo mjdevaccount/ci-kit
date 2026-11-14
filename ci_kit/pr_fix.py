@@ -39,6 +39,14 @@ from ci_kit.review import claude as cli
 from ci_kit.review.tools import VENV_ENV
 
 CLI_TIMEOUT = 40 * 60
+# THE SEALED-RUNNER BOUND, sized from the line above (v1.35.0): pr-heal.yml's `Fix` step is the CLI
+# plus 2 min to diff, scope and save the change; the `fix` job adds SETUP_MIN for what runs before
+# it -- `Install the project` (4) and `Install Claude Code` (2), each bounded in the workflow, plus 2
+# for the checkout, prepare-merge and toolchain setup. tests/test_heal_workflow_must_fire.py pins
+# the workflow to these, and pr_ladder names the bound in the pass summary while tier 3 holds it.
+FIX_STEP_MIN = CLI_TIMEOUT // 60 + 2
+SETUP_MIN = 4 + 2 + 2
+FIX_JOB_MIN = FIX_STEP_MIN + SETUP_MIN
 # beyond the review gate's named drops: ANY token, key, secret or password in the job's env (a fixer
 # runs PR code with Bash; the one credential it needs is put back below, by name)
 SECRETISH = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|_KEY$|^NTFY|CREDENTIAL", re.I)

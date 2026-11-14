@@ -246,7 +246,7 @@ def test_a_rider_is_never_updated() -> None:
 
 
 def test_an_open_train_holds_updates_but_not_conflicts() -> None:
-    train = _armed(50, head="train/9")
+    train = _armed(50, state="BLOCKED", head="train/9")
     prs = [train, _armed(1), _armed(2, state="DIRTY")]
     summary: list[str] = []
     q = upd._train_plan(prs, prs, summary, Options())
@@ -263,7 +263,7 @@ def test_a_fork_branch_named_train_holds_nothing() -> None:
 
 def test_an_ejected_pr_is_updated_while_a_train_is_open() -> None:
     # it rides no train; holding it while trains keep forming would starve it (ci-kit#70 finding 7)
-    prs = [_armed(50, head="train/9"), _armed(1), _armed(2, labels=("train-ejected",))]
+    prs = [_armed(50, state="BLOCKED", head="train/9"), _armed(1), _armed(2, labels=("train-ejected",))]
     q = upd._train_plan(prs, prs, [], Options())
     assert [p["number"] for p in q.update] == [2]
     assert [p["number"] for p, _ in q.held] == [1]
@@ -271,7 +271,22 @@ def test_an_ejected_pr_is_updated_while_a_train_is_open() -> None:
 
 def test_a_pr_a_train_skipped_for_moved_context_is_updated_while_a_train_is_open() -> None:
     # it needs its own update + review before any train takes it (ci-kit#70 round 2, finding 3)
-    prs = [_armed(50, head="train/9"), _armed(1), _armed(3, labels=("train-needs-update",))]
+    prs = [_armed(50, state="BLOCKED", head="train/9"), _armed(1), _armed(3, labels=("train-needs-update",))]
     q = upd._train_plan(prs, prs, [], Options())
     assert [p["number"] for p in q.update] == [3]
     assert [p["number"] for p, _ in q.held] == [1]
+
+
+# v1.35.0: a train that can no longer land (pr_hold.live_train) holds no update either -- one rule
+@pytest.mark.parametrize("train", [
+    _armed(50, state="BEHIND", head="train/9"),                                         # main moved under it
+    {**_armed(50, state="BLOCKED", head="train/9"),
+     "statusCheckRollup": [{"name": "unit tests", "status": "COMPLETED", "conclusion": "FAILURE"}]},   # red
+    {**_armed(50, state="BLOCKED", head="train/9"), "createdAt": "2026-01-01T00:00:00Z"},              # past bound
+])
+def test_a_dead_train_releases_the_updates_and_says_so_must_fire(train: dict) -> None:
+    prs = [train, _armed(1)]
+    summary: list[str] = []
+    q = upd._train_plan(prs, prs, summary, Options())
+    assert [p["number"] for p in q.update] == [1] and not q.held
+    assert any("#50 open but not live" in s and "lane RELEASED" in s for s in summary)

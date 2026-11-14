@@ -91,11 +91,25 @@ def test_a_pr_that_became_head_clears_its_stale_pending_in_one_pass_must_fire() 
     assert gh.posted()[3083] == "success"
 
 
+WAITS = "waits its turn: the queue head is #3082"
+
+
 def test_a_status_already_right_is_not_reposted_must_not_fire() -> None:
-    gh = Gh({f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "success"}, {"context": "x", "state": "failure"}],
-             f"{3083:040d}": [{"context": pr_hold.CONTEXT, "state": "pending"}]})
+    gh = Gh({f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "success", "description": pr_hold.HEAD},
+                              {"context": "x", "state": "failure"}],
+             f"{3083:040d}": [{"context": pr_hold.CONTEXT, "state": "pending", "description": WAITS}]})
     errors, _ = _pass(gh, [_pr(3082), _pr(3083)])
     assert errors == 0 and gh.writes == []
+
+
+def test_a_right_state_with_a_stale_train_description_is_reposted_must_fire() -> None:
+    # pending is right for #3083, but it still names a train that is gone: the composer reads that
+    # prefix back as a hold (pr_hold.lane), so a state-only compare would leave it lying forever
+    gh = Gh({f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "success", "description": pr_hold.HEAD}],
+             f"{3083:040d}": [{"context": pr_hold.CONTEXT, "state": "pending", "description": pr_hold.held_for("#9")}]})
+    errors, _ = _pass(gh, [_pr(3082), _pr(3083)])
+    assert errors == 0 and gh.posted() == {3083: "pending"}
+    assert any(WAITS in w for w in gh.writes)
 
 
 def test_a_former_head_behind_a_newly_armed_lower_pr_goes_pending_must_fire() -> None:
@@ -108,7 +122,9 @@ def test_a_train_lands_unarmed_drafts_wait_and_forks_are_not_touched() -> None:
     gh = Gh()
     _pass(gh, [_pr(3082), _pr(3090, armed=False, branch="train/7"), _pr(3079, armed=False),
                _pr(3078, draft=True), _pr(3070, fork=True)])
-    assert gh.posted() == {3082: "success", 3090: "success", 3079: "pending", 3078: "pending"}
+    # a LIVE train open: it lands, and the head is held for it (v1.35.0) -- never two lanes at once
+    assert gh.posted() == {3082: "pending", 3090: "success", 3079: "pending", 3078: "pending"}
+    assert "held for merge train #3090" in next(w for w in gh.writes if f"{3082:040d}" in w)
     assert "arm auto-merge to join it" in next(w for w in gh.writes if f"{3079:040d}" in w)
 
 
@@ -296,7 +312,8 @@ def test_a_head_holding_success_that_never_merges_pages_on_the_second_pass_must_
     monkeypatch.setattr(pr_hold, "page", lambda title, body, click: pages.append(body) or "published (200)")
     done = [{"name": "unit tests", "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": _iso(NOW - 3600)}]
     head = _pr(3082, merge="BLOCKED", checks=done)
-    ok = {f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "success", "updated_at": _iso(NOW - 3000)}]}
+    ok = {f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "success", "description": pr_hold.HEAD,
+                            "updated_at": _iso(NOW - 3000)}]}
     errors, summary = _pass(Gh(ok), [head, _pr(3083)])
     assert errors == 1 and pages == [] and any("HEAD HELD: #3082" in s for s in summary)
     mark1 = pr_hold.HELD.format(sha=f"{3082:040d}", paged="")
@@ -407,3 +424,63 @@ def test_the_trains_reading_never_waits_on_the_holds_pending_must_not_fire() -> 
     rollup = [{"__typename": "StatusContext", "context": pr_hold.CONTEXT, "state": "PENDING"},
               {"__typename": "CheckRun", "name": "unit tests", "status": "COMPLETED", "conclusion": "SUCCESS"}]
     assert policy.checks(rollup, ())[0] == "green"            # required-checks empty: a member still rides
+
+
+# ---- v1.35.0: the train and the single lane are mutually exclusive, and the hold is bounded
+def _train(n: int = 3090, *, age_min: float = 5, merge: str = "BLOCKED", checks: list[dict] | None = None) -> dict:
+    return {**_pr(n, armed=False, branch=f"train/{n}", merge=merge, checks=checks), "createdAt": _iso(NOW - age_min * 60)}
+
+
+def test_the_head_is_held_while_a_live_train_is_open_must_fire() -> None:
+    # a train opened, the head (a human PR) landed 3.4 min later -> train stale, its CI thrown away
+    gh = Gh({f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "success"}]})
+    errors, summary = _pass(gh, [_pr(3082), _pr(3083), _train()])
+    assert errors == 0 and gh.posted() == {3082: "pending", 3083: "pending", 3090: "success"}
+    assert "held for merge train #3090" in next(w for w in gh.writes if f"{3082:040d}" in w)
+    assert any(s.startswith("hold: lane HELD for merge train #3090") for s in summary)
+    assert any("head #3082" in s for s in summary)                     # still NAMED the head, held
+
+
+@pytest.mark.parametrize("train,why", [
+    (_train(age_min=91), "past the 90-min bound"),                     # stuck: merge-train's own stale-minutes
+    (_train(checks=RED), "red"),                                       # a red train lands nothing
+    (_train(merge="BEHIND"), "main moved under it"),                   # stale: it cannot land either
+    (_train(merge="DIRTY"), "main moved under it"),
+])
+def test_a_train_that_cannot_land_releases_the_lane_and_says_so_must_fire(train: dict, why: str) -> None:
+    gh = Gh({f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "pending"}]})
+    errors, summary = _pass(gh, [_pr(3082), train])
+    assert errors == 0 and gh.posted()[3082] == "success"
+    line = next(s for s in summary if s.startswith("hold: lane RELEASED"))
+    assert "#3090" in line and why in line
+
+
+def test_no_train_closed_or_merged_no_hold_must_not_fire() -> None:
+    # the train closed or merged: it is not in the open list, so the head gets success back next pass
+    gh = Gh({f"{3082:040d}": [{"context": pr_hold.CONTEXT, "state": "pending"}]})
+    _, summary = _pass(gh, [_pr(3082), _pr(3083)])
+    assert gh.posted() == {3082: "success", 3083: "pending"} and not any("lane" in s for s in summary)
+
+
+def test_no_deadlock_the_train_never_waits_on_the_head_must_not_fire() -> None:
+    # the head waits on the train; the train reads no `queue/position` and holds its own success
+    from ci_kit.merge_train import policy
+    want = pr_hold.desired([_pr(3082), _train()], "main", frozenset(), _train())
+    assert want[3090] == ("success", pr_hold.TRAIN) and want[3082][0] == "pending"
+    held = [{"__typename": "StatusContext", "context": pr_hold.CONTEXT, "state": "PENDING",
+             "description": want[3082][1]}, *[{"__typename": "CheckRun", "name": "unit tests", "status": "COMPLETED",
+                                               "conclusion": "SUCCESS"}]]
+    assert policy.why_not(_pr(3082, merge="BEHIND", checks=held), REQ) == ""   # a held head still RIDES a train
+
+
+def test_an_unread_default_branch_holds_nothing_for_a_train_either() -> None:
+    assert pr_hold.live_train([_train()], None, REQ, NOW, 5400) == (None, "")
+
+
+def test_the_lane_is_read_from_the_rollup_descriptions() -> None:
+    def st(state: str, desc: str) -> list[dict]:
+        return [{"__typename": "StatusContext", "context": pr_hold.CONTEXT, "state": state, "description": desc}]
+    prs = [_pr(1, checks=st("SUCCESS", pr_hold.HEAD)), _pr(2, checks=st("PENDING", pr_hold.held_for("#9"))),
+           _pr(3, checks=st("PENDING", "waits its turn: the queue head is #1")), _train(9, checks=st("SUCCESS", pr_hold.TRAIN)),
+           _pr(4, base="other", checks=st("SUCCESS", pr_hold.HEAD))]
+    assert [(p["number"], s) for p, s, _ in pr_hold.lane(prs, "main")] == [(1, "success"), (2, "pending")]

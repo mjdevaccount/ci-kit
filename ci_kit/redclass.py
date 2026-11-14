@@ -25,7 +25,8 @@ THE CLASSES of one failed job (`job_class`):
                log tail names a network/TLS/DNS/5xx error, or whose log GitHub no longer has.
   consequence  an aggregator (re-actors/alls-green) that failed because a job it needs failed.
                It is machinery when its run holds a machinery job, judgment otherwise.
-  parked       the review gate's `review deferred` job (v1.29.0): the PR queue (ci_kit/pr_sched)
+  parked       the review gate's `review deferred` job (v1.29.0), a STEP of its `verdict` job since
+               v1.35.0 (a job whose ONLY failed step is it): the PR queue (ci_kit/pr_sched)
                parked the review so the queue head gets the sealed runner. Not a failure of the PR
                and not the machinery's either: the scheduler re-runs it (a plain rerun-failed-jobs
                would park it again), so no reader retries it or calls it judgment.
@@ -73,8 +74,15 @@ def red_checks(rollup: list[dict] | None, required: tuple[str, ...] = ()) -> lis
     return sorted(set(out))
 
 MACHINERY, CONSEQUENCE, JUDGMENT, PARKED = "machinery", "consequence", "judgment", "parked"
-# the review gate's job that fails, on purpose, when the PR queue parks a review ("<caller> / review deferred")
+# the review gate's job that fails, on purpose, when the PR queue parks a review ("<caller> / review deferred");
+# since v1.35.0 a STEP of the gate's `verdict` job, named the same
 DEFERRED_JOB = re.compile(r"(^|/ )review deferred$")
+DEFERRED_STEP = "review deferred"
+# The gate's continue-on-error steps beside the park (the verdict record's upload). A failed one is
+# best-effort, never the PR's: the jobs API may still list it as `failure` (the contexts docs define
+# `conclusion` as post-continue-on-error; the REST step shape is not documented), so a park beside it
+# stays PARKED.
+BEST_EFFORT_STEP = re.compile(r"^upload the verdict record$", re.I)
 
 # A step that prepares the job and runs none of the PR's code. Its failure is the runner's or the
 # network's, never the change's -- but only with the log's word for it (below).
@@ -114,10 +122,12 @@ def job_class(job: dict, annotations: list[str] = (), log_error: str = "", log_t
         return "pass", ""
     if c == "startup_failure":
         return MACHINERY, "the job never started (startup failure)"
-    if c == "failure" and DEFERRED_JOB.search(str(job.get("name") or "")):
-        return PARKED, "parked by the PR queue so the queue head gets the runner -- not a failure of this PR"
     steps = [s for s in job.get("steps") or [] if isinstance(s, dict)]
     failed = [s for s in steps if _concl(s) == "failure"]
+    parked = [s for s in failed if not BEST_EFFORT_STEP.search(str(s.get("name") or ""))]
+    if c == "failure" and (DEFERRED_JOB.search(str(job.get("name") or ""))
+                           or (parked and all(str(s.get("name") or "") == DEFERRED_STEP for s in parked))):
+        return PARKED, "parked by the PR queue so the queue head gets the runner -- not a failure of this PR"
     own = [s for s in failed if not SETUP_STEP.search(str(s.get("name") or ""))
            and not AGGREGATOR_STEP.search(str(s.get("name") or ""))]
     if own:  # a step of the job's own work failed: evidence, whatever happened to the runner after
