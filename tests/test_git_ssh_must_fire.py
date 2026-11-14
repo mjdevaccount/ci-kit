@@ -273,6 +273,8 @@ def wiring_faults(steps: list[dict]) -> list[str]:
         out.append("Install does not source `route` before the install")
     if not str(_named(steps, STOP).get("if", "")).startswith("always()"):
         out.append("the stop step is not always(): a failed install leaves the agent to Review")
+    if _named(steps, INSTALL).get("env", {}).get("CI_KIT_GIT_SSH_CONFIG") != "${{ steps.gitssh.outputs.ssh-config }}":
+        out.append("Install does not get the load step's ssh-config: one key per repo would route nothing")
     return out
 
 
@@ -287,6 +289,12 @@ def test_fires_when_the_key_reaches_install() -> None:
     steps = _review_steps()
     _named(steps, INSTALL)["env"]["CI_KIT_GIT_SSH_KEY"] = "${{ secrets.git-ssh-key }}"
     assert any("not the load step alone" in f for f in wiring_faults(steps))
+
+
+def test_fires_when_install_lacks_the_ssh_config() -> None:
+    steps = _review_steps()
+    del _named(steps, INSTALL)["env"]["CI_KIT_GIT_SSH_CONFIG"]
+    assert any("ssh-config" in f for f in wiring_faults(steps))
 
 
 def test_fires_when_the_stop_step_is_not_always() -> None:
