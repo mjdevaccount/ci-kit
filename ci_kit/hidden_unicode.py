@@ -33,6 +33,8 @@ filename spoofs every listing and diff). A file is skipped as binary only when B
 declared binary (`BINARY_SUFFIXES` plus `--binary-suffix`) AND its bytes are not UTF-8. Bytes that
 decode are text whatever the suffix says, NUL included -- a raw NUL separator in a `.ts`/`.cs`
 string is a U+0000 finding -- so no suffix, declared or not, can hide UTF-8 text from this gate.
+(Under a declared binary suffix only the C0/C1 controls are let pass: an empty zip is 22 bytes
+below 0x80 and decodes, and its NULs are its format, not hidden text.)
 Never skipped by sniffing alone: a UTF-16 or NUL-salted text file is "Binary files differ" to git
 and to the reviewer too. A file under an undeclared suffix that is not UTF-8 is exit 2, and EVERY
 such file is named with its fix (pass its suffix, or re-save it as UTF-8) -- this gate cannot say
@@ -119,6 +121,11 @@ TEXT_SUFFIXES = frozenset({
     ".graphql", ".proto", ".bicep", ".nix", ".dockerfile", ".service", ".timer", ".socket",
     ".fixture", ".patch", ".diff", ".log",
 })
+
+
+def _control(cp: int) -> bool:
+    """C0 / DEL / C1 -- ordinary bytes in a binary format, hidden characters in text."""
+    return cp <= 0x1F or 0x7F <= cp <= 0x9F
 
 
 def _why(cp: int) -> str:
@@ -210,7 +217,10 @@ def scan(root: pathlib.Path, binary: frozenset[str]) -> Scan:
         if text is None:
             continue
         out.text += 1
-        out.findings.extend(_hit(shown, f"{ln}:{col}", cp) for ln, col, cp in findings_in(text))
+        hits = findings_in(text)
+        if suffix_of(rel) in binary:   # a declared binary that happens to decode (an empty zip):
+            hits = [h for h in hits if not _control(h[2])]   # controls are its content, not text
+        out.findings.extend(_hit(shown, f"{ln}:{col}", cp) for ln, col, cp in hits)
     return out
 
 
@@ -314,6 +324,8 @@ def _repo_fails(tmp: pathlib.Path) -> list[str]:
         "nul-in-text": ({"k.ts": "k = a + '\x00' + b\n"}, BINARY_SUFFIXES, 1, "k.ts:1:10: U+0000"),
         "utf8-under-a-binary-suffix": ({"a.svg": "<t>" + chr(0x202E) + "</t>\n"}, BINARY_SUFFIXES | {".svg"}, 1,
                                        "a.svg:1:4: U+202E"),
+        "controls-in-a-decodable-binary": ({"a.md": "x\n", "e.zip": b"PK\x05\x06" + b"\x00" * 18}, BINARY_SUFFIXES, 0,
+                                           "2 tracked text file(s) clean"),
         "hidden-name": ({"a" + chr(0x202E) + "dm.py": "x = 1\n"}, BINARY_SUFFIXES, 1, "a\\u202edm.py:name:2: U+202E"),
         "nothing-read": ({"logo.png": b"\xff\x00"}, BINARY_SUFFIXES, 2, "read nothing"),
     }

@@ -107,25 +107,41 @@ def test_utf16_text_is_not_skipped_as_binary(new_repo) -> None:
 def test_a_raw_nul_in_utf8_text_is_a_finding_whatever_the_suffix(new_repo) -> None:
     """trade-ui / TradingEdge.Scraper, 2026-11-14: a NUL typed raw as a key separator in a .ts /
     .cs string. It decodes, so it is text with a hidden U+0000 -- under a suffix the kit lists
-    (.ts) or not (.zig), and even one declared binary: write the escape (review, ci-kit#89)."""
+    (.ts) or not (.zig). Only a suffix the CALLER declares binary lets controls pass (an empty zip
+    decodes too); the next test proves every other class still fires there."""
     r = _add(new_repo(), {"src/k.ts": "const k = `${a}" + chr(0) + "${b}`" + NL,
                           "src/k.zig": "const k = `${a}" + chr(0) + "${b}`" + NL})
-    for args in ((), ("--binary-suffix", ".zig")):
-        res = run_tool("hidden_unicode", r, *args)
-        assert res.returncode == 1, res.stdout + res.stderr
-        assert "src/k.ts:1:16: U+0000" in res.stdout and "src/k.zig:1:16: U+0000" in res.stdout
+    res = run_tool("hidden_unicode", r)
+    assert res.returncode == 1, res.stdout + res.stderr
+    assert "src/k.ts:1:16: U+0000" in res.stdout and "src/k.zig:1:16: U+0000" in res.stdout
+    res = run_tool("hidden_unicode", r, "--binary-suffix", ".zig")
+    assert res.returncode == 1 and "src/k.ts:1:16: U+0000" in res.stdout, res.stdout + res.stderr
+    assert "src/k.zig" not in res.stdout
 
 
 def test_a_declared_binary_suffix_cannot_hide_utf8_text(new_repo) -> None:
-    """Review, ci-kit#89: `--binary-suffix .svg` turned an SVG holding U+202E into a clean 0. A
-    suffix only skips bytes that are not UTF-8."""
-    r = _add(new_repo(), {"a.svg": "<text>" + chr(0x202E) + "</text>" + NL, "b.age": b"age\xff\x00"})
-    res = run_tool("hidden_unicode", r, "--binary-suffix", ".svgz")
-    assert res.returncode == 1 and "a.svg:1:7: U+202E" in res.stdout, res.stdout + res.stderr
-    r2 = _add(new_repo("r2"), {"a.razor": "x" + chr(0x2066) + NL, "b.age": b"age\xff\x00"})
+    """Pre-merge review, 2026-11-14: `--binary-suffix .svg` turned an SVG holding U+202E into a
+    clean 0. A suffix only skips bytes that are not UTF-8; a text suffix is refused outright."""
+    r = _add(new_repo(), {"a.dat": "<text>" + chr(0x202E) + "</text>" + NL, "b.dat": b"\xff\x00"})
+    res = run_tool("hidden_unicode", r, "--binary-suffix", ".dat")
+    assert res.returncode == 1 and "a.dat:1:7: U+202E" in res.stdout, res.stdout + res.stderr
+    assert "(1 binary)" not in res.stdout and "HIDDEN b.dat" not in res.stdout
+    r2 = _add(new_repo("r2"), {"a.razor": "x" + chr(0x2066) + NL})
     res = run_tool("hidden_unicode", r2, "--binary-suffix", ".razor")
     assert res.returncode == 2 and "text format" in res.stderr, res.stdout + res.stderr
-    assert hu.selftest() == []   # the selftest's own `utf8-under-a-binary-suffix` case
+
+
+def test_a_decodable_binary_keeps_its_controls_but_not_its_hidden_text(new_repo) -> None:
+    """Re-review, 2026-11-14: an empty zip is 22 bytes below 0x80, so it decodes; its NULs are the
+    format. Under a declared binary suffix controls pass -- every other class still fires."""
+    empty_zip = b"PK" + bytes([5, 6]) + bytes(18)
+    r = _add(new_repo(), {"a.md": "x" + NL, "e.zip": empty_zip})
+    res = run_tool("hidden_unicode", r)
+    assert res.returncode == 0, res.stdout + res.stderr
+    r2 = _add(new_repo("r2"), {"a.md": "x" + NL, "e.zip": empty_zip + chr(0x202E).encode()})
+    res = run_tool("hidden_unicode", r2)
+    assert res.returncode == 1 and "e.zip:1:23: U+202E" in res.stdout, res.stdout + res.stderr
+    assert "U+0000" not in res.stdout
 
 
 @pytest.mark.parametrize("suffix", [".fixture", ".service", ".timer", ".bats", ".razor", ".conf", ".lock",
@@ -133,14 +149,14 @@ def test_a_declared_binary_suffix_cannot_hide_utf8_text(new_repo) -> None:
                                     ".hcl", ".jsonc", ".tsv", ".env", ".dockerfile", ".vbs", ".tftpl",
                                     ".webmanifest"])
 def test_the_estates_text_formats_are_refused_as_binary(suffix: str) -> None:
-    """The suffixes a 15-repo `git ls-files` found in neither list (review, ci-kit#89)."""
+    """The suffixes a 15-repo `git ls-files` found in neither list (pre-merge review, 2026-11-14)."""
     assert suffix in hu.TEXT_SUFFIXES and suffix not in hu.BINARY_SUFFIXES
     with pytest.raises(hu.argparse.ArgumentTypeError):
         hu._suffix(suffix)
 
 
 def test_a_hidden_character_in_a_file_name_is_a_finding(new_repo) -> None:
-    """Review, ci-kit#89: a bidi override in a NAME spoofs every listing and diff; printed escaped."""
+    """Pre-merge review, 2026-11-14: a bidi override in a NAME spoofs every listing and diff; printed escaped."""
     r = _add(new_repo(), {"admin" + chr(0x200B) + ".py": "x = 1" + NL})
     res = run_tool("hidden_unicode", r)
     assert res.returncode == 1, res.stdout + res.stderr
@@ -148,7 +164,7 @@ def test_a_hidden_character_in_a_file_name_is_a_finding(new_repo) -> None:
 
 
 def test_a_tracked_path_missing_on_disk_exits_2(new_repo) -> None:
-    """Review, ci-kit#89: a path git lists but the disk lacks (deleted, sparse, or a non-UTF-8 name
+    """Pre-merge review, 2026-11-14: a path git lists but the disk lacks (deleted, sparse, or a non-UTF-8 name
     `errors=replace` mangled) was a silent skip counted in the OK line."""
     r = _add(new_repo(), {"a.md": "x" + NL, "b.md": "y" + NL})
     (r / "b.md").unlink()
