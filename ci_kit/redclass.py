@@ -25,9 +25,14 @@ THE CLASSES of one failed job (`job_class`):
                log tail names a network/TLS/DNS/5xx error, or whose log GitHub no longer has.
   consequence  an aggregator (re-actors/alls-green) that failed because a job it needs failed.
                It is machinery when its run holds a machinery job, judgment otherwise.
+  parked       the review gate's `review deferred` job (v1.29.0): the PR queue (ci_kit/pr_sched)
+               parked the review so the queue head gets the sealed runner. Not a failure of the PR
+               and not the machinery's either: the scheduler re-runs it (a plain rerun-failed-jobs
+               would park it again), so no reader retries it or calls it judgment.
   judgment     everything else: a test, a lint, a review verdict, a step that failed on its own.
-A run (`run_class`) is machinery only when EVERY failed job in it is machinery, or a consequence
-of one. Anything unrecognised is judgment: a guess the wrong way costs a CI rerun at worst, but
+A run (`run_class`) is judgment when ANY failed job is; else parked when one is parked; else
+machinery only when EVERY failed job in it is machinery, or a consequence of one.
+Anything unrecognised is judgment: a guess the wrong way costs a CI rerun at worst, but
 a real failure read as machinery would be retried -- so the default is never to retry.
 """
 from __future__ import annotations
@@ -41,7 +46,9 @@ FAIL = {"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
 INFRA = {"STARTUP_FAILURE"}  # the check never ran its steps: no evidence against the code
 RED_RUN = {"failure", "cancelled", "startup_failure", "timed_out"}  # a workflow run worth classifying
 
-MACHINERY, CONSEQUENCE, JUDGMENT = "machinery", "consequence", "judgment"
+MACHINERY, CONSEQUENCE, JUDGMENT, PARKED = "machinery", "consequence", "judgment", "parked"
+# the review gate's job that fails, on purpose, when the PR queue parks a review ("<caller> / review deferred")
+DEFERRED_JOB = re.compile(r"(^|/ )review deferred$")
 
 # A step that prepares the job and runs none of the PR's code. Its failure is the runner's or the
 # network's, never the change's -- but only with the log's word for it (below).
@@ -81,6 +88,8 @@ def job_class(job: dict, annotations: list[str] = (), log_error: str = "", log_t
         return "pass", ""
     if c == "startup_failure":
         return MACHINERY, "the job never started (startup failure)"
+    if c == "failure" and DEFERRED_JOB.search(str(job.get("name") or "")):
+        return PARKED, "parked by the PR queue so the queue head gets the runner -- not a failure of this PR"
     steps = [s for s in job.get("steps") or [] if isinstance(s, dict)]
     failed = [s for s in steps if _concl(s) == "failure"]
     own = [s for s in failed if not SETUP_STEP.search(str(s.get("name") or ""))
@@ -128,6 +137,9 @@ def run_class(classes: list[tuple[str, str, str]]) -> tuple[str, str]:
     verdicts = [(n, w) for n, c, w in red if c == JUDGMENT]
     if verdicts:
         return JUDGMENT, "; ".join(f"`{n}`: {w}" for n, w in verdicts)
+    parked = [(n, w) for n, c, w in red if c == PARKED]
+    if parked:  # the aggregator beneath it is its consequence; the scheduler re-runs the whole run
+        return PARKED, "; ".join(f"`{n}`: {w}" for n, w in parked)
     mach = [(n, w) for n, c, w in red if c == MACHINERY]
     if not mach:  # an aggregator red with nothing beneath it that failed: say so, never retry it
         return JUDGMENT, "; ".join(f"`{n}`: an aggregator red with no failed job beneath it" for n, _, _ in red)
