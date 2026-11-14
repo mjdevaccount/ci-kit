@@ -94,9 +94,12 @@ def run_jobs(repo: str, run_id: int, read: Gh) -> list[dict]:
     return (got or {}).get("jobs") or [] if isinstance(got, dict) else []
 
 
-def pr_of(run: dict, by_branch: dict[str, int]) -> int:
+def pr_of(run: dict, by_branch: dict[str, int], repo: str = "") -> int:
     """The same-repo PR a run belongs to; 0 for a push/schedule run or a fork."""
     if run.get("event") not in ("pull_request", "pull_request_target"):
+        return 0
+    fork = str((run.get("head_repository") or {}).get("full_name") or "")
+    if repo and fork and fork != repo:  # a fork's `patch-1` is not our `patch-1`
         return 0
     mine = by_branch.get(str(run.get("head_branch") or ""), 0)
     if mine:  # the open PR whose head IS this branch -- never a stacked PR that merely lists it
@@ -115,7 +118,7 @@ def pool_jobs(repo: str, read: Gh, capacity: dict[str, int], by_branch: dict[str
             pool = next((lb for lb in j.get("labels") or [] if lb in capacity), "")
             if not pool:
                 continue
-            out.append(pr_queue.Job(pr_of(run, by_branch), int(run["id"]), int(run.get("run_attempt") or 1),
+            out.append(pr_queue.Job(pr_of(run, by_branch, repo), int(run["id"]), int(run.get("run_attempt") or 1),
                                     _tail(j.get("name")), pool, "in_progress" if status == "in_progress" else "queued",
                                     _ts(j.get("created_at")) or _ts(run.get("created_at")) or 0.0,
                                     _ts(j.get("started_at")) if status == "in_progress" else None))
@@ -299,7 +302,7 @@ def _refill(repo: str, prs: list[dict], hn: int | None, r: Refill, read: Gh, wri
     active at its head (that run may be the admission about to end parked, found next pass). A
     non-head parked longer than `starve_s` is an ERROR: the run goes red, which mcp's
     ci-schedule-audit reads. Returns the errors."""
-    errors, refilled = 0, False
+    errors, refilled, first = 0, False, True
     for p in sorted((p for p in prs if any(lb.get("name") == PARKED for lb in p.get("labels") or [])),
                     key=pr_queue.landing_order):
         n = int(p["number"])
@@ -322,10 +325,12 @@ def _refill(repo: str, prs: list[dict], hn: int | None, r: Refill, read: Gh, wri
         if not is_head and (refilled or not r.room):
             since = min((_ts(x.get("updated_at")) or r.now) for x in runs)
             line = f"#{n}: parked ({len(runs)} run(s)) {(r.now - since) / 60:.0f} min, waits for a free pool"
-            if r.now - since > r.starve_s:
+            # only the NEXT in line can starve: the ones behind it wait for it, which is queue order
+            if first and r.now - since > r.starve_s:
                 errors += 1
                 print(f"::warning::parked-pr-starved {line}")
                 line = "PARKED STARVED: " + line
+            first = False
             summary.append(line)
             continue
         # no budget needed here: admission and preemption stop parking a run at its MAX_ATTEMPT-th

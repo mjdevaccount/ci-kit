@@ -295,6 +295,19 @@ def test_a_non_head_parked_too_long_turns_the_run_red(labels) -> None:
     assert _pass(Gh(routes), [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))])[0] == 0
 
 
+def test_only_the_next_parked_pr_can_starve_the_rest_wait_their_turn_must_not_fire(labels) -> None:
+    routes = {**_pools(0, NOW - 600), **_parked_routes(3080, deferred=True), **_parked_routes(3081, deferred=True)}
+    routes[f"repos/o/r/actions/runs?head_sha={3081:040d}"]["workflow_runs"][0]["updated_at"] = _iso(NOW - 3600)
+    errors, summary = _pass(Gh(routes), [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,)), _pr(3081, labels=(pr_sched.PARKED,))])
+    assert errors == 0 and not any(s.startswith("PARKED STARVED") for s in summary)
+
+
+def test_a_forks_run_is_never_attributed_to_our_branch_of_the_same_name() -> None:
+    run = {**_run(5, 3080), "pull_requests": [], "head_repository": {"full_name": "someone/r"}}
+    assert pr_sched.pr_of(run, {"b3080": 3080}, "o/r") == 0
+    assert pr_sched.pr_of({**run, "head_repository": {"full_name": "o/r"}}, {"b3080": 3080}, "o/r") == 3080
+
+
 def test_a_train_job_is_never_preempted(labels) -> None:
     train = {**_pr(3090, armed=False), "headRefName": "train/1"}
     routes = _pools(3090, NOW - 30)
@@ -393,3 +406,40 @@ def test_the_head_waits_for_a_verdict_its_own_red_or_the_switch_must_not_fire(mo
     assert _head_first(monkeypatch, _pr(3073, state="BEHIND"),
                        why="behind, a check is failing on its head (the author's fix re-queues it)")[0] is None
     assert _head_first(monkeypatch, _pr(3073, state="BLOCKED"))[0] is None   # current: nothing to update
+
+
+def test_replay_td3078_head_behind_with_unit_running_on_the_stale_base_is_updated_now_must_fire(monkeypatch) -> None:
+    # td#3078, 05:26Z 11-14: queue head, review verdict RECORDED, BEHIND main (its author pushed a
+    # fix on a base missing #3077) while `unit tests` ran on that stale head -- a result worthless for
+    # merging. The serial queue held it ("checks still running") until unit finished, then updated,
+    # then ran unit again; the coordinator queue-jumped it by hand. The head goes first, NOW.
+    import ci_kit.pr_autoupdate as upd
+    rollup = [{"name": "unit tests", "status": "IN_PROGRESS", "conclusion": None},
+              {"name": "review gate", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    head = {**_pr(3078, state="BEHIND"), "statusCheckRollup": rollup}
+    later = {**_pr(3080, state="BEHIND"), "statusCheckRollup": [{"name": "unit tests", "status": "COMPLETED",
+                                                                   "conclusion": "SUCCESS"}]}
+    q = pr_queue.plan([head, later], 1, ("unit tests", "review gate"))
+    assert any(p is head and "running" in why for p, why in q.held)   # the old rule: wait for unit
+    review_run = {**_run(9, 3078, status="in_progress"), "head_branch": "b3078"}
+    gh = Gh({"repos/o/r/actions/runs?status=queued": {"workflow_runs": []},
+             "repos/o/r/actions/runs?status=in_progress": {"workflow_runs": [review_run]},
+             "repos/o/r/actions/runs/9/jobs": {"jobs": [_rjob("reviewer / review", "completed", labels=()),
+                                                         _rjob("reviewer / record verdict", "completed", labels=())]}})
+    monkeypatch.setattr(upd, "_gh_read", gh.read)
+    summary: list[str] = []
+    n = upd._head_first("o/r", [head, later], q, upd.Options(scarce=((SEALED, 1),)), summary)
+    assert n == 3078 and q.update[0] is head and not any(p is head for p, _ in q.held)
+    assert any("updated first" in s for s in summary)
+
+
+def test_replay_td3078_but_the_verdict_still_owed_waits_must_not_fire(monkeypatch) -> None:
+    import ci_kit.pr_autoupdate as upd
+    head = {**_pr(3078, state="BEHIND"), "statusCheckRollup": [{"name": "review gate", "status": "IN_PROGRESS"}]}
+    q = pr_queue.plan([head], 1, ("review gate",))
+    review_run = {**_run(9, 3078, status="in_progress"), "head_branch": "b3078"}
+    gh = Gh({"repos/o/r/actions/runs?status=in_progress": {"workflow_runs": [review_run]},
+             "repos/o/r/actions/runs/9/jobs": {"jobs": [_rjob("reviewer / review", "completed", labels=()),
+                                                         _rjob("reviewer / model review", "in_progress")]}})
+    monkeypatch.setattr(upd, "_gh_read", gh.read)
+    assert upd._head_first("o/r", [head], q, upd.Options(scarce=((SEALED, 1),)), []) is None
