@@ -9,6 +9,8 @@ scheduler that re-runs what this parks is ci_kit/pr_sched.py.
 
 FAILS OPEN: a look that fails, a label that cannot be added (the label is how pr-autoupdate FINDS
 parked work), or a run already re-run MAX_ATTEMPT times -- all REVIEW now. A park is never blind.
+It ADDS the label, never creates it: pr_sched creates it only after proving its token can re-run
+what is parked (`can_act`), so a repo whose token cannot parks nothing here either.
 Token: the job's GITHUB_TOKEN (pull-requests: write for the label, actions: read for the jobs).
 """
 from __future__ import annotations

@@ -443,3 +443,32 @@ def test_replay_td3078_but_the_verdict_still_owed_waits_must_not_fire(monkeypatc
                                                          _rjob("reviewer / model review", "in_progress")]}})
     monkeypatch.setattr(upd, "_gh_read", gh.read)
     assert upd._head_first("o/r", [head], q, upd.Options(scarce=((SEALED, 1),)), []) is None
+
+
+def test_a_token_without_actions_write_parks_nothing_and_creates_no_label_must_fire(labels) -> None:
+    # PR_UPDATE_TOKEN's documented grant is Actions: READ; a park it cannot re-run strands the PR
+    routes = {**_pools(3080, NOW - 30), "repos/o/r/actions/runs?status=completed": {"workflow_runs": [{"id": 5}]}}
+    gh = Gh(routes, fail=("runs/5/cancel",))
+    errors, summary = _pass(gh, [_pr(3073), _pr(3080)])
+    assert errors >= 1 and any(s.startswith("SCHEDULER OFF") for s in summary)
+    assert not any(w.startswith("label create") for w in gh.writes)       # admission cannot add it
+    assert [w for w in gh.writes if "cancel" in w] == ["api -X POST repos/o/r/actions/runs/5/cancel"]
+    assert labels == []
+
+
+def test_the_probe_with_the_grant_is_a_no_op_409_and_the_pass_parks_must_not_fire(labels) -> None:
+    routes = {**_pools(3080, NOW - 30), "repos/o/r/actions/runs?status=completed": {"workflow_runs": [{"id": 5}]}}
+    gh = Gh(routes)
+    gh.write = _conflict_on(gh.write, "runs/5/cancel")
+    errors, summary = _pass(gh, [_pr(3073), _pr(3080)])
+    assert errors == 0 and not any(s.startswith("SCHEDULER OFF") for s in summary)
+    assert "api -X POST repos/o/r/actions/runs/2/cancel" in gh.writes and labels == [(3080, True)]
+
+
+def _conflict_on(write, path: str):
+    def w(*args: str, **kw: object) -> subprocess.CompletedProcess:
+        got = write(*args, **kw)
+        if path in " ".join(args):
+            return subprocess.CompletedProcess(args, 1, "", "HTTP 409: Cannot cancel a workflow run that is completed.")
+        return got
+    return w

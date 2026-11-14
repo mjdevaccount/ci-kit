@@ -25,8 +25,12 @@ read as "CI failed" to an author's agent or an auto-fix bot, so the PR carries t
 re-run starts. pr_heal leaves a parked PR alone: re-running it is this module's job, in order.
 
 THE TOKENS. Reads: the job's GITHUB_TOKEN (actions: read) first, then the PAT (pr_autoupdate's
-`read`). Cancel / re-run / label: the PAT, which already holds Actions: Read and write for
-pr_heal's reruns; a refusal is an ERROR naming the grant, never a silent skip.
+`read`). Cancel / re-run / label: the PAT, which needs Actions: Read and write (a reusable workflow
+cannot ask GITHUB_TOKEN for it, see pr_heal). NOTHING IS PARKED UNPROVEN: every pass first PROBES
+that grant (`can_act`: cancel a COMPLETED run -- 409 with the grant, 403 without, a no-op either
+way). Without it the pass parks nothing and does not create the label -- and the review gate's
+admission adds the label without creating it, so it parks nothing either: a park nobody can re-run
+would strand the PR. The refusal is an ERROR naming the grant (a red run), never a silent skip.
 """
 from __future__ import annotations
 
@@ -178,6 +182,24 @@ def ensure_label(repo: str, write: Gh) -> bool:
                  "--description", PARKED_DESCRIPTION, "--force").returncode == 0
 
 
+def can_act(repo: str, read: Gh, write: Gh) -> str:
+    """'' when the push token may cancel and re-run runs, else the refusal. The probe cancels the
+    newest COMPLETED run: 409 with Actions: write, 403 without -- it changes nothing either way. A
+    probe that cannot look, or a reply that is neither, does not block (the act itself still says)."""
+    try:
+        runs = json.loads(read("api", f"repos/{repo}/actions/runs?status=completed&per_page=1").stdout or "{}")
+    except (subprocess.CalledProcessError, ValueError):
+        return ""
+    ids = [r.get("id") for r in runs.get("workflow_runs") or [] if r.get("id")]
+    if not ids:
+        return ""
+    got = write("api", "-X", "POST", f"repos/{repo}/actions/runs/{ids[0]}/cancel")
+    msg = (got.stderr or got.stdout or "").strip()
+    if got.returncode and ("resource not accessible" in msg.lower() or "403" in msg):
+        return _grant(msg[-300:])
+    return ""
+
+
 def _grant(msg: str) -> str:
     if "resource not accessible" in msg.lower() or "403" in msg:
         return msg + " -- the push token needs Actions: Read and write to park or re-run a run"
@@ -233,7 +255,12 @@ def pass_(repo: str, prs: list[dict], capacity: dict[str, int], read: Gh, write:
     by_branch = {str(p.get("headRefName")): int(p["number"]) for p in same}
     h = pr_queue.head(same)
     hn = int(h["number"]) if h else None
-    if capacity and not ensure_label(repo, write):
+    off = can_act(repo, read, write) if capacity else ""
+    if off:
+        errors += 1  # parks NOTHING: a park this token cannot re-run would strand the PR
+        print(f"::error::{repo}: the PR scheduler parks nothing -- {off}")
+        summary.append(f"SCHEDULER OFF (parks nothing): {off}")
+    elif capacity and not ensure_label(repo, write):
         errors += 1  # the review gate's admission can only park a labelled PR: until this lands it runs all
         print(f"::error::{repo}: could not create the `{PARKED}` label; admission parks nothing until it exists")
     oq = out_of_queue(repo, same, before, sha, read)
@@ -254,9 +281,10 @@ def pass_(repo: str, prs: list[dict], capacity: dict[str, int], read: Gh, write:
         errors += 1
         print(f"::warning::queue-head-starved {line}")
         summary.append(f"HEAD STARVED: {line}")
-    errors += _park(repo, s.preempt, write, summary)
+    preempt = [] if off else s.preempt
+    errors += _park(repo, preempt, write, summary)
     room = not any(j.status == "queued" for j in jobs) and not s.demand
-    errors += _refill(repo, same, hn, Refill({j.pr for j, _ in s.preempt}, set(updated), room, now, 2 * stall_s),
+    errors += _refill(repo, same, hn, Refill({j.pr for j, _ in preempt}, set(updated), room, now, 2 * stall_s),
                       read, write, summary, behind)
     return errors
 
