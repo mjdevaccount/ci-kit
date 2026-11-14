@@ -35,6 +35,16 @@
 # re-run in full and every required check still passes at the merging head. Pair it with the
 # review gate's `queue-priority: true`. The `token` then needs Actions: Read and write.
 #
+# THE HEAL LADDER (`heal`, v1.31.0; ci_kit/pr_ladder.py): a conflict, or a JUDGMENT red, on an
+# armed PR is dispatched -- at most once per head, recorded as a PR-comment marker first -- to the
+# output `heal` instead of the one comment / one page. The caller runs ci-kit's pr-heal.yml once per
+# row (template in that file): tier 1 relocks a lockfile-only conflict (uv, npm, pnpm, NuGet), tier 2
+# regenerates the caller's mapped generated files, tier 3 is Claude Code in Actions (the review
+# gate's harness, armed non-Renovate-major PRs only, `heal-claude-per-pass` / `-per-pr`), tier 4
+# pages ONCE per head. With `heal` on the conflict page moves to tier 4, and a caller's own relock
+# job should go (two pushers race). A dispatch with no heal record after `heal-stale-minutes` is
+# paged by a later pass. `autoland-off` PRs and the database Renovate group keep the old behaviour.
+#
 # UNCONFIGURED IS RED: with no `token` the job fails naming it. GITHUB_TOKEN is NOT a fallback --
 # a push made with it fires no workflow, so every updated PR would wait on checks that never
 # start, which looks exactly like "CI pending".
@@ -103,6 +113,29 @@ on:
           Keep `queue/position` OUT of `required-checks`: the queue must not read a waiting PR as running.
         type: boolean
         default: false
+      heal:
+        description: >-
+          the HEAL LADDER (ci_kit/pr_ladder.py, v1.31.0): conflicts and judgment reds on armed PRs go to
+          output `heal` (one row per dispatch, at most one per head) for the caller's pr-heal.yml call,
+          instead of a comment / a page. Off = exactly the old behaviour
+        type: boolean
+        default: false
+      heal-claude-per-pass:
+        description: tier-3 (Claude) dispatches per pass; a PR over it waits for the next pass (0 = tier 3 off)
+        type: number
+        default: 1
+      heal-claude-per-pr:
+        description: tier-3 dispatches per PR, across all its heads
+        type: number
+        default: 2
+      heal-per-pr:
+        description: heal dispatches per PR, across all its heads (a push-red-push loop ends in a page)
+        type: number
+        default: 6
+      heal-stale-minutes:
+        description: a dispatch with no heal record after this long is paged by the next pass
+        type: number
+        default: 90
     secrets:
       token:
         description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs), commit statuses RW with queue-hold, on the caller repo
@@ -114,6 +147,9 @@ on:
       relock:
         description: JSON list of PR numbers newly labelled as conflicting by this run
         value: ${{ jobs.update.outputs.relock }}
+      heal:
+        description: JSON list of heal-ladder dispatches, {pr, head, mode, claude, checks, runs} (pr-heal.yml's inputs)
+        value: ${{ jobs.update.outputs.heal }}
 
 # The open-PR list reads `statusCheckRollup` with GITHUB_TOKEN (CI_KIT_READ_TOKEN below): GitHub
 # refuses a fine-grained PAT the check runs inside it (2026-10-24, every caller with an open PR).
@@ -145,6 +181,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       relock: ${{ steps.update.outputs.relock }}
+      heal: ${{ steps.update.outputs.heal }}
     env:
       GH_TOKEN: ${{ secrets.token }}
       CI_KIT_READ_TOKEN: ${{ github.token }}
@@ -158,6 +195,12 @@ jobs:
       CI_KIT_SCARCE_POOLS: ${{ inputs.scarce-pools }}
       # an env var, never a flag: an older @v1 tool would refuse a flag it does not know
       CI_KIT_QUEUE_HOLD: ${{ inputs.queue-hold }}
+      # the heal ladder: env vars, never flags (an older @v1 tool refuses a flag it does not know)
+      CI_KIT_HEAL: ${{ inputs.heal }}
+      CI_KIT_HEAL_CLAUDE_PER_PASS: ${{ inputs.heal-claude-per-pass }}
+      CI_KIT_HEAL_CLAUDE_PER_PR: ${{ inputs.heal-claude-per-pr }}
+      CI_KIT_HEAL_PER_PR: ${{ inputs.heal-per-pr }}
+      CI_KIT_HEAL_STALE_MIN: ${{ inputs.heal-stale-minutes }}
       CI_KIT_EVENT: ${{ github.event_name }}
       CI_KIT_BEFORE: ${{ github.event.before }}
       CI_KIT_SHA: ${{ github.sha }}

@@ -9,6 +9,8 @@ pr_autoupdate and the merge train (ci_kit/merge_train) read them unchanged.
 """
 from __future__ import annotations
 
+RENOVATE_AUTOMERGE = "**Automerge**: Enabled"
+
 QUERY = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
@@ -17,6 +19,8 @@ query($owner: String!, $name: String!) {
         number title url isCrossRepository headRefOid headRefName mergeStateStatus
         isDraft mergeable baseRefName createdAt
         autoMergeRequest { enabledAt }
+        author { login }
+        body
         labels(first: 30) { nodes { name } }
         commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
           __typename
@@ -48,6 +52,10 @@ def rows(answer: dict) -> list[dict]:
                                      "headRefName", "mergeStateStatus", "autoMergeRequest",
                                      "isDraft", "mergeable", "baseRefName", "createdAt")},
             "labels": (n.get("labels") or {}).get("nodes") or [],
+            "author": n.get("author") or {},
+            # Renovate merges its own PRs (platformAutomerge off), so they are never ARMED; its body
+            # says whether it will. Only the flag travels: bodies stay out of the rows.
+            "renovateAutomerge": RENOVATE_AUTOMERGE in (n.get("body") or ""),
             "statusCheckRollup": ((rollup.get("contexts") or {}).get("nodes")) or [],
         })
     return out

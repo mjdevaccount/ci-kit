@@ -44,7 +44,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from ci_kit import redclass
+from ci_kit import pr_ladder, redclass
 from ci_kit.merge_train import RIDING, TRAIN_PREFIX
 
 # the PR scheduler's label (ci_kit/pr_sched.PARKED, kept literal: pr_sched imports pr_autoupdate,
@@ -83,10 +83,11 @@ class Verdict:
     head: str
     reds: list[Red] = field(default_factory=list)
     unrunnable: list[str] = field(default_factory=list)  # a red check no Actions run stands behind
+    laddered: bool = False  # the heal ladder already took this head (ci_kit/pr_ladder.py): not re-classified
 
     @property
     def kind(self) -> str:
-        if self.unrunnable or any(r.cls == redclass.JUDGMENT for r in self.reds):
+        if self.laddered or self.unrunnable or any(r.cls == redclass.JUDGMENT for r in self.reds):
             return redclass.JUDGMENT
         if any(r.cls == redclass.PARKED for r in self.reds):
             return redclass.PARKED
@@ -263,11 +264,12 @@ def machinery(heal: Heal) -> frozenset[int]:
 
 
 def assess_armed(repo: str, armed: list[dict], required: tuple[str, ...], limit: int, read: Gh,
-                 comments: Callable[[str, int], list[str]], summary: list[str]) -> tuple[Heal, int]:
+                 comments: Callable[[str, int], list[str]], summary: list[str], ladder: bool = False) -> tuple[Heal, int]:
     """A verdict for every armed PR red at its head, and the errors. Skipped: a train or a rider
     (the train judges those), a PARKED PR (the scheduler re-runs it), a DIRTY PR (the conflict path), and a head whose judgment or spent
     budget is already named on the PR. A PR GitHub would not explain is an ERROR, left as it was --
-    never guessed machinery."""
+    never guessed machinery. With the heal `ladder` on, a head the ladder already took is not
+    classified again: it is handed back `laddered` (judgment), for the ladder's stale watch."""
     out: Heal = {}
     errors = 0
     if limit <= 0:
@@ -283,6 +285,9 @@ def assess_armed(repo: str, armed: list[dict], required: tuple[str, ...], limit:
             bodies = comments(repo, n)
             behind = (p.get("mergeStateStatus") or "UNKNOWN").upper() in ("BEHIND", "UNKNOWN")
             # an EXHAUSTED head that fell BEHIND is assessed again: its update is free and needs no grant
+            if ladder and marked(bodies, pr_ladder._HEAL, head):
+                out[n] = (Verdict(n, head, laddered=True), bodies, p)
+                continue
             if marked(bodies, _JUDGED, head) or (marked(bodies, _EXHAUSTED, head) and not behind):
                 summary.append(f"#{n}: red at {head[:12]}, already named on the PR (smart auto-merge)")
                 continue
@@ -295,9 +300,11 @@ def assess_armed(repo: str, armed: list[dict], required: tuple[str, ...], limit:
     return out, errors
 
 
-def act(repo: str, heal: Heal, updated: set[int], limit: int, write: Gh, summary: list[str]) -> int:
+def act(repo: str, heal: Heal, updated: set[int], limit: int, write: Gh, summary: list[str],
+        laddered: frozenset[int] = frozenset()) -> int:
     """Carry out decide() for each assessed PR. Every action is recorded: a PR comment carrying its
-    marker, and a summary line. Returns the errors (a refused rerun, a spent budget, a failed record)."""
+    marker, and a summary line. Returns the errors (a refused rerun, a spent budget, a failed record).
+    A judgment red the heal ladder took (`laddered`) gets the ladder's record instead of the comment."""
     errors = 0
 
     def say(n: int, body: str) -> bool:
@@ -333,6 +340,8 @@ def act(repo: str, heal: Heal, updated: set[int], limit: int, write: Gh, summary
             if not add_label(repo, n, PARKED)[0]:
                 errors += 1
                 line += f"; `{PARKED}` could NOT be added"
+        elif action == "judgment" and n in laddered:
+            continue  # the ladder's own summary line and marker say what happened to it
         elif action == "judgment" and not say(n, judgment_comment(v)):
             errors += 1
             line += "; its comment FAILED"
