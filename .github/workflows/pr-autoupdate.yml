@@ -96,7 +96,7 @@ on:
         default: 15
     secrets:
       token:
-        description: fine-grained PAT with contents, pull requests and workflows RW, actions read, on the caller repo
+        description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs), on the caller repo
         required: true
       ntfy-url:
         description: an ntfy topic URL to page on a NEW conflict ('' = no page)
@@ -154,7 +154,7 @@ jobs:
       - name: Refuse to run unconfigured
         run: |
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::secret 'token' is empty for $GITHUB_REPOSITORY: armed PRs are NOT being updated. Map a fine-grained token (contents, pull requests, workflows: read+write; actions: read) onto 'token' in the workflow_call secrets."
+            echo "::error::secret 'token' is empty for $GITHUB_REPOSITORY: armed PRs are NOT being updated. Map a fine-grained token (contents, pull requests, workflows: read+write; actions: read, read+write with scarce-pools) onto 'token' in the workflow_call secrets."
             exit 1
           fi
       - name: Update

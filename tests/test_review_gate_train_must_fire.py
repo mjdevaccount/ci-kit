@@ -51,8 +51,8 @@ def faults(job: dict) -> list[str]:
         out.append("the Gate does not run on a train")
     if "steps.train.outputs.result" not in str((gate.get("env") or {}).get("RESULT", "")):
         out.append("the Gate does not read the train's result")
-    if IS_TRAIN not in str(_step(job, name="Comment on the PR").get("if", "")):
-        out.append("no comment on a train")
+    if IS_TRAIN not in str(_step(job, name="Hand the verdict on").get("if", "")):
+        out.append("no comment on a train (its verdict is never handed to the commenting job)")
     if "steps.train.outputs.result" not in str((job.get("outputs") or {}).get("result", "")):
         out.append("the job's result output drops the train's")
     return out
@@ -80,7 +80,7 @@ def test_each_fault_fires() -> None:
     assert any("train's result" in f for f in _mutated(
         lambda j: _step(j, name="Gate")["env"].update({"RESULT": "${{ steps.verdict.outputs.result }}"})))
     assert any("comment" in f for f in _mutated(
-        lambda j: _step(j, name="Comment on the PR").update({"if": "steps.decide.outputs.required == 'true'"})))
+        lambda j: _step(j, name="Hand the verdict on").update({"if": "steps.decide.outputs.required == 'true'"})))
     assert any("output" in f for f in _mutated(
         lambda j: j["outputs"].update({"result": "${{ steps.verdict.outputs.result }}"})))
 

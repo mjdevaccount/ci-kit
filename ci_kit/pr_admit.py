@@ -10,7 +10,8 @@ scheduler that re-runs what this parks is ci_kit/pr_sched.py.
 FAILS OPEN: a look that fails, a label that cannot be added (the label is how pr-autoupdate FINDS
 parked work), or a run already re-run MAX_ATTEMPT times -- all REVIEW now. A park is never blind.
 It ADDS the label, never creates it: pr_sched creates it only after proving its token can re-run
-what is parked (`can_act`), so a repo whose token cannot parks nothing here either.
+what is parked (`can_act`), so a repo whose token cannot parks nothing here either. A label made
+while the grant held carries pr_sched's OFF description once it is lost: that parks nothing too.
 Token: the job's GITHUB_TOKEN (pull-requests: write for the label, actions: read for the jobs).
 """
 from __future__ import annotations
@@ -22,7 +23,7 @@ import subprocess
 import sys
 
 from ci_kit import pr_queue
-from ci_kit.pr_sched import MAX_ATTEMPT, PARKED, PRE_JOB, Gh, _tail, active_runs, run_jobs
+from ci_kit.pr_sched import MAX_ATTEMPT, PARKED, PARKED_OFF, PRE_JOB, Gh, _tail, active_runs, run_jobs
 
 
 def head_demand(repo: str, h: dict, pool: str, read: Gh, pending: bool) -> bool:
@@ -66,6 +67,12 @@ def admit_main(argv: list[str] | None = None) -> int:
             hn = str(h["number"]) if h else ""
             demand = bool(h) and int(h["number"]) < args.pr and head_demand(args.repo, h, args.pool, read, args.pending)
             defer, why = pr_queue.admit(me, h, demand)
+            if defer:
+                labels = json.loads(read("label", "list", "-R", args.repo, "--search", PARKED, "--json",
+                                         "name,description").stdout or "[]")
+                mine = next((lb for lb in labels if lb.get("name") == PARKED), None)
+                if mine is None or str(mine.get("description") or "").startswith(PARKED_OFF[:12]):
+                    defer, why = False, f"the PR queue is off (`{PARKED}` {'missing' if mine is None else 'marked OFF'}); running"
             if defer and not any(lb.get("name") == PARKED for lb in me.get("labels") or []):
                 # the label is how pr-autoupdate FINDS parked work: no label, no park (never strand)
                 r = subprocess.run(["gh", "pr", "edit", str(args.pr), "-R", args.repo, "--add-label", PARKED],

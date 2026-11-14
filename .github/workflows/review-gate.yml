@@ -219,7 +219,7 @@ jobs:
       PYTHONSAFEPATH: "1"
     permissions:
       contents: read
-      pull-requests: write   # the verdict comment (carried / BLIND / train), the `queue:parked` label
+      pull-requests: write   # the `queue:parked` label (the comment is the `verdict` job's)
       actions: read          # the carry's artifact; the scheduler's read of the head's jobs
     outputs:
       # frozen at each step's end; `review`, `record` and `verdict` read them
@@ -237,6 +237,9 @@ jobs:
       schema: ${{ steps.decide.outputs.schema }}
       siblings: ${{ steps.siblings.outputs.text }}
       parked: ${{ steps.admit.outputs.why }}
+      unarmed: ${{ steps.decide.outputs.unarmed }}
+      body: ${{ steps.body.outputs.body }}      # finish / train only: the `verdict` job posts it
+      title: ${{ steps.body.outputs.title }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -450,42 +453,16 @@ jobs:
           echo "_gate: ${GATE}_" >> body.md
           cat body.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Comment on the PR
+      - name: Hand the verdict on
+        # to the `verdict` job, which comments and pushes for every mode (ONE copy of each)
+        id: body
         if: (steps.mode.outputs.mode == 'finish' || steps.train.outputs.is_train == 'true') && !cancelled()
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
+          TITLE: ${{ steps.verdict.outputs.title || steps.train.outputs.title }}
         run: |
-          set -euo pipefail
-          [ -f body.md ] || echo "<!-- review-gate -->"$'\n'"review gate: the verdict step did not run" > body.md
-          # one sticky comment, found by its marker, so a re-review edits instead of piling up
-          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
-                 -q '.[] | select(.body | startswith("<!-- review-gate -->")) | .id' | tail -1)
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@body.md >/dev/null
-          else
-            gh pr comment "$PR" --body-file body.md
-          fi
-
-      - name: Push a block to ntfy
-        # A blocked PR with no live session sits silently until someone looks; this is the push.
-        # Priority 3: a PR is never a reason to wake the operator.
-        if: (steps.mode.outputs.mode == 'finish' || steps.train.outputs.is_train == 'true') && (steps.verdict.outputs.result || steps.train.outputs.result) != 'pass' && steps.decide.outputs.unarmed != 'true' && !cancelled()
-        env:
-          NTFY_URL: ${{ secrets.ntfy-url }}
-          TITLE: ${{ steps.verdict.outputs.title || steps.train.outputs.title || 'review gate did not produce a verdict' }}
-          URL: ${{ github.event.pull_request.html_url }}
-          PR: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.event.repository.name }}
-          # via env, never ${{ }} inside `run:` -- a PR title is attacker-shaped text
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          set -euo pipefail
-          if [ -z "${NTFY_URL:-}" ]; then echo "::warning::ntfy-url unset; the block was not pushed"; exit 0; fi
-          curl -fsS -X POST "$NTFY_URL" -H "Title: $REPO #$PR: $TITLE" \
-            -H "Priority: 3" -H "Tags: mag" -H "Click: $URL" \
-            --data-binary "$PR_TITLE" >/dev/null \
-            || echo "::warning::ntfy push failed"
+          [ -f body.md ] || printf '%s\n' "<!-- review-gate -->" "review gate: the verdict step did not run" > body.md
+          d="BODY_$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+          { echo "body<<$d"; cat body.md; echo; echo "$d"; echo "title=$TITLE"; } >> "$GITHUB_OUTPUT"
 
       - name: Gate
         if: (steps.mode.outputs.mode == 'finish' || steps.train.outputs.is_train == 'true') && !cancelled()
@@ -521,12 +498,14 @@ jobs:
       PYTHONSAFEPATH: "1"
     permissions:
       contents: read
-      pull-requests: write   # the verdict comment; the `queue:parked` label
+      pull-requests: write   # the `queue:parked` label (the comment is the `verdict` job's)
       actions: read          # the scheduler's read of the head's jobs
     outputs:
       # frozen at each step's end; the `record` job reads them on a runner the PR's code never ran on
       result: ${{ steps.verdict.outputs.result || (steps.admit.outputs.defer == 'true' && 'parked' || '') }}
       parked: ${{ steps.admit.outputs.defer }}
+      body: ${{ steps.body.outputs.body }}
+      title: ${{ steps.body.outputs.title }}
     steps:
       - name: Fetch the gate (the ci-kit commit `decide` ran)
         id: kit
@@ -706,39 +685,16 @@ jobs:
           echo "_gate: ${GATE}_" >> body.md
           cat body.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Comment on the PR
+      - name: Hand the verdict on
+        # to the `verdict` job, which comments and pushes for every mode (ONE copy of each)
+        id: body
         if: steps.admit.outputs.defer != 'true' && !cancelled()
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
+          TITLE: ${{ steps.verdict.outputs.title }}
         run: |
-          set -euo pipefail
-          [ -f body.md ] || echo "<!-- review-gate -->"$'\n'"review gate: the verdict step did not run" > body.md
-          # one sticky comment, found by its marker, so a re-review edits instead of piling up
-          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
-                 -q '.[] | select(.body | startswith("<!-- review-gate -->")) | .id' | tail -1)
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@body.md >/dev/null
-          else
-            gh pr comment "$PR" --body-file body.md
-          fi
-
-      - name: Push a block to ntfy
-        if: steps.admit.outputs.defer != 'true' && steps.verdict.outputs.result != 'pass' && !cancelled()
-        env:
-          NTFY_URL: ${{ secrets.ntfy-url }}
-          TITLE: ${{ steps.verdict.outputs.title || 'review gate did not produce a verdict' }}
-          URL: ${{ github.event.pull_request.html_url }}
-          PR: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.event.repository.name }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          set -euo pipefail
-          if [ -z "${NTFY_URL:-}" ]; then echo "::warning::ntfy-url unset; the block was not pushed"; exit 0; fi
-          curl -fsS -X POST "$NTFY_URL" -H "Title: $REPO #$PR: $TITLE" \
-            -H "Priority: 3" -H "Tags: mag" -H "Click: $URL" \
-            --data-binary "$PR_TITLE" >/dev/null \
-            || echo "::warning::ntfy push failed"
+          [ -f body.md ] || printf '%s\n' "<!-- review-gate -->" "review gate: the verdict step did not run" > body.md
+          d="BODY_$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+          { echo "body<<$d"; cat body.md; echo; echo "$d"; echo "title=$TITLE"; } >> "$GITHUB_OUTPUT"
 
       - name: Gate
         if: steps.admit.outputs.defer != 'true' && !cancelled()
@@ -784,8 +740,52 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      pull-requests: write   # the ONE verdict comment, for every mode
+    env:
+      # the job that FINISHED the verdict: `model review` in mode review, `decide` otherwise (empty
+      # when neither did: a park, a skip, a review job that never started)
+      BODY: ${{ needs.decide.outputs.mode == 'review' && needs.review.outputs.body || needs.decide.outputs.body }}
     steps:
+      - name: Comment on the PR
+        if: env.BODY != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$BODY" > body.md
+          # one sticky comment, found by its marker, so a re-review edits instead of piling up
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                 -q '.[] | select(.body | startswith("<!-- review-gate -->")) | .id' | tail -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@body.md >/dev/null
+          else
+            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body-file body.md
+          fi
+
+      - name: Push a block to ntfy
+        # A blocked PR with no live session sits silently until someone looks; this is the push.
+        # Priority 3: a PR is never a reason to wake the operator.
+        if: >-
+          env.BODY != '' && needs.decide.outputs.unarmed != 'true'
+          && (needs.decide.outputs.mode == 'review' && needs.review.outputs.result || needs.decide.outputs.result) != 'pass'
+        env:
+          NTFY_URL: ${{ secrets.ntfy-url }}
+          TITLE: ${{ (needs.decide.outputs.mode == 'review' && needs.review.outputs.title || needs.decide.outputs.title) || 'review gate did not produce a verdict' }}
+          URL: ${{ github.event.pull_request.html_url }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.event.repository.name }}
+          # via env, never ${{ }} inside `run:` -- a PR title is attacker-shaped text
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NTFY_URL:-}" ]; then echo "::warning::ntfy-url unset; the block was not pushed"; exit 0; fi
+          curl -fsS -X POST "$NTFY_URL" -H "Title: $REPO #$PR: $TITLE" \
+            -H "Priority: 3" -H "Tags: mag" -H "Click: $URL" \
+            --data-binary "$PR_TITLE" >/dev/null \
+            || echo "::warning::ntfy push failed"
+
       # mode review: `model review` must run (and `defer` may skip); mode defer: `review deferred`
       # must run (it is red); train / skip / finish: neither runs
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0

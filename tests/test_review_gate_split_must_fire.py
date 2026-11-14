@@ -70,6 +70,19 @@ def faults(wf: dict) -> list[str]:
         name = s.get("name") or s.get("uses")
         if started and name != "Stop the git ssh agent" and NOT_PARKED not in str(s.get("if", "")):
             out.append(f"model review step runs after a park: {name}")
+    # ONE comment and ONE push, in `verdict`, from whichever job finished (never the review job:
+    # the PR's code has run there, so it holds no ntfy secret)
+    body = str((v.get("env") or {}).get("BODY"))
+    if "needs.review.outputs.body" not in body or "needs.decide.outputs.body" not in body:
+        out.append("verdict does not post the finishing job's body")
+    names = [s.get("name") for s in v["steps"]]
+    if "Comment on the PR" not in names or "Push a block to ntfy" not in names:
+        out.append("verdict does not comment and push")
+    for job in ("decide", "review"):
+        if any("ntfy" in str(s.get("env") or {}) or s.get("name") == "Comment on the PR" for s in jobs[job]["steps"]):
+            out.append(f"{job} still comments or pushes itself")
+        if "steps.body.outputs.body" not in str((jobs[job].get("outputs") or {}).get("body")):
+            out.append(f"{job} does not hand its body on")
     res = str((wf.get("on") or wf[True])["workflow_call"]["outputs"]["result"]["value"])
     if "jobs.review.outputs.result" not in res or "jobs.decide.outputs.result" not in res:
         out.append("the workflow's result drops one job's")
@@ -86,28 +99,35 @@ def _mut(fn) -> list[str]:
     return faults(wf)
 
 
+def _green(jobs: dict) -> dict:
+    return next(s for s in jobs["verdict"]["steps"] if "re-actors/alls-green" in str(s.get("uses")))
+
+
 def test_each_fault_fires() -> None:
     assert _mut(lambda j, w: j["review"].update({"if": "needs.decide.outputs.mode != 'skip'"}))
     assert _mut(lambda j, w: j["verdict"].update({"needs": ["decide", "defer"]}))
     assert _mut(lambda j, w: j["verdict"].update({"if": "success()"}))
-    assert _mut(lambda j, w: j["verdict"]["steps"][0]["with"].update({"allowed-skips": "review, defer"}))
+    assert _mut(lambda j, w: _green(j)["with"].update({"allowed-skips": "review, defer"}))
     assert _mut(lambda j, w: j["defer"].update({"if": "needs.decide.outputs.mode == 'defer'"}))
     assert _mut(lambda j, w: j["defer"]["steps"][-1].update({"run": "echo parked"}))
     assert _mut(lambda j, w: j["defer"].update({"continue-on-error": True}))
     assert _mut(lambda j, w: j["defer"].update(
         {"if": "needs.decide.outputs.mode == 'defer' || needs.review.outputs.parked == 'true'"}))
-    assert _mut(lambda j, w: j["verdict"].update({"steps": j["verdict"]["steps"][:1]}))
-    assert _mut(lambda j, w: j["verdict"]["steps"][1].update({"run": "true"}))
+    assert _mut(lambda j, w: j["verdict"]["steps"].remove(_step(j["verdict"], "The review's own verdict")))
+    assert _mut(lambda j, w: _step(j["verdict"], "The review's own verdict").update({"run": "true"}))
     assert _mut(lambda j, w: _step(j["review"], "review").update({"if": "always()"}))
     assert _mut(lambda j, w: _step(j["review"], "Gate").update({"if": "!cancelled()"}))
+    assert _mut(lambda j, w: j["verdict"]["env"].update({"BODY": "${{ needs.decide.outputs.body }}"}))
+    assert _mut(lambda j, w: j["review"]["outputs"].pop("body"))
+    assert _mut(lambda j, w: j["review"]["steps"].append({"name": "Comment on the PR", "run": "true"}))
     assert _mut(lambda j, w: (w.get("on") or w[True])["workflow_call"]["outputs"]["result"].update(
         {"value": "${{ jobs.review.outputs.result }}"}))
 
 
 def test_a_carry_and_a_blind_and_a_train_are_finished_by_decide() -> None:
-    # the jobs that finish a verdict without the sealed runner still comment, gate and push
+    # the jobs that finish a verdict without the sealed runner still hand it on and gate
     d = _wf()["jobs"]["decide"]
-    for sid in ("Comment on the PR", "Gate"):
+    for sid in ("Hand the verdict on", "Gate"):
         cond = str(_step(d, sid).get("if"))
         assert "steps.mode.outputs.mode == 'finish'" in cond and "is_train == 'true'" in cond and "!cancelled()" in cond
     assert "exit 1" in _step(d, "Gate")["run"] and "pass)" in _step(d, "Gate")["run"]

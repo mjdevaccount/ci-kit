@@ -46,6 +46,9 @@ from ci_kit.pr_heal import PARKED  # ONE name; pr_heal reads it too
 
 PARKED_COLOR = "bfd4f2"
 PARKED_DESCRIPTION = "PR queue: CI/review parked so the queue head gets the runner; re-runs itself. NOT a failure"
+# the label's description while a pass cannot re-run: the review gate's admission reads it and parks
+# nothing (a park nobody can re-run would strand the PR). ensure_label restores the description.
+PARKED_OFF = "PR queue OFF: the push token cannot re-run runs (Actions: write). Admission parks nothing"
 DEFERRED_JOB = "review deferred"   # the review gate's job that fails when it parks a review
 RECORD_JOB = "record verdict"      # the review gate's job that writes the verdict a carry reads
 PRE_JOB = "review"                 # the review gate's first job (the name mcp review_gate_auth reads)
@@ -183,11 +186,14 @@ def ensure_label(repo: str, write: Gh) -> bool:
 
 
 def can_act(repo: str, read: Gh, write: Gh) -> str:
-    """'' when the push token may cancel and re-run runs, else the refusal. The probe cancels the
-    newest COMPLETED run: 409 with Actions: write, 403 without -- it changes nothing either way. A
-    probe that cannot look, or a reply that is neither, does not block (the act itself still says)."""
+    """'' when the push token may cancel and re-run runs, else the refusal. The probe cancels a
+    COMPLETED run created over a day ago: 409 with Actions: write, 403 without -- it changes nothing
+    either way (a day old: no re-run of it is plausibly starting this second). A probe that cannot
+    look, or a reply that is neither, does not block (the act itself still says)."""
+    day = (dt.datetime.now(dt.UTC) - dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
-        runs = json.loads(read("api", f"repos/{repo}/actions/runs?status=completed&per_page=1").stdout or "{}")
+        runs = json.loads(read("api", f"repos/{repo}/actions/runs?status=completed&created=<{day}&per_page=1").stdout
+                          or "{}")
     except (subprocess.CalledProcessError, ValueError):
         return ""
     ids = [r.get("id") for r in runs.get("workflow_runs") or [] if r.get("id")]
@@ -260,6 +266,8 @@ def pass_(repo: str, prs: list[dict], capacity: dict[str, int], read: Gh, write:
         errors += 1  # parks NOTHING: a park this token cannot re-run would strand the PR
         print(f"::error::{repo}: the PR scheduler parks nothing -- {off}")
         summary.append(f"SCHEDULER OFF (parks nothing): {off}")
+        # a label made while the grant held stays: mark it, so admission parks nothing either
+        write("label", "edit", PARKED, "-R", repo, "--description", PARKED_OFF)
     elif capacity and not ensure_label(repo, write):
         errors += 1  # the review gate's admission can only park a labelled PR: until this lands it runs all
         print(f"::error::{repo}: could not create the `{PARKED}` label; admission parks nothing until it exists")

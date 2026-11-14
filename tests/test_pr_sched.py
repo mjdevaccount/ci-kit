@@ -343,7 +343,7 @@ def test_the_heads_own_landing_a_train_or_a_stale_head_does_not_page_must_not_fi
 
 # ── the review gate's admission CLI ───────────────────────────────────────────────────────────
 def _admit(monkeypatch: pytest.MonkeyPatch, tmp_path, prs: list[dict], *, edit_rc: int = 0, demand: bool = True,
-           argv: tuple[str, ...] = ()) -> dict[str, str]:
+           argv: tuple[str, ...] = (), label: str | None = "PR queue: parked") -> dict[str, str]:
     out = tmp_path / "out"
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))
 
@@ -352,6 +352,9 @@ def _admit(monkeypatch: pytest.MonkeyPatch, tmp_path, prs: list[dict], *, edit_r
             return subprocess.CompletedProcess(cmd, 0, json.dumps(prs), "")
         if cmd[:3] == ["gh", "pr", "edit"]:
             return subprocess.CompletedProcess(cmd, edit_rc, "", "no such label")
+        if cmd[:3] == ["gh", "label", "list"]:
+            got = [] if label is None else [{"name": pr_sched.PARKED, "description": label}]
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(got), "")
         raise subprocess.CalledProcessError(1, cmd)
     monkeypatch.setattr(pr_admit.subprocess, "run", run)
     monkeypatch.setattr(pr_admit, "head_demand", lambda *a: demand)
@@ -368,6 +371,13 @@ def test_admission_runs_when_it_cannot_label_or_cannot_look_or_was_parked_enough
     assert _admit(monkeypatch, tmp_path, [_pr(3073), _pr(3080)], edit_rc=1)["defer"] == "false"
     assert _admit(monkeypatch, tmp_path, [_pr(3073), _pr(3080)], argv=("--attempt", "4"))["defer"] == "false"
     assert _admit(monkeypatch, tmp_path, [_pr(3073), _pr(3080)], demand=False)["defer"] == "false"
+
+
+def test_admission_parks_nothing_while_the_scheduler_is_off_must_not_fire(monkeypatch, tmp_path) -> None:
+    # a label made while the push token could re-run, then the grant was lost (a rotated PAT)
+    off = _admit(monkeypatch, tmp_path, [_pr(3073), _pr(3080)], label=pr_sched.PARKED_OFF)
+    assert off["defer"] == "false" and "off" in off["why"]
+    assert _admit(monkeypatch, tmp_path, [_pr(3073), _pr(3080)], label=None)["defer"] == "false"
 
     def boom(*a, **k):
         raise subprocess.CalledProcessError(1, "gh")
@@ -454,6 +464,7 @@ def test_a_token_without_actions_write_parks_nothing_and_creates_no_label_must_f
     assert not any(w.startswith("label create") for w in gh.writes)       # admission cannot add it
     assert [w for w in gh.writes if "cancel" in w] == ["api -X POST repos/o/r/actions/runs/5/cancel"]
     assert labels == []
+    assert f"label edit {pr_sched.PARKED} -R o/r --description {pr_sched.PARKED_OFF}" in gh.writes
 
 
 def test_the_probe_with_the_grant_is_a_no_op_409_and_the_pass_parks_must_not_fire(labels) -> None:
