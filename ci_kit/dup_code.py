@@ -62,7 +62,7 @@ from ci_kit import discover, release_bin, site_lint
 
 GATE = "dup-code"
 # renovate: datasource=github-releases depName=kucherenko/jscpd
-JSCPD_VERSION = "5.4.2"
+JSCPD_VERSION = "5.4.3"
 #: sha256 of each release tarball, from the release's signed checksums.txt (2026-10-20). A bump
 #: moves the version AND every hash in one edit; a tarball that does not match is exit 2
 #: (ci_kit/release_bin.py, the fetch shared with ci-api-diff).
