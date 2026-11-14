@@ -358,11 +358,12 @@ jobs:
             --workflow "$wf" \
             || printf 'carried=false\nhash=\nwhy=carry check did not finish; full review\n' >> "$GITHUB_OUTPUT"
 
-      # THE PR SCHEDULER'S ADMISSION (v1.29.0, `queue-priority`; policy ci_kit/pr_queue.py, actor
-      # ci_kit/pr_sched.py). A full review needs the sealed pool, ONE runner. A PR numbered after
-      # the queue head is PARKED while the head needs that pool (a sealed job queued, a run still
-      # deciding, or parked itself); otherwise -- the head, a PR ahead of it, a head that needs
-      # nothing there -- it runs (work-conserving). Parked = this run ends red at `review deferred`
+      # THE PR SCHEDULER'S ADMISSION (v1.29.0, `queue-priority`; ci_kit/pr_admit.py, policy
+      # ci_kit/pr_queue.py, actor ci_kit/pr_sched.py). A full review needs the sealed pool, ONE
+      # runner. A PR numbered after the queue head is PARKED while the head needs that pool (a
+      # sealed job queued, or a review run still deciding); otherwise -- the head, a PR ahead of
+      # it, a head that needs nothing there -- it runs (work-conserving). Parked = this run ends
+      # red at `review deferred`
       # and the PR gets `queue:parked`; pr-autoupdate re-runs it when it is the head or the pool is
       # free. The review is never skipped: a parked PR cannot merge until it is reviewed. A failed
       # look RUNS the review (never parks blind).
@@ -377,7 +378,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           POOL: ${{ vars.CI_SEALED_RUNNER && 'home-sealed' || '' }}
         run: |
-          python3 -m ci_kit.pr_sched --repo "$GITHUB_REPOSITORY" --pr "$PR" --pool "$POOL" --pending \
+          python3 -m ci_kit.pr_admit --repo "$GITHUB_REPOSITORY" --pr "$PR" --pool "$POOL" --pending \
             --attempt "$GITHUB_RUN_ATTEMPT" \
             || printf 'defer=false\nwhy=admission crashed; reviewing\n' >> "$GITHUB_OUTPUT"
 
@@ -556,7 +557,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           POOL: ${{ vars.CI_SEALED_RUNNER && 'home-sealed' || '' }}
         run: |
-          python3 -m ci_kit.pr_sched --repo "$GITHUB_REPOSITORY" --pr "$PR" --pool "$POOL" \
+          python3 -m ci_kit.pr_admit --repo "$GITHUB_REPOSITORY" --pr "$PR" --pool "$POOL" \
             --attempt "$GITHUB_RUN_ATTEMPT" \
             || printf 'defer=false\nwhy=admission crashed; reviewing\n' >> "$GITHUB_OUTPUT"
 
@@ -785,10 +786,26 @@ jobs:
     timeout-minutes: 5
     permissions: {}
     steps:
+      # mode review: `model review` must run (and `defer` may skip); mode defer: `review deferred`
+      # must run (it is red); train / skip / finish: neither runs
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           jobs: ${{ toJSON(needs) }}
-          allowed-skips: ${{ needs.decide.outputs.mode == 'review' && 'defer' || 'review, defer' }}
+          allowed-skips: >-
+            ${{ needs.decide.outputs.mode == 'review' && 'defer'
+            || needs.decide.outputs.mode == 'defer' && 'review' || 'review, defer' }}
+      # A job's conclusion is not its verdict: a parked `model review` ends SUCCESS (its steps were
+      # skipped). Read the verdict itself -- in mode review only `pass` is green, whatever else
+      # the jobs above say; in mode defer nothing is.
+      - name: The review's own verdict
+        env:
+          MODE: ${{ needs.decide.outputs.mode }}
+          RESULT: ${{ needs.review.outputs.result }}
+        run: |
+          case "$MODE" in
+            review) [ "$RESULT" = pass ] || { echo "::error::model review result '${RESULT}' is not pass"; exit 1; } ;;
+            defer) echo "::error::review parked by the PR queue: not reviewed yet"; exit 1 ;;
+          esac
 
   record:
     # What a later run of this PR compares against to carry a verdict (ci_kit.review.carry).

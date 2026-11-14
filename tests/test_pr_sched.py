@@ -11,7 +11,7 @@ import subprocess
 
 import pytest
 
-from ci_kit import pr_heal, pr_queue, pr_sched, redclass
+from ci_kit import pr_admit, pr_heal, pr_queue, pr_sched, redclass
 
 NOW = 1_800_000_000.0
 SEALED = "home-sealed"
@@ -272,9 +272,42 @@ def test_a_stale_label_is_removed(labels) -> None:
     assert labels == [(3080, False)]
 
 
+def test_the_label_stays_while_a_run_at_its_head_is_active_must_not_fire(labels) -> None:
+    # that run may be the admission about to end parked: dropping the label now would strand it
+    run = _run(77, 3080, status="in_progress")
+    gh = Gh({f"repos/o/r/actions/runs?head_sha={3080:040d}": {"workflow_runs": [run]}})
+    _pass(gh, [_pr(3080, labels=(pr_sched.PARKED,))])
+    assert labels == []
+
+
+def test_an_updated_pr_loses_the_label_at_once(labels) -> None:
+    gh = Gh(_parked_routes(3080, deferred=True))
+    _pass(gh, [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))], updated=frozenset({3080}))
+    assert labels == [(3080, False)] and not any("rerun" in w for w in gh.writes)
+
+
+def test_a_non_head_parked_too_long_turns_the_run_red(labels) -> None:
+    routes = {**_pools(0, NOW - 600), **_parked_routes(3080, deferred=True)}
+    routes[f"repos/o/r/actions/runs?head_sha={3080:040d}"]["workflow_runs"][0]["updated_at"] = _iso(NOW - 3600)
+    errors, summary = _pass(Gh(routes), [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))])
+    assert errors == 1 and any(s.startswith("PARKED STARVED") for s in summary)
+    routes[f"repos/o/r/actions/runs?head_sha={3080:040d}"]["workflow_runs"][0]["updated_at"] = _iso(NOW - 600)
+    assert _pass(Gh(routes), [_pr(3073), _pr(3080, labels=(pr_sched.PARKED,))])[0] == 0
+
+
+def test_a_train_job_is_never_preempted(labels) -> None:
+    train = {**_pr(3090, armed=False), "headRefName": "train/1"}
+    routes = _pools(3090, NOW - 30)
+    routes["repos/o/r/actions/runs?status=in_progress"]["workflow_runs"][0]["head_branch"] = "train/1"
+    gh = Gh(routes)
+    _pass(gh, [_pr(3073), train])
+    assert not any("cancel" in w for w in gh.writes) and labels == []
+
+
 # ── out-of-queue merges ───────────────────────────────────────────────────────────────────────
-def _oq(merged: list[int], *, behind_by: int = 0, head: int = 3073) -> str:
-    gh = Gh({"repos/o/r/commits/sha1/pulls": [{"number": n, "merged_at": "x", "head": {"ref": f"b{n}"}} for n in merged],
+def _oq(merged: list[int], *, behind_by: int = 0, head: int = 3073, ref: str = "b", login: str = "agent") -> str:
+    gh = Gh({"repos/o/r/commits/sha1/pulls": [{"number": n, "merged_at": "x", "head": {"ref": f"{ref}{n}"},
+                                                "user": {"login": login}} for n in merged],
              "repos/o/r/compare/": {"behind_by": behind_by}})
     return pr_sched.out_of_queue("o/r", [_pr(head), _pr(3090)], "b" * 40, "sha1", gh.read)
 
@@ -283,8 +316,15 @@ def test_a_later_pr_merged_past_an_in_flight_head_pages_must_fire() -> None:
     assert "#3080" in _oq([3080])
 
 
-def test_the_heads_own_landing_or_a_stale_head_does_not_page_must_not_fire() -> None:
-    assert _oq([3072]) == ""             # it was the head (closed now, so the head moved on)
+def test_renovates_own_merge_pages_whatever_its_number_td3072_must_fire() -> None:
+    # td#3072 (Renovate, platformAutomerge off: never armed) landed past head #3073, 03:53Z 11-14
+    assert "#3072" in _oq([3072], ref="renovate/x-")
+    assert "#3072" in _oq([3072], login="renovate[bot]")
+
+
+def test_the_heads_own_landing_a_train_or_a_stale_head_does_not_page_must_not_fire() -> None:
+    assert _oq([3072]) == ""             # an armed lower PR was the head itself (closed now)
+    assert _oq([3080], ref="train/") == ""    # a train landing IS the queue
     assert _oq([3080], behind_by=3) == ""   # the head was not in flight against the old main
 
 
@@ -300,9 +340,9 @@ def _admit(monkeypatch: pytest.MonkeyPatch, tmp_path, prs: list[dict], *, edit_r
         if cmd[:3] == ["gh", "pr", "edit"]:
             return subprocess.CompletedProcess(cmd, edit_rc, "", "no such label")
         raise subprocess.CalledProcessError(1, cmd)
-    monkeypatch.setattr(pr_sched.subprocess, "run", run)
-    monkeypatch.setattr(pr_sched, "head_demand", lambda *a: demand)
-    pr_sched.admit_main(["--repo", "o/r", "--pr", "3080", "--pool", SEALED, *argv])
+    monkeypatch.setattr(pr_admit.subprocess, "run", run)
+    monkeypatch.setattr(pr_admit, "head_demand", lambda *a: demand)
+    pr_admit.admit_main(["--repo", "o/r", "--pr", "3080", "--pool", SEALED, *argv])
     return dict(line.split("=", 1) for line in out.read_text(encoding="utf-8").splitlines())
 
 
@@ -318,8 +358,8 @@ def test_admission_runs_when_it_cannot_label_or_cannot_look_or_was_parked_enough
 
     def boom(*a, **k):
         raise subprocess.CalledProcessError(1, "gh")
-    monkeypatch.setattr(pr_sched.subprocess, "run", boom)
-    pr_sched.admit_main(["--repo", "o/r", "--pr", "3080", "--pool", SEALED])
+    monkeypatch.setattr(pr_admit.subprocess, "run", boom)
+    pr_admit.admit_main(["--repo", "o/r", "--pr", "3080", "--pool", SEALED])
     assert (tmp_path / "out").read_text(encoding="utf-8").splitlines()[-3] == "defer=false"
 
 

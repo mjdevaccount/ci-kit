@@ -130,8 +130,9 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = (),
 # pools. It changes when a job runs and nothing else: every PR still passes every required check on
 # the exact head that merges -- a parked job is re-run, never skipped, and a parked check is red.
 #
-#   HEAD       the lowest-numbered same-repo, non-draft queue member: auto-merge armed, or opened by
-#              Renovate (it merges itself, so it competes for the same main). A train is never one.
+#   HEAD       the lowest-numbered same-repo, non-draft queue member: auto-merge ARMED (`member`). A
+#              train is never one. Renovate merges itself (platformAutomerge off), so it is no
+#              member; its landing past an in-flight head is paged instead (pr_sched.out_of_queue).
 #   DEMAND     the head has a job QUEUED on a scarce pool (`capacity`, from the caller's config).
 #   WORK-CONSERVING: a non-head job is parked only while the head has demand on ITS pool; with none
 #              it runs, so an idle pool never waits for the head.
@@ -148,11 +149,13 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = (),
 def member(p: dict) -> bool:
     """A PR the queue orders: same-repo, not a draft, not a train, and ARMED. Pure.
 
-    Renovate's PRs are members exactly when they will merge themselves: Renovate's default
-    `platformAutomerge` arms GitHub auto-merge, so they carry autoMergeRequest like anyone's. An
-    UNARMED Renovate PR (a major bump left for a human) is not one: counted by author or branch,
-    one left open for a week would be the head that whole week, and the PR the operator is waiting
-    on would never get the head's priority."""
+    Renovate's PRs are members only when armed. ci-kit's preset sets `platformAutomerge: false`:
+    Renovate merges ITSELF once every check passes, so its PRs are never armed -- and the list
+    gives no way to tell a self-merging one from a major bump left for a human. Counted by author
+    or branch, that bump left open a week would be the head all week, and the PR the operator is
+    waiting on would never get the head's priority. So Renovate's merges are watched, not ordered:
+    one landing past an in-flight head is paged (pr_sched.out_of_queue). Arm them (Renovate
+    `platformAutomerge: true`) and they join the queue with no change here."""
     branch = str(p.get("headRefName") or "")
     return (not p.get("isCrossRepository") and not p.get("isDraft") and not branch.startswith("train/")
             and bool(p.get("autoMergeRequest")))

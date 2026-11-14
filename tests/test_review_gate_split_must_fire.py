@@ -18,12 +18,14 @@ import os
 import pathlib
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 import yaml
 
 WF = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "review-gate.yml"
-ALLOWED = "${{ needs.decide.outputs.mode == 'review' && 'defer' || 'review, defer' }}"
+ALLOWED = ("${{ needs.decide.outputs.mode == 'review' && 'defer' "
+           "|| needs.decide.outputs.mode == 'defer' && 'review' || 'review, defer' }}")
 NOT_PARKED = "steps.admit.outputs.defer != 'true'"
 
 
@@ -46,11 +48,18 @@ def faults(wf: dict) -> list[str]:
     if "!cancelled()" not in str(v.get("if")):
         out.append("verdict can be skipped")
     green = next((s for s in v["steps"] if "re-actors/alls-green" in str(s.get("uses"))), None)
-    if green is None or str(green["with"].get("allowed-skips")) != ALLOWED:
+    if green is None or " ".join(str(green["with"].get("allowed-skips")).split()) != ALLOWED:
         out.append("verdict allows skips beyond the mode's")
+    own = next((s for s in v["steps"] if "needs.review.outputs.result" in str((s.get("env") or {}).get("RESULT"))), None)
+    run = str((own or {}).get("run", ""))
+    if own is None or own.get("if") or own.get("continue-on-error") or '[ "$RESULT" = pass ]' not in run \
+            or "defer) " not in run or run.count("exit 1") < 2:
+        out.append("verdict does not read the review's own result")
     d = jobs["defer"]
     if "needs.decide.outputs.mode == 'defer'" not in str(d.get("if")) or "needs.review.outputs.parked == 'true'" not in str(d.get("if")):
         out.append("review deferred does not fire on both parks")
+    if "!cancelled()" not in str(d.get("if")):
+        out.append("review deferred is skipped with the review it stands in for (implicit success())")
     if "exit 1" not in str(d["steps"][-1].get("run")) or d["steps"][-1].get("continue-on-error") or d.get("continue-on-error"):
         out.append("review deferred is not red")
     started = False
@@ -85,6 +94,10 @@ def test_each_fault_fires() -> None:
     assert _mut(lambda j, w: j["defer"].update({"if": "needs.decide.outputs.mode == 'defer'"}))
     assert _mut(lambda j, w: j["defer"]["steps"][-1].update({"run": "echo parked"}))
     assert _mut(lambda j, w: j["defer"].update({"continue-on-error": True}))
+    assert _mut(lambda j, w: j["defer"].update(
+        {"if": "needs.decide.outputs.mode == 'defer' || needs.review.outputs.parked == 'true'"}))
+    assert _mut(lambda j, w: j["verdict"].update({"steps": j["verdict"]["steps"][:1]}))
+    assert _mut(lambda j, w: j["verdict"]["steps"][1].update({"run": "true"}))
     assert _mut(lambda j, w: _step(j["review"], "review").update({"if": "always()"}))
     assert _mut(lambda j, w: _step(j["review"], "Gate").update({"if": "!cancelled()"}))
     assert _mut(lambda j, w: (w.get("on") or w[True])["workflow_call"]["outputs"]["result"].update(
@@ -113,14 +126,14 @@ BASH = shutil.which("bash")
 
 def _mode(**env: str) -> dict[str, str]:
     step = _step(_wf()["jobs"]["decide"], "mode")
-    out = pathlib.Path(os.environ.get("TMP", "/tmp")) / f"mode-{os.getpid()}.out"
-    out.write_text("", encoding="utf-8")
-    full = {**os.environ, "GITHUB_OUTPUT": str(out), "GITHUB_STEP_SUMMARY": os.devnull,
-            **{k: "" for k in ("IS_TRAIN", "REQUIRED", "BLIND", "CARRIED", "DEFER")}, **env}
-    subprocess.run([BASH, "-e", "-c", step["run"]], env=full, check=True, capture_output=True, text=True)
-    got = dict(line.split("=", 1) for line in out.read_text(encoding="utf-8").splitlines() if "=" in line)
-    out.unlink()
-    return got
+    with tempfile.TemporaryDirectory() as d:
+        out = pathlib.Path(d) / "output"
+        out.write_text("", encoding="utf-8")
+        # a real file, never os.devnull: bash on Windows writes `nul` as a file in the cwd
+        full = {**os.environ, "GITHUB_OUTPUT": str(out), "GITHUB_STEP_SUMMARY": str(pathlib.Path(d) / "summary"),
+                **{k: "" for k in ("IS_TRAIN", "REQUIRED", "BLIND", "CARRIED", "DEFER")}, **env}
+        subprocess.run([BASH, "-e", "-c", step["run"]], env=full, check=True, capture_output=True, text=True)
+        return dict(line.split("=", 1) for line in out.read_text(encoding="utf-8").splitlines() if "=" in line)
 
 
 @pytest.mark.skipif(BASH is None, reason="no bash")

@@ -15,8 +15,8 @@ measured thresholds are there). This module is its two actors:
         11-14, invalidated head #3073);
       - names the head, its wait per pool, every parking and re-run in the summary, and returns an
         error for a STALLED head so the run goes red (mcp ci-schedule-audit reads that streak).
-  * `admit_main`, the review gate's `pre` job and the first step of its sealed job: parks a
-    non-head PR's model review while the head needs the sealed pool (pr_queue.admit).
+  * the review gate's admission (`python -m ci_kit.pr_admit`, its own module): parks a non-head
+    PR's model review while the head needs the sealed pool (pr_queue.admit).
 
 PARKED IS RED, AND LABELLED. A parked review fails `review deferred`; a preempted run is
 cancelled. Both block the merge exactly as a missing check does -- nothing is waived -- and both
@@ -30,12 +30,10 @@ pr_heal's reruns; a refusal is an ERROR naming the grant, never a silent skip.
 """
 from __future__ import annotations
 
-import argparse
+import dataclasses
 import datetime as dt
 import json
-import os
 import subprocess
-import sys
 from collections.abc import Callable
 
 from ci_kit import pr_queue
@@ -48,6 +46,8 @@ DEFERRED_JOB = "review deferred"   # the review gate's job that fails when it pa
 RECORD_JOB = "record verdict"      # the review gate's job that writes the verdict a carry reads
 PRE_JOB = "review"                 # the review gate's first job (the name mcp review_gate_auth reads)
 MAX_ATTEMPT = 4                    # a run re-run this often is never parked again (no starving)
+
+RENOVATE = ("renovate", "renovate[bot]", "app/renovate")  # the bot's logins: it merges ITSELF (platformAutomerge off)
 
 Gh = Callable[..., subprocess.CompletedProcess]
 
@@ -98,10 +98,10 @@ def pr_of(run: dict, by_branch: dict[str, int]) -> int:
     """The same-repo PR a run belongs to; 0 for a push/schedule run or a fork."""
     if run.get("event") not in ("pull_request", "pull_request_target"):
         return 0
-    for p in run.get("pull_requests") or []:
-        if p.get("number"):
-            return int(p["number"])
-    return by_branch.get(str(run.get("head_branch") or ""), 0)
+    mine = by_branch.get(str(run.get("head_branch") or ""), 0)
+    if mine:  # the open PR whose head IS this branch -- never a stacked PR that merely lists it
+        return mine
+    return next((int(p["number"]) for p in run.get("pull_requests") or [] if p.get("number")), 0)
 
 
 def pool_jobs(repo: str, read: Gh, capacity: dict[str, int], by_branch: dict[str, int]) -> list[pr_queue.Job]:
@@ -190,18 +190,24 @@ def rerun(repo: str, r: dict, write: Gh) -> str:
 
 
 def out_of_queue(repo: str, prs: list[dict], before: str, sha: str, read: Gh) -> str:
-    """'' or the page body: the push `before..sha` merged a PR numbered AFTER the queue head while
-    the head was in flight (current with `before`, no failing check) -- only an in-flight head was
-    hurt. A lower-numbered merge was the head itself (it is closed now, so `head` is the next one)."""
+    """'' or the page body: the push `before..sha` merged a PR OUTSIDE the queue while the head was
+    in flight (current with `before`, no failing check) -- only an in-flight head was hurt. Outside
+    = numbered after the head (the head was passed over), or Renovate's own merge whatever its
+    number: with `platformAutomerge: false` (ci-kit's preset) it is never armed, never a member,
+    and lands the moment its checks pass (td#3072 past head #3073, 03:53Z 11-14). A lower-numbered
+    ARMED merge was the head itself (closed now, so `head` is the next one)."""
     if not before or not sha or set(before) == {"0"}:
         return ""
     merged = _json(read, "api", f"repos/{repo}/commits/{sha}/pulls")
     # a train landing IS the queue (ci_kit/merge_train); anything else merged past an in-flight head is not
-    nums = [int(m["number"]) for m in merged or [] if isinstance(m, dict) and m.get("merged_at")
-            and not str((m.get("head") or {}).get("ref") or "").startswith("train/")]
     h = pr_queue.head(prs)
-    nums = [n for n in nums if h is not None and n > int(h["number"])]
-    if not nums or h is None:
+    if h is None:
+        return ""
+    nums = [int(m["number"]) for m in merged or [] if isinstance(m, dict) and m.get("merged_at")
+            and not str((m.get("head") or {}).get("ref") or "").startswith("train/")
+            and (int(m["number"]) > int(h["number"]) or str((m.get("head") or {}).get("ref") or "").startswith("renovate/")
+                 or str((m.get("user") or {}).get("login") or "") in RENOVATE)]
+    if not nums:
         return ""
     if pr_queue.check_state(h.get("statusCheckRollup")) == "failing":
         return ""
@@ -232,7 +238,9 @@ def pass_(repo: str, prs: list[dict], capacity: dict[str, int], read: Gh, write:
         summary.append(f"OUT-OF-QUEUE MERGE: {oq}; page " + page(f"{repo.rsplit('/', 1)[-1]}: out-of-queue merge", oq,
                                                                  str(h.get("url") or "") if h else ""))
         print(f"::warning::{oq}")
-    jobs = pool_jobs(repo, read, capacity, by_branch)
+    trains = {int(p["number"]) for p in same if str(p.get("headRefName") or "").startswith("train/")}
+    # a merge train IS the queue (ci_kit/merge_train): its jobs count as load, never as preemptible
+    jobs = [dataclasses.replace(j, pr=0) if j.pr in trains else j for j in pool_jobs(repo, read, capacity, by_branch)]
     s = pr_queue.schedule(hn, jobs, capacity, now, preempt_after_s, stall_s, MAX_ATTEMPT)
     load = ", ".join(f"{pool} {sum(j.status == 'in_progress' for j in jobs if j.pool == pool)}/{cap} running "
                      f"{sum(j.status == 'queued' for j in jobs if j.pool == pool)} queued" for pool, cap in sorted(capacity.items()))
@@ -245,8 +253,20 @@ def pass_(repo: str, prs: list[dict], capacity: dict[str, int], read: Gh, write:
         summary.append(f"HEAD STARVED: {line}")
     errors += _park(repo, s.preempt, write, summary)
     room = not any(j.status == "queued" for j in jobs) and not s.demand
-    errors += _refill(repo, same, hn, {j.pr for j, _ in s.preempt} | set(updated), room, read, write, summary, behind)
+    errors += _refill(repo, same, hn, Refill({j.pr for j, _ in s.preempt}, set(updated), room, now, 2 * stall_s),
+                      read, write, summary, behind)
     return errors
+
+
+@dataclasses.dataclass
+class Refill:
+    """What `_refill` needs from the pass: who was just parked or updated, whether the pools have
+    room, and how long a non-head may sit parked before the run says so."""
+    parked: set[int]
+    updated: set[int]
+    room: bool
+    now: float
+    starve_s: float
 
 
 def _park(repo: str, preempt: list[tuple[pr_queue.Job, str]], write: Gh, summary: list[str]) -> int:
@@ -272,16 +292,23 @@ def _park(repo: str, preempt: list[tuple[pr_queue.Job, str]], write: Gh, summary
     return errors
 
 
-def _refill(repo: str, prs: list[dict], hn: int | None, just: set[int], room: bool, read: Gh, write: Gh,
+def _refill(repo: str, prs: list[dict], hn: int | None, r: Refill, read: Gh, write: Gh,
             summary: list[str], behind: Callable[[dict], bool]) -> int:
     """Re-run parked work: the head's now, one non-head's when the pools have room. Never strands:
-    a PR with the label and nothing parked left loses the label. Returns the errors."""
+    a PR with the label and nothing parked left loses the label -- but not while a run is still
+    active at its head (that run may be the admission about to end parked, found next pass). A
+    non-head parked longer than `starve_s` is an ERROR: the run goes red, which mcp's
+    ci-schedule-audit reads. Returns the errors."""
     errors, refilled = 0, False
     for p in sorted((p for p in prs if any(lb.get("name") == PARKED for lb in p.get("labels") or [])),
                     key=pr_queue.landing_order):
         n = int(p["number"])
-        if n in just:
-            continue  # parked this pass, or updated (its push is the fresh run)
+        if n in r.parked:
+            continue  # parked this pass
+        if n in r.updated:  # the update's push is its fresh run: nothing at the new head is parked
+            _label(repo, n, write, False)
+            summary.append(f"#{n}: updated this run; `{PARKED}` removed")
+            continue
         runs, active = parked_runs(repo, p, read)
         if not runs:
             if not active:
@@ -292,8 +319,14 @@ def _refill(repo: str, prs: list[dict], hn: int | None, just: set[int], room: bo
         if is_head and p.get("autoMergeRequest") and behind(p):
             summary.append(f"#{n}: head, parked and behind main -> the queue's update is its fresh run")
             continue
-        if not is_head and (refilled or not room):
-            summary.append(f"#{n}: parked ({len(runs)} run(s)), waits for a free pool")
+        if not is_head and (refilled or not r.room):
+            since = min((_ts(x.get("updated_at")) or r.now) for x in runs)
+            line = f"#{n}: parked ({len(runs)} run(s)) {(r.now - since) / 60:.0f} min, waits for a free pool"
+            if r.now - since > r.starve_s:
+                errors += 1
+                print(f"::warning::parked-pr-starved {line}")
+                line = "PARKED STARVED: " + line
+            summary.append(line)
             continue
         # no budget needed here: admission and preemption stop parking a run at its MAX_ATTEMPT-th
         # attempt, so a re-run is the last one that can be parked
@@ -308,68 +341,3 @@ def _refill(repo: str, prs: list[dict], hn: int | None, just: set[int], room: bo
         summary.append(f"#{n}: parked run(s) {', '.join(str(r['id']) for r in runs)} RE-RUN "
                        + ("(queue head)" if is_head else "(pool free, next in landing order)"))
     return errors
-
-
-# ── the review gate's admission (no PAT: the job's GITHUB_TOKEN, actions: read) ─────────────────
-def head_demand(repo: str, h: dict, pool: str, read: Gh, pending: bool) -> bool:
-    """The head has a job queued on `pool`, is parked, or (`pending`) has a review gate run whose
-    `pre` job has not yet decided whether it needs the sealed pool."""
-    if any(lb.get("name") == PARKED for lb in h.get("labels") or []):
-        return True
-    for run in active_runs(repo, read, str(h.get("headRefName") or "")):
-        if run.get("head_sha") != h.get("headRefOid"):
-            continue
-        for j in (jobs := run_jobs(repo, int(run["id"]), read)):
-            if pool in (j.get("labels") or []) and j.get("status") in ("queued", "waiting", "pending"):
-                return True
-        pre = next((j for j in jobs if _tail(j.get("name")) == PRE_JOB), None)
-        if pending and pre is not None and pre.get("status") != "completed":
-            return True
-    return False
-
-
-def admit_main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="python -m ci_kit.pr_sched", description="park a non-head PR's job on a scarce pool")
-    ap.add_argument("--repo", required=True)
-    ap.add_argument("--pr", type=int, required=True)
-    ap.add_argument("--pool", required=True, help="the scarce pool label this job would take ('' = not scarce: admit)")
-    ap.add_argument("--pending", action="store_true", help="a head still deciding counts as demand (the pre job)")
-    ap.add_argument("--attempt", type=int, default=1, help="this run's attempt: from MAX_ATTEMPT on it is never parked")
-    args = ap.parse_args(argv)
-
-    def read(*a: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["gh", *a], check=True, capture_output=True, text=True)
-
-    defer, why, hn = False, "pool is not scarce", ""
-    try:
-        if args.attempt >= MAX_ATTEMPT:
-            why = f"attempt {args.attempt}: parked often enough, runs now (no starving)"
-        elif args.pool:
-            prs = json.loads(read("pr", "list", "-R", args.repo, "--state", "open", "--limit", "200", "--json",
-                                  "number,isDraft,isCrossRepository,headRefName,headRefOid,autoMergeRequest,labels").stdout)
-            me = next((p for p in prs if int(p["number"]) == args.pr), {"number": args.pr})
-            h = pr_queue.head(prs)
-            hn = str(h["number"]) if h else ""
-            demand = bool(h) and int(h["number"]) < args.pr and head_demand(args.repo, h, args.pool, read, args.pending)
-            defer, why = pr_queue.admit(me, h, demand)
-            if defer and not any(lb.get("name") == PARKED for lb in me.get("labels") or []):
-                # the label is how pr-autoupdate FINDS parked work: no label, no park (never strand)
-                r = subprocess.run(["gh", "pr", "edit", str(args.pr), "-R", args.repo, "--add-label", PARKED],
-                                   capture_output=True, text=True)
-                if r.returncode:
-                    defer, why = False, f"could not add `{PARKED}` ({r.stderr.strip()[:200]}); running"
-                    print(f"::warning::{why}")
-    except (subprocess.CalledProcessError, ValueError, KeyError, OSError) as e:
-        # could not look: RUN the job (the check it guards still runs in full) -- never park blind
-        defer, why = False, f"admission could not look ({e}); running"
-        print(f"::warning::{why}")
-    why = " ".join(why.split())  # one line: it is a GITHUB_OUTPUT value
-    print(f"defer={str(defer).lower()} head={hn}: {why}")
-    if os.environ.get("GITHUB_OUTPUT"):
-        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-            fh.write(f"defer={str(defer).lower()}\nhead={hn}\nwhy={why}\n")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(admit_main())
