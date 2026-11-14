@@ -197,8 +197,10 @@ def test_the_head_the_queue_replaced_is_cancelled_strict_or_not() -> None:
 
 
 def _wire(monkeypatch: pytest.MonkeyPatch, prs: list[dict], seen: list) -> None:
-    nodes = [{**p, "labels": {"nodes": p["labels"]}, "title": "t", "url": "u", "baseRefName": "main",
-              "isDraft": False, "mergeable": "MERGEABLE", "statusCheckRollup": []} for p in prs]
+    nodes = [{**p, "labels": {"nodes": p["labels"]}, "title": "t", "url": "u", "baseRefName": "trunk",
+              "isDraft": False, "mergeable": "MERGEABLE",
+              "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {
+                  "nodes": p.get("statusCheckRollup") or []}}}}]}} for p in prs]
     monkeypatch.setattr(upd, "_gh_read", lambda *a: _Done(0, json.dumps({
         "data": {"repository": {"pullRequests": {"nodes": nodes}}}})) if a[:2] == ("api", "graphql")
         else _Done(0, json.dumps({"default_branch": "trunk"})))
@@ -244,3 +246,57 @@ def test_a_cancel_error_turns_the_pass_red(monkeypatch: pytest.MonkeyPatch) -> N
     _wire(monkeypatch, [pr(1)], seen)
     monkeypatch.setattr(dr.Canceller, "sweep", lambda self, prs, base, train: setattr(self, "errors", 1))
     assert upd.run("o/r", [], [], Options(cancel_doomed=True)) == 1
+
+
+# ---- round 2: a BEHIND PR whose running checks were cancelled is UPDATED this pass, never held
+
+
+def _running(p: dict) -> dict:
+    return {**p, "statusCheckRollup": [{"__typename": "CheckRun", "name": "unit", "status": "IN_PROGRESS",
+                                        "conclusion": None}]}
+
+
+def test_the_plan_takes_a_restarted_behind_pr_and_still_holds_the_rest() -> None:
+    from ci_kit import pr_queue
+    a, b = _running(pr(1)), _running(pr(2))
+    q = pr_queue.plan([a, b], 1, restarted=frozenset({1}))
+    assert [p["number"] for p in q.update] == [1]
+    assert any(p["number"] == 2 and "checks still running" in why for p, why in q.held)
+    q = pr_queue.plan([a, b], 1)
+    assert q.update == []
+
+
+def test_run_updates_the_pr_whose_running_checks_it_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list = []
+    _wire(monkeypatch, [_running(pr(1))], seen)
+    monkeypatch.setattr(dr.Canceller, "sweep", DR_SWEEP)
+    monkeypatch.setattr(dr.Canceller, "superseded", DR_SUPERSEDED)
+    calls: list[tuple] = []
+    monkeypatch.setattr(upd, "_gh", fake_gh(calls, runs=[run(11)]))
+    summary: list[str] = []
+    assert upd.run("o/r", summary, [], Options(cancel_doomed=True, max_in_flight=1)) == 0
+    assert cancelled(calls) == ["11"]
+    assert ("update", 1) in seen, summary
+    # ...and without the cancel (a merge train repo) it is held for its running checks, as before
+    seen.clear()
+    calls.clear()
+    monkeypatch.setattr(upd, "_gh", fake_gh(calls, runs=[run(11)], workflows=(0, [{"name": "merge-train", "path": "x"}])))
+    s2: list[str] = []
+    assert upd.run("o/r", s2, [], Options(cancel_doomed=True, max_in_flight=1)) == 0
+    assert cancelled(calls) == [] and ("update", 1) not in seen, (seen, s2)
+
+
+def test_a_stacked_pr_is_judged_against_its_own_base_elsewhere() -> None:
+    calls: list[tuple] = []
+    assert sweep(fake_gh(calls, runs=[run(11)]), [pr(1, baseRefName="feature")]) == 0
+    assert calls == []
+
+
+def test_an_unreadable_workflow_list_says_the_behind_rule_was_skipped() -> None:
+    summary: list[str] = []
+    assert sweep(fake_gh([], runs=[run(11)], workflows=(1, [])), [pr(1)], summary) == 0
+    assert any("BEHIND rule skipped" in s for s in summary)
+
+
+DR_SWEEP = dr.Canceller.sweep
+DR_SUPERSEDED = dr.Canceller.superseded

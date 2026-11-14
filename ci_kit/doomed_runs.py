@@ -61,10 +61,6 @@ ACTIONS_GRANT = "Actions: Read and write"
 TRAIN_MARK = "merge-train"
 
 
-class NoGrant(Exception):
-    """The push token may not cancel runs in this repo (403, resource not accessible)."""
-
-
 def _json(r: subprocess.CompletedProcess, default: object) -> object:
     if r.returncode:
         return None
@@ -93,16 +89,18 @@ def strict(repo: str, base: str, gh: Gh) -> bool | None:
     return False if classic is False and isinstance(rules, list) else None
 
 
-def has_train(repo: str, gh: Gh) -> bool:
-    """Does a merge train run here? Unreadable = yes (the BEHIND rule then never fires)."""
+def has_train(repo: str, gh: Gh, summary: list[str] | None = None) -> bool:
+    """Does a merge train run here? Unreadable = yes (the BEHIND rule then never fires, said)."""
     got = _json(gh("api", f"repos/{repo}/actions/workflows?per_page=100", check=False), {})
     if not isinstance(got, dict):
+        if summary is not None:
+            summary.append("doomed runs: BEHIND rule skipped -- could not list the workflows to rule out a merge train")
         return True
     return any(TRAIN_MARK in str(w.get("name") or "").lower() or TRAIN_MARK in str(w.get("path") or "").lower()
                for w in got.get("workflows") or [])
 
 
-def doomed(prs: list[dict], behind: bool) -> list[tuple[dict, str]]:
+def doomed(prs: list[dict], behind: bool, base: str | None = None) -> list[tuple[dict, str]]:
     """(PR, why) for each armed PR whose current head cannot merge on a strict base: DIRTY always,
     BEHIND only when `behind` (no merge train reads it). Pure."""
     states = {"DIRTY", "BEHIND"} if behind else {"DIRTY"}
@@ -111,6 +109,7 @@ def doomed(prs: list[dict], behind: bool) -> list[tuple[dict, str]]:
         state = str(p.get("mergeStateStatus") or "").upper()
         labels = {lb.get("name") for lb in p.get("labels") or []}
         if (state not in states or not p.get("autoMergeRequest") or p.get("isCrossRepository")
+                or (base and p.get("baseRefName") and p.get("baseRefName") != base)  # stacked: judged elsewhere
                 or not p.get("headRefOid")
                 or str(p.get("headRefName") or "").startswith(TRAIN_PREFIX) or labels & {RIDING, PARKED}):
             continue
@@ -142,22 +141,27 @@ class Canceller:
         self.repo, self.review, self.gh, self.summary = repo, review_workflow, gh, summary
         self.off = ""
         self.errors = 0
+        self.restarted: set[int] = set()  # BEHIND PRs whose running checks the sweep cancelled
+        self.done: set[int] = set()  # run ids cancelled this pass: the replaced-head cancel never repeats one
 
     def _error(self, line: str) -> None:
         self.errors += 1
         self.summary.append(f"doomed runs: {line}")
         print(f"::error::doomed runs: {line}")
 
-    def cancel_at(self, n: int, sha: str, why: str) -> None:
+    def cancel_at(self, n: int, sha: str, why: str) -> bool:
+        """True when at least one run at `sha` was cancelled."""
         if self.off:
-            return
+            return False
         r = self.gh("api", f"repos/{self.repo}/actions/runs?head_sha={sha}&event={EVENT}&per_page=100", check=False)
         got = _json(r, {})
         if not isinstance(got, dict):
             self._error(f"{self.repo}#{n}: could not list the runs at {sha[:12]} "
                         f"({(r.stderr or '').strip()[:200]}); none cancelled")
-            return
-        for run in cancellable(got.get("workflow_runs") or [], sha, n, self.review):
+            return False
+        hit = False
+        for run in [r for r in cancellable(got.get("workflow_runs") or [], sha, n, self.review)
+                    if r.get("id") not in self.done]:
             c = self.gh("api", "-X", "POST", f"repos/{self.repo}/actions/runs/{run['id']}/cancel", check=False)
             wf, err = run.get("name") or run.get("path") or "?", (c.stderr or "").strip()[:200]
             if c.returncode and _refused(err):
@@ -165,24 +169,27 @@ class Canceller:
                 self.summary.append(f"doomed runs: OFF for this pass -- cancel refused ({err}); the push token "
                                     f"needs {ACTIONS_GRANT}")
                 print(f"::warning::doomed runs: cancel refused; the push token needs {ACTIONS_GRANT}")
-                return
+                return hit
             if c.returncode and "409" not in err:
                 self._error(f"{self.repo}#{n}: cancel of run {run['id']} ({wf}) REFUSED ({err})")
                 continue
             done = " (had already finished)" if c.returncode else ""
+            hit = True
+            self.done.add(run.get("id"))
             self.summary.append(f"doomed runs: {self.repo}#{n}: cancelled run {run['id']} ({wf}) at {sha[:12]}"
                                 f"{done} -- {why}")
+        return hit
 
     def _behind(self, base: str, sha: str) -> bool | None:
-        got = _json(self.gh("api", f"repos/{self.repo}/compare/{base}...{sha}", check=False), {})
+        got = _json(self.gh("api", f"repos/{self.repo}/compare/{base}...{sha}?per_page=1", check=False), {})
         return int(got.get("behind_by") or 0) > 0 if isinstance(got, dict) else None
 
     def sweep(self, prs: list[dict], base: str, train: bool) -> None:
         """The DIRTY / BEHIND rule over every open PR."""
-        found = doomed(prs, behind=True)
+        found = doomed(prs, behind=True, base=base)
         if any(str(p.get("mergeStateStatus") or "").upper() == "BEHIND" for p, _ in found) and (
-                train or has_train(self.repo, self.gh)):
-            found = doomed(prs, behind=False)  # a merge train reads BEHIND heads' checks
+                train or has_train(self.repo, self.gh, self.summary)):
+            found = doomed(prs, behind=False, base=base)  # a merge train reads BEHIND heads' checks
         if not found:
             return
         is_strict = strict(self.repo, base, self.gh)
@@ -195,6 +202,8 @@ class Canceller:
             return
         for p, why in found:
             n, sha = int(p["number"]), str(p["headRefOid"])
+            if self.off:
+                break
             if str(p.get("mergeStateStatus") or "").upper() == "BEHIND":
                 behind = self._behind(base, sha)
                 if behind is None:
@@ -204,7 +213,8 @@ class Canceller:
                     self.summary.append(f"doomed runs: {self.repo}#{n}: GitHub said BEHIND but {sha[:12]} already "
                                         f"contains {base}; nothing cancelled")
                     continue
-            self.cancel_at(n, sha, why)
+            if self.cancel_at(n, sha, why) and str(p.get("mergeStateStatus") or "").upper() == "BEHIND":
+                self.restarted.add(n)
 
     def superseded(self, p: dict) -> None:
         """The queue just updated this PR: its old head is no PR's head any more."""

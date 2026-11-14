@@ -216,7 +216,7 @@ def add_label(repo: str, n: int, label: str, color: str = LABEL_COLOR,
 
 
 def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Options,
-                machinery: frozenset[int] = frozenset()) -> pr_queue.Plan:
+                machinery: frozenset[int] = frozenset(), restarted: frozenset[int] = frozenset()) -> pr_queue.Plan:
     """pr_queue's plan with the MERGE TRAIN's PRs taken out (ci_kit/merge_train). A train PR is
     never updated (a merge commit from main would break its one-commit-per-PR chain; a stale train
     is recomposed instead), a PR riding one is left alone, and while a train is open nothing else is
@@ -234,7 +234,7 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
     if riding:
         summary.append(f"riding a merge train, not updated: {', '.join('#' + str(n) for n in sorted(riding))}")
     q = pr_queue.plan([p for p in armed if p not in trains and p["number"] not in riding],
-                      opts.max_in_flight, opts.required, machinery)
+                      opts.max_in_flight, opts.required, machinery, restarted)
     if trains:
         held = [p for p in q.update if (p.get("mergeStateStatus") or "").upper() != "DIRTY"
                 and not any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
@@ -271,12 +271,20 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
                          stale_s=opts.head_stall_min * 120, required=opts.required)
         raise
     machinery = pr_heal.machinery(heal)
+    default = _lazy_default(repo, base)
+    cancel = doomed_runs.Canceller(repo, opts.review_workflow, _gh, summary) if opts.cancel_doomed else None
+    if cancel and doomed_runs.doomed(prs, behind=True):
+        # BEFORE the plan: a head that cannot merge and whose result nothing reads. A BEHIND PR whose
+        # running checks it cancels is updated THIS pass (`restarted`), never held for a completion
+        # that will not come (session review, round 2: a caller skipping cancelled runs never woke)
+        cancel.sweep(prs, default(), bool(opts.train_workflow))
     # ONE head for the hold, the updater and the scheduler: the lowest armed PR that can land
     skip = pr_queue.blocked(prs, opts.required, machinery | parked, base)
     if opts.hold:
         errors += pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of, skip,
                                base=base, stale_s=opts.head_stall_min * 120, required=opts.required)
-    q = _train_plan(prs, armed, summary, opts, machinery | parked)
+    q = _train_plan(prs, armed, summary, opts, machinery | parked,
+                    frozenset(cancel.restarted) if cancel else frozenset())
     head = _head_first(repo, prs, q, opts, summary, skip)
     if opts.max_in_flight > 0:
         summary.append(f"queue: {len(q.in_flight)}/{opts.max_in_flight} in flight "
@@ -284,11 +292,6 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options) -> int:
                        f"{len(q.held)} held")
         summary += [f"#{p['number']}: in flight against current main" for p in q.in_flight]
         summary += [f"#{p['number']}: held, {why}" for p, why in q.held]
-    default = _lazy_default(repo, base)
-    cancel = doomed_runs.Canceller(repo, opts.review_workflow, _gh, summary) if opts.cancel_doomed else None
-    if cancel and doomed_runs.doomed(prs, behind=True):
-        # before any update fires: a head that cannot merge and whose result nothing reads
-        cancel.sweep(prs, default(), bool(opts.train_workflow))
     attempted, updated, err = _drive(repo, q, head, opts, relock, summary, cancel)
     errors += err + (cancel.errors if cancel else 0)
     errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, pr_heal.write, summary)
