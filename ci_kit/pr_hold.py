@@ -38,8 +38,8 @@ merge GitHub refuses for a reason no check shows): with the hold on, no other PR
 main to shake it loose, so the hold must say so itself.
 
 KEEP `queue/position` OUT of the merge train's `required-checks` (and pr-autoupdate's): a member
-waiting its turn reads pending, so a train would never collect it. A train's own PR gets success on
-the first pass after it opens (its checks completing trigger one). The PR list is GraphQL's first
+waiting its turn reads pending, so a train would never collect it. A train's own PR gets success the
+moment merge-train opens it (merge_train.phases.queue_position); every pass re-posts it. The PR list is GraphQL's first
 100 open PRs, oldest first: the head is always among them; a PR past 100 has no status, so it cannot
 merge until the backlog shrinks -- held, never let through.
 

@@ -209,6 +209,9 @@ def test_compose_opens_one_verified_train(world: tuple[Repo, FakeGH]) -> None:
     assert train["headRefName"].startswith("train/") and train["title"] == "merge train: #1 #2 #3"
     assert [p["labels"] for n, p in fake.prs.items() if n <= 3] == [{RIDING}] * 3 and RIDING not in fake.prs[4]["labels"]
     assert not fake.wrote("merge")                                       # NOT armed: the pass lands it itself
+    # the queue hold's success is on the train's head at open (td#3085 review): a green train never waits a pass
+    posted = [c for c in fake.calls if c[:3] == ("api", "-X", "POST") and c[3] == f"repos/o/r/statuses/{train['headRefOid']}"]
+    assert len(posted) == 1 and "context=queue/position" in posted[0] and "state=success" in posted[0]
     assert f"<!-- merge-train:composed run={train['headRefName'][6:]} branch={train['headRefName']} by=me -->" in train["body"]
     # the pushed branch is a train the review gate passes
     cons, problems = tgit.verify(repo.origin, repo.main, train["headRefOid"], lambda *a: None,
