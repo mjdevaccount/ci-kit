@@ -28,15 +28,17 @@ interlinear annotation U+FFF9-FFFB; shorthand format controls U+1BCA0-1BCA3; mus
 controls U+1D173-1D17A; tag characters U+E0000-E007F ("ASCII smuggling"). No waiver: write the
 escape. NBSP, U+2028/2029 and ordinary non-ASCII (accents, dashes, CJK, a bare emoji) are text.
 
-INPUT: `git ls-files` (never a filesystem walk). A file is skipped as binary ONLY by suffix
-(`BINARY_SUFFIXES` plus `--binary-suffix`), never by sniffing: a NUL-salted or UTF-16 text file is
-"Binary files differ" to git and to the reviewer too, so a sniffed skip would be the one way past
-this gate. A file that does not decode as UTF-8, or holds a NUL byte under a suffix that is not a
-known TEXT format, is exit 2, and EVERY such file is named with its fix (pass its suffix, or
-re-save it as UTF-8) -- this gate cannot say what characters it holds, so it has not looked. A NUL
-in a known text format that decodes (`.ts`, `.cs`: a raw separator in a string) is a finding.
-A text suffix (`.md`, `.py`, ...) is refused as a `--binary-suffix`: declaring one binary would
-blind the gate to a whole language.
+INPUT: `git ls-files` (never a filesystem walk); the NAMES are checked too (a bidi override in a
+filename spoofs every listing and diff). A file is skipped as binary only when BOTH its suffix is
+declared binary (`BINARY_SUFFIXES` plus `--binary-suffix`) AND its bytes are not UTF-8. Bytes that
+decode are text whatever the suffix says, NUL included -- a raw NUL separator in a `.ts`/`.cs`
+string is a U+0000 finding -- so no suffix, declared or not, can hide UTF-8 text from this gate.
+Never skipped by sniffing alone: a UTF-16 or NUL-salted text file is "Binary files differ" to git
+and to the reviewer too. A file under an undeclared suffix that is not UTF-8 is exit 2, and EVERY
+such file is named with its fix (pass its suffix, or re-save it as UTF-8) -- this gate cannot say
+what characters it holds, so it has not looked. So is a tracked path with no bytes on disk (deleted,
+sparse, or a name git could not hand over as UTF-8); a symlink or gitlink is the only skip. A text
+suffix (`TEXT_SUFFIXES`) is refused as `--binary-suffix`, so a UTF-16 `.md` cannot be waved through.
 
 Exit 0 clean, 1 findings, 2 could not look (git failed, no text file read, a file it cannot decode).
 
@@ -103,16 +105,20 @@ BINARY_SUFFIXES = frozenset({
     ".gpg",
 })
 
-#: Never accepted as `--binary-suffix`: each is a text format this gate exists to read.
+#: Never accepted as `--binary-suffix`. Defence in depth only: UTF-8 is read whatever its suffix,
+#: so this list guards the non-UTF-8 case (a UTF-16 `.md`) and words the exit-2 advice.
 TEXT_SUFFIXES = frozenset({
-    ".md", ".txt", ".rst", ".py", ".pyi", ".json", ".jsonl", ".json5", ".yml", ".yaml", ".toml",
-    ".ini", ".cfg", ".sql", ".sh", ".bash", ".ps1", ".psm1", ".cs", ".csproj", ".js", ".mjs",
-    ".ts", ".tsx", ".jsx", ".html", ".css", ".xml", ".csv", ".j2", ".jinja", ".tf", ".go", ".rs",
+    ".md", ".txt", ".rst", ".adoc", ".py", ".pyi", ".pyx", ".ipynb", ".json", ".jsonl", ".json5",
+    ".jsonc", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".conf", ".config", ".env", ".example",
+    ".lock", ".sql", ".sh", ".bash", ".bats", ".zsh", ".ps1", ".psm1", ".psd1", ".bat", ".cmd",
+    ".vbs", ".cs", ".csproj", ".fs", ".fsproj", ".vbproj", ".props", ".targets", ".sln", ".slnf",
+    ".razor", ".cshtml", ".resx", ".nuspec", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".tsx",
+    ".jsx", ".vue", ".svelte", ".html", ".htm", ".css", ".scss", ".less", ".svg", ".xml", ".xsd",
+    ".xslt", ".webmanifest", ".csv", ".tsv", ".j2", ".jinja", ".tftpl", ".tf", ".tfvars", ".hcl",
+    ".go", ".rs", ".java", ".kt", ".swift", ".c", ".h", ".cpp", ".hpp", ".rb", ".lua", ".r",
+    ".graphql", ".proto", ".bicep", ".nix", ".dockerfile", ".service", ".timer", ".socket",
+    ".fixture", ".patch", ".diff", ".log",
 })
-
-
-class NotText(ValueError):
-    """A file not on the binary list that holds a NUL byte (UTF-16, or NUL-salted text)."""
 
 
 def _why(cp: int) -> str:
@@ -137,17 +143,13 @@ def suffix_of(rel: str) -> str:
     return pathlib.PurePosixPath(rel).suffix.lower()
 
 
-def read_text(data: bytes, rel: str = "") -> str:
-    """The file's text; UnicodeDecodeError when not UTF-8. A NUL byte is NotText unless `rel` has
-    a TEXT suffix: a `.ts` / `.cs` holding a raw NUL that decodes as UTF-8 is text with a hidden
-    U+0000 in it (a finding, written as `\\0` it is not), while under an unknown suffix the same
-    bytes may be a binary format this gate was never told about (exit 2, naming the flag)."""
-    if b"\x00" in data and suffix_of(rel) not in TEXT_SUFFIXES:
-        raise NotText("holds a NUL byte (binary, or UTF-16 text)")
-    return data.decode("utf-8")
+def escaped(text: str) -> str:
+    """`text` with every hidden character written as its escape -- how a path is PRINTED."""
+    return _HIDDEN.sub(lambda m: f"\\u{ord(m.group()):04x}" if ord(m.group()) < 0x10000
+                       else f"\\U{ord(m.group()):08x}", text)
 
 
-def blind_line(rel: str, why: str) -> str:
+def blind_line(shown: str, rel: str, why: str) -> str:
     """One unreadable file, named with the fix that makes the gate able to read it -- or skip it."""
     suffix = suffix_of(rel)
     if suffix and suffix not in TEXT_SUFFIXES:
@@ -156,7 +158,7 @@ def blind_line(rel: str, why: str) -> str:
         skip = f"`{suffix}` is a text format, so it cannot be skipped as binary"
     else:
         skip = "it has no suffix, so if it IS binary give it one and pass `--binary-suffix .<ext>`"
-    return f"{rel} {why}: {skip}; if it is text, re-save it as UTF-8"
+    return f"{shown} {why}: {skip}; if it is text, re-save it as UTF-8"
 
 
 @dataclasses.dataclass
@@ -165,38 +167,50 @@ class Scan:
     blind: list[str] = dataclasses.field(default_factory=list)
     text: int = 0
     binary: int = 0
-    absent: int = 0
+    links: int = 0
 
 
-def _read_one(path: pathlib.Path, rel: str, out: Scan) -> str | None:
+def _hit(shown: str, where: str, cp: int) -> str:
+    name = unicodedata.name(chr(cp), f"<control {cp:#04x}>")
+    return f"{shown}:{where}: U+{cp:04X} {name} ({_why(cp)})"
+
+
+def _read_one(path: pathlib.Path, rel: str, shown: str, binary: frozenset[str], out: Scan) -> str | None:
+    """The file's text, or None after counting it binary or naming it unreadable."""
     try:
-        return read_text(path.read_bytes(), rel)
+        data = path.read_bytes()
     except OSError as exc:
-        out.blind.append(f"{rel} could not be read ({exc})")
-    except NotText as exc:
-        out.blind.append(blind_line(rel, str(exc)))
+        out.blind.append(f"{shown} could not be read ({exc})")
+        return None
+    try:
+        return data.decode("utf-8")
     except UnicodeDecodeError as exc:
-        out.blind.append(blind_line(rel, f"is not UTF-8 ({exc.reason} at byte {exc.start})"))
+        if suffix_of(rel) in binary:
+            out.binary += 1
+        else:
+            out.blind.append(blind_line(shown, rel, f"is not UTF-8 ({exc.reason} at byte {exc.start})"))
     return None
 
 
 def scan(root: pathlib.Path, binary: frozenset[str]) -> Scan:
     out = Scan()
     for rel in discover.tracked((".",), suffix="", root=root):
-        if suffix_of(rel) in binary:
-            out.binary += 1
-            continue
+        shown = escaped(rel)
+        for m in _HIDDEN.finditer(rel):
+            out.findings.append(_hit(shown, f"name:{m.start() + 1}", ord(m.group())) + " -- rename the file")
         path = root / rel
-        if path.is_symlink() or not path.is_file():
-            out.absent += 1   # a symlink's target is read under its own path; a gitlink or a
-            continue          # deleted / sparse path has no bytes here
-        text = _read_one(path, rel, out)
+        if path.is_symlink() or path.is_dir():
+            out.links += 1   # a symlink's target is read under its own path; a gitlink is a repo
+            continue
+        if not path.is_file():
+            out.blind.append(f"{shown} is tracked but not on disk (deleted or sparse in this checkout, "
+                             f"or a name git could not hand over as UTF-8)")
+            continue
+        text = _read_one(path, rel, shown, binary, out)
         if text is None:
             continue
         out.text += 1
-        for ln, col, cp in findings_in(text):
-            name = unicodedata.name(chr(cp), f"<control {cp:#04x}>")
-            out.findings.append(f"{rel}:{ln}:{col}: U+{cp:04X} {name} ({_why(cp)})")
+        out.findings.extend(_hit(shown, f"{ln}:{col}", cp) for ln, col, cp in findings_in(text))
     return out
 
 
@@ -204,7 +218,7 @@ def _checked(root: pathlib.Path, binary: frozenset[str], seen: Scan) -> list[str
     """The scan for `site_lint.check`: findings, or exit 2 naming EVERY unreadable file (one run
     lists them all, so a repo adopting the gate fixes them in one pass, not one per CI run)."""
     got = scan(root, binary)
-    seen.text, seen.binary, seen.absent = got.text, got.binary, got.absent
+    seen.text, seen.binary, seen.links = got.text, got.binary, got.links
     if got.blind:
         for f in got.findings:
             print(f"HIDDEN {f}")
@@ -223,8 +237,8 @@ def _report(found: Sequence[str], seen: Scan) -> None:
         print(f"{GATE}: {len(found)} hidden character(s) in tracked files. Write the escape "
               f"(`\\uXXXX` in a Python/JSON/JS string) or drop it (an emoji needs no U+FE0F).")
     else:
-        tail = f", {seen.absent} symlink/absent skipped" if seen.absent else ""
-        print(f"{GATE}: OK -- {seen.text} tracked text file(s) clean ({seen.binary} binary by suffix{tail})")
+        tail = f", {seen.links} symlink/gitlink skipped" if seen.links else ""
+        print(f"{GATE}: OK -- {seen.text} tracked text file(s) clean ({seen.binary} binary{tail})")
 
 
 def _gate(argv: Sequence[str], root: pathlib.Path | None, binary: frozenset[str]) -> int:
@@ -292,12 +306,16 @@ def _repo_fails(tmp: pathlib.Path) -> list[str]:
     it cannot read -- and the 2 names the file and the flag that fixes it."""
     cases = {  # name: (files, binary suffixes, want rc, text the output must hold)
         "bad": ({"docs/a.md": "ok\nzero" + chr(0x200B) + "width\n"}, BINARY_SUFFIXES, 1, "docs/a.md:2:5: U+200B"),
-        "good": ({"a.py": _BOM + "s = '\\u200b'\n", "logo.png": "\x00\x01"}, BINARY_SUFFIXES, 0, "1 tracked text"),
-        "blind-nul": ({"a.md": "x\n", "data.blob": "\x00\x01"}, BINARY_SUFFIXES, 2, "--binary-suffix .blob"),
-        "blind-fixed": ({"a.md": "x\n", "data.blob": "\x00\x01"}, BINARY_SUFFIXES | {".blob"}, 0, "1 binary"),
+        "good": ({"a.py": _BOM + "s = '\\u200b'\n", "logo.png": b"\x89PNG\x00\xff"}, BINARY_SUFFIXES, 0,
+                 "1 tracked text file(s) clean (1 binary)"),
+        "blind-nul": ({"a.md": "x\n", "data.blob": b"\xff\x00\x01"}, BINARY_SUFFIXES, 2, "--binary-suffix .blob"),
+        "blind-fixed": ({"a.md": "x\n", "data.blob": b"\xff\x00\x01"}, BINARY_SUFFIXES | {".blob"}, 0, "(1 binary)"),
         "blind-latin1": ({"a.md": b"caf\xe9\n"}, BINARY_SUFFIXES, 2, "re-save it as UTF-8"),
         "nul-in-text": ({"k.ts": "k = a + '\x00' + b\n"}, BINARY_SUFFIXES, 1, "k.ts:1:10: U+0000"),
-        "nothing-read": ({"logo.png": "\x00"}, BINARY_SUFFIXES, 2, "read nothing"),
+        "utf8-under-a-binary-suffix": ({"a.svg": "<t>" + chr(0x202E) + "</t>\n"}, BINARY_SUFFIXES | {".svg"}, 1,
+                                       "a.svg:1:4: U+202E"),
+        "hidden-name": ({"a" + chr(0x202E) + "dm.py": "x = 1\n"}, BINARY_SUFFIXES, 1, "a\\u202edm.py:name:2: U+202E"),
+        "nothing-read": ({"logo.png": b"\xff\x00"}, BINARY_SUFFIXES, 2, "read nothing"),
     }
     fails: list[str] = []
     for name, (files, binary, want, needle) in cases.items():

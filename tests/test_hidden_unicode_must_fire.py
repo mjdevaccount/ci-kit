@@ -63,17 +63,17 @@ def test_escapes_bom_and_binary_by_suffix_exit_0(new_repo) -> None:
                           "logo.PNG": b"\x89PNG\x00\xff\xfe"})
     res = run_tool("hidden_unicode", r)
     assert res.returncode == 0, res.stdout + res.stderr
-    assert "2 tracked text file(s) clean (1 binary by suffix)" in res.stdout
+    assert "2 tracked text file(s) clean (1 binary)" in res.stdout
 
 
 def test_every_unreadable_file_is_named_with_its_fix_and_exits_2(new_repo) -> None:
     """Review gap (3): a binary under an unlisted suffix is exit 2, and the message says which
     file and which flag fixes it -- all of them in one run, not one per CI run."""
-    r = _add(new_repo(), {"a.md": "fine" + NL, "model.blob": b"\x00\x01", "notes.md": b"caf\xe9" + b"\n",
-                          "LICENSEDATA": b"\x00", "z.md": "x" + chr(0x200B) + NL})
+    r = _add(new_repo(), {"a.md": "fine" + NL, "model.blob": b"\xff\x00\x01", "notes.md": b"caf\xe9" + b"\n",
+                          "LICENSEDATA": b"\xff\x00", "z.md": "x" + chr(0x200B) + NL})
     res = run_tool("hidden_unicode", r)
     assert res.returncode == 2, res.stdout + res.stderr
-    assert "model.blob holds a NUL byte" in res.stderr and "--binary-suffix .blob" in res.stderr
+    assert "model.blob is not UTF-8" in res.stderr and "--binary-suffix .blob" in res.stderr
     assert "notes.md is not UTF-8" in res.stderr and "`.md` is a text format" in res.stderr
     assert "LICENSEDATA" in res.stderr and "has no suffix" in res.stderr
     assert "3 tracked file(s) it cannot read" in res.stderr
@@ -81,7 +81,7 @@ def test_every_unreadable_file_is_named_with_its_fix_and_exits_2(new_repo) -> No
 
 
 def test_the_named_fix_works(new_repo) -> None:
-    r = _add(new_repo(), {"a.md": "fine" + NL, "model.blob": b"\x00\x01"})
+    r = _add(new_repo(), {"a.md": "fine" + NL, "model.blob": b"\xff\x00\x01"})
     assert run_tool("hidden_unicode", r).returncode == 2
     res = run_tool("hidden_unicode", r, "--binary-suffix", ".blob")
     assert res.returncode == 0, res.stdout + res.stderr
@@ -104,17 +104,60 @@ def test_utf16_text_is_not_skipped_as_binary(new_repo) -> None:
     assert res.returncode == 1 and "U+0000" in res.stdout, res.stdout + res.stderr
 
 
-def test_a_raw_nul_in_a_text_format_is_a_finding(new_repo) -> None:
+def test_a_raw_nul_in_utf8_text_is_a_finding_whatever_the_suffix(new_repo) -> None:
     """trade-ui / TradingEdge.Scraper, 2026-11-14: a NUL typed raw as a key separator in a .ts /
-    .cs string. It decodes, the suffix says text, so it is a hidden U+0000 -- write the escape."""
-    r = _add(new_repo(), {"src/k.ts": "const k = `${a}" + chr(0) + "${b}`" + NL})
+    .cs string. It decodes, so it is text with a hidden U+0000 -- under a suffix the kit lists
+    (.ts) or not (.zig), and even one declared binary: write the escape (review, ci-kit#89)."""
+    r = _add(new_repo(), {"src/k.ts": "const k = `${a}" + chr(0) + "${b}`" + NL,
+                          "src/k.zig": "const k = `${a}" + chr(0) + "${b}`" + NL})
+    for args in ((), ("--binary-suffix", ".zig")):
+        res = run_tool("hidden_unicode", r, *args)
+        assert res.returncode == 1, res.stdout + res.stderr
+        assert "src/k.ts:1:16: U+0000" in res.stdout and "src/k.zig:1:16: U+0000" in res.stdout
+
+
+def test_a_declared_binary_suffix_cannot_hide_utf8_text(new_repo) -> None:
+    """Review, ci-kit#89: `--binary-suffix .svg` turned an SVG holding U+202E into a clean 0. A
+    suffix only skips bytes that are not UTF-8."""
+    r = _add(new_repo(), {"a.svg": "<text>" + chr(0x202E) + "</text>" + NL, "b.age": b"age\xff\x00"})
+    res = run_tool("hidden_unicode", r, "--binary-suffix", ".svgz")
+    assert res.returncode == 1 and "a.svg:1:7: U+202E" in res.stdout, res.stdout + res.stderr
+    r2 = _add(new_repo("r2"), {"a.razor": "x" + chr(0x2066) + NL, "b.age": b"age\xff\x00"})
+    res = run_tool("hidden_unicode", r2, "--binary-suffix", ".razor")
+    assert res.returncode == 2 and "text format" in res.stderr, res.stdout + res.stderr
+    assert hu.selftest() == []   # the selftest's own `utf8-under-a-binary-suffix` case
+
+
+@pytest.mark.parametrize("suffix", [".fixture", ".service", ".timer", ".bats", ".razor", ".conf", ".lock",
+                                    ".example", ".cjs", ".mts", ".svg", ".props", ".sln", ".slnf", ".cshtml",
+                                    ".hcl", ".jsonc", ".tsv", ".env", ".dockerfile", ".vbs", ".tftpl",
+                                    ".webmanifest"])
+def test_the_estates_text_formats_are_refused_as_binary(suffix: str) -> None:
+    """The suffixes a 15-repo `git ls-files` found in neither list (review, ci-kit#89)."""
+    assert suffix in hu.TEXT_SUFFIXES and suffix not in hu.BINARY_SUFFIXES
+    with pytest.raises(hu.argparse.ArgumentTypeError):
+        hu._suffix(suffix)
+
+
+def test_a_hidden_character_in_a_file_name_is_a_finding(new_repo) -> None:
+    """Review, ci-kit#89: a bidi override in a NAME spoofs every listing and diff; printed escaped."""
+    r = _add(new_repo(), {"admin" + chr(0x200B) + ".py": "x = 1" + NL})
     res = run_tool("hidden_unicode", r)
     assert res.returncode == 1, res.stdout + res.stderr
-    assert "src/k.ts:1:16: U+0000" in res.stdout
+    assert "admin" + BS + "u200b.py:name:6: U+200B" in res.stdout
+
+
+def test_a_tracked_path_missing_on_disk_exits_2(new_repo) -> None:
+    """Review, ci-kit#89: a path git lists but the disk lacks (deleted, sparse, or a non-UTF-8 name
+    `errors=replace` mangled) was a silent skip counted in the OK line."""
+    r = _add(new_repo(), {"a.md": "x" + NL, "b.md": "y" + NL})
+    (r / "b.md").unlink()
+    res = run_tool("hidden_unicode", r)
+    assert res.returncode == 2 and "b.md is tracked but not on disk" in res.stderr, res.stdout + res.stderr
 
 
 def test_nothing_readable_exits_2(new_repo) -> None:
-    r = _add(new_repo(), {"logo.png": b"\x00"})
+    r = _add(new_repo(), {"logo.png": b"\xff\x00"})
     res = run_tool("hidden_unicode", r)
     assert res.returncode == 2 and "read nothing" in res.stderr
 
@@ -139,7 +182,7 @@ def test_selftest_dies_when_the_bom_exemption_spreads(monkeypatch) -> None:
 
 
 def test_selftest_dies_when_unreadable_files_are_skipped(monkeypatch) -> None:
-    monkeypatch.setattr(hu, "_read_one", lambda path, rel, out: path.read_bytes().decode("utf-8", "replace"))
+    monkeypatch.setattr(hu, "_read_one", lambda path, *_: path.read_bytes().decode("utf-8", "replace"))
     fails = hu.selftest()
     assert any(f.startswith("blind-nul:") for f in fails) and any(f.startswith("blind-latin1:") for f in fails), fails
 
