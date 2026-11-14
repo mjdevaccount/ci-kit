@@ -25,6 +25,16 @@
 # in a PR comment and left for a session (ci_kit/redclass.py, ci_kit/pr_heal.py). Newly labelled PR numbers come back as output `relock` (JSON list) for a caller
 # that can relock a lockfile.
 #
+# THE PR SCHEDULER (`scarce-pools`, v1.29.0; ci_kit/pr_sched.py, policy ci_kit/pr_queue.py): on
+# the caller's one-runner pools the queue HEAD (lowest-numbered armed PR) goes first. Each run
+# parks (cancels, labels `queue:parked`) a non-head run queued on a pool the head is waiting for,
+# or one that started there under `preempt-after-minutes` ago; re-runs parked work in landing
+# order (the head's at once); updates a BEHIND head the moment its review verdict is recorded;
+# pages a merge of a later PR past an in-flight head; and goes red when the head waited
+# `head-stall-minutes` while a non-head job held its pool. ORDER and TIMING only: a parked run is
+# re-run in full and every required check still passes at the merging head. Pair it with the
+# review gate's `queue-priority: true`. The `token` then needs Actions: Read and write.
+#
 # UNCONFIGURED IS RED: with no `token` the job fails naming it. GITHUB_TOKEN is NOT a fallback --
 # a push made with it fires no workflow, so every updated PR would wait on checks that never
 # start, which looks exactly like "CI pending".
@@ -69,9 +79,24 @@ on:
           PAT to hold Actions: Read and write -- refused, the run is red naming that grant
         type: number
         default: 2
+      scarce-pools:
+        description: >-
+          the PR scheduler (ci_kit/pr_sched.py): a JSON object of the caller's scarce runner pool
+          labels -> capacity, e.g. {"home-sealed": 1, "home-heavy": 1}. '' = off (parked work is
+          still re-run). Needs the `token` PAT to hold Actions: Read and write
+        type: string
+        default: ""
+      preempt-after-minutes:
+        description: a non-head job on a scarce pool is parked for a waiting head only if it started less than this ago
+        type: number
+        default: 3
+      head-stall-minutes:
+        description: the queue head waiting this long on a pool a non-head job holds turns the run red (queue-head-starved)
+        type: number
+        default: 15
     secrets:
       token:
-        description: fine-grained PAT with contents, pull requests and workflows RW, actions read, on the caller repo
+        description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs), on the caller repo
         required: true
       ntfy-url:
         description: an ntfy topic URL to page on a NEW conflict ('' = no page)
@@ -117,11 +142,19 @@ jobs:
       NTFY_URL: ${{ secrets.ntfy-url }}
       # check names carry spaces ("unit tests"), and the action word-splits `args`: an env var, not a flag
       CI_KIT_REQUIRED_CHECKS: ${{ inputs.required-checks }}
+      # JSON: braces and quotes, so an env var too. The push's before/after name an out-of-queue merge.
+      # The scheduler's two FLAGS are passed only with scarce-pools set: ci-kit's own
+      # pr-autoupdate-self runs THIS file from main against the @v1 tool, which lags a merge by the
+      # tag-version + major-tag run, and an older tool refuses a flag it does not know.
+      CI_KIT_SCARCE_POOLS: ${{ inputs.scarce-pools }}
+      CI_KIT_EVENT: ${{ github.event_name }}
+      CI_KIT_BEFORE: ${{ github.event.before }}
+      CI_KIT_SHA: ${{ github.sha }}
     steps:
       - name: Refuse to run unconfigured
         run: |
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::secret 'token' is empty for $GITHUB_REPOSITORY: armed PRs are NOT being updated. Map a fine-grained token (contents, pull requests, workflows: read+write; actions: read) onto 'token' in the workflow_call secrets."
+            echo "::error::secret 'token' is empty for $GITHUB_REPOSITORY: armed PRs are NOT being updated. Map a fine-grained token (contents, pull requests, workflows: read+write; actions: read, read+write with scarce-pools) onto 'token' in the workflow_call secrets."
             exit 1
           fi
       - name: Update
@@ -135,5 +168,6 @@ jobs:
             --label ${{ inputs.label }}
             --max-in-flight ${{ inputs.max-in-flight }}
             --rerun-limit ${{ inputs.rerun-limit }}
+            ${{ inputs.scarce-pools != '' && format('--preempt-after-min {0} --head-stall-min {1}', inputs.preempt-after-minutes, inputs.head-stall-minutes) || '' }}
             ${{ inputs.review-workflow != '' && format('--review-workflow {0}', inputs.review-workflow) || '' }}
             ${{ inputs.relock && '--relock' || '' }}

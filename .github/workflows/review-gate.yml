@@ -52,6 +52,19 @@
 # above is what branch protection lists -- it keeps a pre-existing check name, and `record`
 # (continue-on-error) can never turn it red.
 #
+# FIVE JOBS, ONE VERDICT (v1.29.0). `review` (job id `decide`, the SECURE pool) runs everything
+# that executes no PR code -- train, tier, carry, admission, siblings -- and finishes a carry, a
+# BLIND or a train itself. `model review` (the SEALED pool) runs only for a full review. `review
+# deferred` is red when the PR queue parked the review. `verdict` is the in-workflow aggregate: a
+# skipped `model review` passes only when `decide` said none was needed. `record verdict` writes
+# the carry record. A base-only update of a passed PR never waits for the one sealed runner.
+#
+# THE PR QUEUE (`queue-priority`, v1.29.0). The sealed pool is ONE runner. A PR numbered after
+# the queue head (the lowest-numbered armed PR, ci_kit/pr_queue.head) does not start a full
+# review while the head needs that pool; its run ends red at `review deferred`, labelled
+# `queue:parked`, and the caller's pr-autoupdate re-runs it (ci_kit/pr_sched). ORDER AND TIMING
+# ONLY: every PR is still reviewed in full, or carried under the rule above, at its merging head.
+#
 # A MERGE TRAIN IS NOT RE-REVIEWED, AND NOT WAVED THROUGH (v1.25.0). A PR whose head branch is
 # `train/*` (ci-merge-train, merge-train.yml) skips the tier and the model: ci_kit.review.train
 # proves every commit on it is ONE constituent's squash -- its tree recomputed byte-for-byte from
@@ -155,6 +168,14 @@ on:
           record names a run of THIS workflow that opened it (ci_kit/merge_train/github.composed)
         type: string
         default: merge-train.yml
+      queue-priority:
+        description: >-
+          the PR scheduler's admission (v1.29.0, ci_kit/pr_sched.py): a full review of a PR
+          numbered after the queue head is PARKED while the head needs the sealed pool, and
+          re-run by pr-autoupdate (pass its `scarce-pools`). Order and timing only: a parked PR is
+          red until reviewed. false = every review runs at once, as before.
+        type: boolean
+        default: false
     secrets:
       git-ssh-key:
         description: >-
@@ -174,35 +195,51 @@ on:
         required: false
     outputs:
       result:
-        description: pass | block | blind ('' when the diff was not in the tier)
-        value: ${{ jobs.review.outputs.result }}
+        description: pass | block | blind | parked ('' when the diff was not in the tier)
+        value: ${{ jobs.review.outputs.result || jobs.decide.outputs.result }}
 
 jobs:
-  review:
+  decide:
+    # Everything that runs NO PR code and needs no model credential, on the SECURE pool (v1.29.0):
+    # the merge-train verifier, the tier, the CARRY, the PR scheduler's admission and the siblings
+    # list. It checks the PR out (git reads it: `diff`, `merge-base`, `hash-object`; nothing is
+    # executed from it, PYTHONSAFEPATH=1 keeps a PR-added ci_kit/ off the path) and holds only the
+    # job's GITHUB_TOKEN -- the token-only class the secure pool exists for (home-host
+    # docs/CI-RUNNER.md § The secure pool). WHY: the sealed pool is ONE runner, one job per VM boot,
+    # and 72% of its jobs (11-07..11-14, 246 of 342) were this job's carry path, ~0.2 min of work
+    # each behind a reboot and the queue for that single runner. td#3073, verdict recorded 03:58Z
+    # 11-14, BEHIND main: its 30-second carry had to wait for another PR's full review to finish.
+    # Now a base-only update of a passed PR never touches the sealed pool; the sealed job runs only
+    # for a full review. Named `review` (the old job's name): mcp review_gate_auth.py reads this
+    # job's log for the tier's lines. Unset CI_SECURE_RUNNER = hosted, as before.
     name: review
-    # THE SEALED POOL when the caller sets CI_SEALED_RUNNER, hosted otherwise (the kill switch).
-    # This job holds the Claude credential AND runs the PR's own tests, so it may run only where a
-    # job is alone with its machine: home-host VM 112, one job per boot, rolled back to a clean
-    # snapshot before every start, no other job on the box and the LAN walled off (home-host
-    # docs/CI-RUNNER-CONFIG-PLAN.md § Sealed pool). NEVER the secure pool (VM 111 runs several jobs
-    # side by side) nor the socket pool. Labels fixed HERE (an ON/OFF switch, never a label list).
-    # The pool's per-job ceiling is 45 min, the same as timeout-minutes below. vars resolve to the CALLER.
-    runs-on: ${{ vars.CI_SEALED_RUNNER && fromJSON('["self-hosted","home-sealed"]') || 'ubuntu-latest' }}
-    timeout-minutes: 45
+    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    timeout-minutes: 15
     env:
-      # every `python -m ci_kit...` runs with the PR checkout as cwd, and -m puts the cwd AHEAD of
-      # PYTHONPATH: a PR-added ci_kit/ would replace the gate that grades it. Cleared in Install (the
-      # caller's own build) and in the reviewer's tool runs (tools.VENV_ENV). v1.15.1.
       PYTHONSAFEPATH: "1"
     permissions:
       contents: read
-      pull-requests: write   # the verdict comment; also the train path's base-change timeline read (GraphQL)
-      actions: read          # find + download the last passing run's verdict artifact (carry)
+      pull-requests: write   # the `queue:parked` label (the comment is the `verdict` job's)
+      actions: read          # the carry's artifact; the scheduler's read of the head's jobs
     outputs:
-      # frozen at each step's end; the `record` job reads them on a runner the PR's code never ran on
-      result: ${{ steps.verdict.outputs.result || steps.train.outputs.result }}
+      # frozen at each step's end; `review`, `record` and `verdict` read them
+      mode: ${{ steps.mode.outputs.mode }}
+      result: ${{ steps.verdict.outputs.result || steps.train.outputs.result || steps.mode.outputs.result }}
       hash: ${{ steps.carry.outputs.hash }}
       origin: ${{ steps.carry.outputs.origin }}
+      why: ${{ steps.carry.outputs.why }}
+      kit-sha: ${{ steps.kit.outputs.sha }}
+      gate: ${{ steps.kit.outputs.label }}
+      reasons: ${{ steps.decide.outputs.reasons }}
+      model: ${{ steps.decide.outputs.model }}
+      credential: ${{ steps.decide.outputs.credential }}
+      credential-name: ${{ steps.decide.outputs.credential_name }}
+      schema: ${{ steps.decide.outputs.schema }}
+      siblings: ${{ steps.siblings.outputs.text }}
+      parked: ${{ steps.admit.outputs.why }}
+      unarmed: ${{ steps.decide.outputs.unarmed }}
+      body: ${{ steps.body.outputs.body }}      # finish / train only: the `verdict` job posts it
+      title: ${{ steps.body.outputs.title }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -221,8 +258,11 @@ jobs:
           sha=$(git -C "$kit" rev-parse HEAD)
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$kit/pyproject.toml" | head -1)
           ref=$(printf '%s' "$KIT_REF" | tr -cd 'A-Za-z0-9._/-' | cut -c1-64)
-          echo "dir=$kit" >> "$GITHUB_OUTPUT"
-          echo "label=ci-kit $ref (${version:-?}, ${sha:0:7})" >> "$GITHUB_OUTPUT"
+          {
+            echo "dir=$kit"
+            echo "sha=$sha"   # `model review` fetches exactly this commit: one gate per run
+            echo "label=ci-kit $ref (${version:-?}, ${sha:0:7})"
+          } >> "$GITHUB_OUTPUT"
           echo "Gate: ci-kit $ref (${version:-?}, ${sha:0:7})" >> "$GITHUB_STEP_SUMMARY"
 
       # THE MERGE TRAIN (v1.25.0, ci_kit/review/train.py). A PR whose head branch is `train/...`
@@ -321,9 +361,35 @@ jobs:
             --workflow "$wf" \
             || printf 'carried=false\nhash=\nwhy=carry check did not finish; full review\n' >> "$GITHUB_OUTPUT"
 
+      # THE PR SCHEDULER'S ADMISSION (v1.29.0, `queue-priority`; ci_kit/pr_admit.py, policy
+      # ci_kit/pr_queue.py, actor ci_kit/pr_sched.py). A full review needs the sealed pool, ONE
+      # runner. A PR numbered after the queue head is PARKED while the head needs that pool (a
+      # sealed job queued, or a review run still deciding); otherwise -- the head, a PR ahead of
+      # it, a head that needs nothing there -- it runs (work-conserving). Parked = this run ends
+      # red at `review deferred`
+      # and the PR gets `queue:parked`; pr-autoupdate re-runs it when it is the head or the pool is
+      # free. The review is never skipped: a parked PR cannot merge until it is reviewed. A failed
+      # look RUNS the review (never parks blind).
+      - name: Admit
+        id: admit
+        if: >-
+          inputs.queue-priority && steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == ''
+          && steps.carry.outputs.carried != 'true'
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          POOL: ${{ vars.CI_SEALED_RUNNER && 'home-sealed' || '' }}
+        run: |
+          python3 -m ci_kit.pr_admit --repo "$GITHUB_REPOSITORY" --pr "$PR" --pool "$POOL" --pending \
+            --attempt "$GITHUB_RUN_ATTEMPT" \
+            || printf 'defer=false\nwhy=admission crashed; reviewing\n' >> "$GITHUB_OUTPUT"
+
       - name: Siblings
         id: siblings
-        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true'
+        if: >-
+          steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == ''
+          && steps.carry.outputs.carried != 'true' && steps.admit.outputs.defer != 'true'
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
           GH_TOKEN: ${{ github.token }}
@@ -335,9 +401,153 @@ jobs:
             --base "$BASE_SHA" --head "$HEAD_SHA" \
             || echo "text=(sibling list unavailable: the lookup failed)" >> "$GITHUB_OUTPUT"
 
+      # ONE word for what happens next. `review` is the ONLY mode that runs the sealed job, and the
+      # `verdict` aggregate refuses a skipped `review` in that mode, so a skip can never read as a pass.
+      - name: Mode
+        id: mode
+        env:
+          IS_TRAIN: ${{ steps.train.outputs.is_train }}
+          REQUIRED: ${{ steps.decide.outputs.required }}
+          BLIND: ${{ steps.decide.outputs.blind }}
+          CARRIED: ${{ steps.carry.outputs.carried }}
+          DEFER: ${{ steps.admit.outputs.defer }}
+        run: |
+          set -euo pipefail
+          if [ "$IS_TRAIN" = true ]; then mode=train
+          elif [ "$REQUIRED" != true ]; then mode=skip
+          elif [ -n "$BLIND" ] || [ "$CARRIED" = true ]; then mode=finish
+          elif [ "$DEFER" = true ]; then mode=defer; echo "result=parked" >> "$GITHUB_OUTPUT"
+          else mode=review
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "review gate mode: $mode" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Verdict
+        id: verdict
+        if: steps.mode.outputs.mode == 'finish'
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          BLIND: ${{ steps.decide.outputs.blind }}
+          REASONS: ${{ steps.decide.outputs.reasons }}
+          GATE: ${{ steps.kit.outputs.label }}
+          CARRY_WHY: ${{ steps.carry.outputs.why }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BLIND" ]; then
+            # the PR's own diff has the same hash as one a previous run PASSED: only main moved
+            {
+              echo "<!-- review-gate -->"
+              echo "### review gate"
+              echo
+              echo "In the review tier because: $REASONS"
+              echo
+              echo "**PASS, $CARRY_WHY** -- the PR's own diff is unchanged since that review (only main moved), so the reviewer was not re-run."
+            } > body.md
+            echo "result=pass" >> "$GITHUB_OUTPUT"
+            echo "title=review gate passed: $CARRY_WHY" >> "$GITHUB_OUTPUT"
+            cat body.md >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          REASONS="$REASONS; BLIND: $BLIND"
+          REVIEW_JSON="" python3 -m ci_kit.review.verdict --reasons "$REASONS" --body-out body.md
+          echo "_gate: ${GATE}_" >> body.md
+          cat body.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hand the verdict on
+        # to the `verdict` job, which comments and pushes for every mode (ONE copy of each)
+        id: body
+        if: (steps.mode.outputs.mode == 'finish' || steps.train.outputs.is_train == 'true') && !cancelled()
+        env:
+          TITLE: ${{ steps.verdict.outputs.title || steps.train.outputs.title }}
+        run: |
+          [ -f body.md ] || printf '%s\n' "<!-- review-gate -->" "review gate: the verdict step did not run" > body.md
+          d="BODY_$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+          { echo "body<<$d"; cat body.md; echo; echo "$d"; echo "title=$TITLE"; } >> "$GITHUB_OUTPUT"
+
+      - name: Gate
+        if: (steps.mode.outputs.mode == 'finish' || steps.train.outputs.is_train == 'true') && !cancelled()
+        env:
+          RESULT: ${{ steps.verdict.outputs.result || steps.train.outputs.result }}
+        # INLINE, never a script under $RUNNER_TEMP: in `review` the PR's own tests have run by now
+        # and could rewrite any file there; this YAML they cannot reach
+        run: |
+          case "$RESULT" in
+            pass) echo "review gate: pass" ;;
+            block) echo "::error::review gate BLOCKED -- see the PR comment"; exit 1 ;;
+            *) echo "::error::review gate BLIND ($RESULT) -- the reviewer did not finish looking"; exit 1 ;;
+          esac
+
+  review:
+    # THE FULL MODEL REVIEW, and only that (v1.29.0): `decide` above runs everything else. THE
+    # SEALED POOL when the caller sets CI_SEALED_RUNNER, hosted otherwise (the kill switch). This
+    # job holds the Claude credential AND runs the PR's own tests, so it may run only where a job
+    # is alone with its machine: home-host VM 112, one job per boot, rolled back to a clean
+    # snapshot before every start, no other job on the box and the LAN walled off (home-host
+    # docs/CI-RUNNER-CONFIG-PLAN.md § Sealed pool). NEVER the secure pool (VM 111 runs several jobs
+    # side by side) nor the socket pool. Labels fixed HERE (an ON/OFF switch, never a label list).
+    # The pool's per-job ceiling is 45 min, the same as timeout-minutes below. vars resolve to the CALLER.
+    name: model review
+    needs: decide
+    if: needs.decide.outputs.mode == 'review'
+    runs-on: ${{ vars.CI_SEALED_RUNNER && fromJSON('["self-hosted","home-sealed"]') || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    env:
+      # every `python -m ci_kit...` runs with the PR checkout as cwd, and -m puts the cwd AHEAD of
+      # PYTHONPATH: a PR-added ci_kit/ would replace the gate that grades it. Cleared in Install (the
+      # caller's own build) and in the reviewer's tool runs (tools.VENV_ENV). v1.15.1.
+      PYTHONSAFEPATH: "1"
+    permissions:
+      contents: read
+      pull-requests: write   # the `queue:parked` label (the comment is the `verdict` job's)
+      actions: read          # the scheduler's read of the head's jobs
+    outputs:
+      # frozen at each step's end; the `record` job reads them on a runner the PR's code never ran on
+      result: ${{ steps.verdict.outputs.result || (steps.admit.outputs.defer == 'true' && 'parked' || '') }}
+      parked: ${{ steps.admit.outputs.defer }}
+      body: ${{ steps.body.outputs.body }}
+      title: ${{ steps.body.outputs.title }}
+    steps:
+      - name: Fetch the gate (the ci-kit commit `decide` ran)
+        id: kit
+        env:
+          KIT_SHA: ${{ needs.decide.outputs.kit-sha }}
+          GATE: ${{ needs.decide.outputs.gate }}
+        run: |
+          set -euo pipefail
+          kit="$RUNNER_TEMP/ci-kit"
+          git init -q "$kit"
+          git -C "$kit" fetch -q --depth 1 https://github.com/mjdevaccount/ci-kit.git "$KIT_SHA"
+          git -C "$kit" checkout -q --detach FETCH_HEAD
+          echo "dir=$kit" >> "$GITHUB_OUTPUT"
+          echo "Gate: $GATE" >> "$GITHUB_STEP_SUMMARY"
+
+      # THE SCHEDULER'S LAST LOOK, before the PR is even checked out. GitHub hands a freed sealed
+      # runner to any queued job and, measured, often NOT the oldest: in 46 of 90 inversions
+      # (11-07..11-14) a higher-numbered PR's review was dispatched while the queue head's was
+      # already waiting. Such a job yields at once (parked, re-run later) instead of holding the one
+      # sealed runner for a full review. A head merely still DECIDING does not count here (no
+      # --pending): the runner is ours now, and most decisions end in a carry that needs none.
+      - name: Admit
+        id: admit
+        if: inputs.queue-priority
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          POOL: ${{ vars.CI_SEALED_RUNNER && 'home-sealed' || '' }}
+        run: |
+          python3 -m ci_kit.pr_admit --repo "$GITHUB_REPOSITORY" --pr "$PR" --pool "$POOL" \
+            --attempt "$GITHUB_RUN_ATTEMPT" \
+            || printf 'defer=false\nwhy=admission crashed; reviewing\n' >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        if: steps.admit.outputs.defer != 'true'
+        with:
+          fetch-depth: 0
+
       # the reviewer's first move is proving a guard's red path, which needs the real toolchain
       - uses: astral-sh/setup-uv@v10.3.3
-        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true'
+        if: steps.admit.outputs.defer != 'true'
         with:
           python-version: ${{ inputs.python-version }}
           enable-cache: true
@@ -347,7 +557,7 @@ jobs:
       # setup-node must still reach Review (as a failed install does), which names the BLIND's
       # cause. No package-manager cache: the caller's lockfile is not this CLI's.
       - uses: actions/setup-node@v7
-        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true'
+        if: steps.admit.outputs.defer != 'true'
         continue-on-error: true
         with:
           node-version: 26
@@ -361,7 +571,7 @@ jobs:
       # and the kill step run as before.
       - name: Load the git ssh key
         id: gitssh
-        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true'
+        if: steps.admit.outputs.defer != 'true'
         env:
           KIT: ${{ steps.kit.outputs.dir }}
           CI_KIT_GIT_SSH_REPOS: ${{ inputs.git-ssh-repos }}
@@ -372,7 +582,7 @@ jobs:
           # repos named + an EMPTY key (fork/Dependabot PR, unmapped secret) = a loud red here
           bash "$KIT/ci_kit/git_ssh.sh" load "$GITHUB_OUTPUT"
       - name: Install
-        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true'
+        if: steps.admit.outputs.defer != 'true'
         env:
           KIT: ${{ steps.kit.outputs.dir }}
           INSTALL: ${{ inputs.install }}
@@ -403,7 +613,7 @@ jobs:
       - name: Install Claude Code
         # the subscription transport's CLI, pinned. A failed install must still reach Review, which
         # names it as the BLIND's cause (claude not found) instead of skipping the verdict.
-        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true' && steps.decide.outputs.credential == 'oauth'
+        if: steps.admit.outputs.defer != 'true' && needs.decide.outputs.credential == 'oauth'
         continue-on-error: true
         env:
           CLAUDE_CODE_VERSION: ${{ inputs.claude-code-version }}
@@ -411,7 +621,7 @@ jobs:
 
       - name: Review
         id: review
-        if: steps.decide.outputs.required == 'true' && steps.decide.outputs.blind == '' && steps.carry.outputs.carried != 'true'
+        if: steps.admit.outputs.defer != 'true'
         # a failed or timed-out review must still reach Verdict, which reads the missing output as BLIND
         continue-on-error: true
         # below the job timeout, so a hang lands in continue-on-error -> BLIND with comment + push
@@ -421,12 +631,12 @@ jobs:
           "$KIT/.venv/bin/python" -m "ci_kit.review.$transport" --model "$MODEL" --schema "$SCHEMA"
         env:
           KIT: ${{ steps.kit.outputs.dir }}
-          CREDENTIAL: ${{ steps.decide.outputs.credential }}
+          CREDENTIAL: ${{ needs.decide.outputs.credential }}
           # ONLY the chosen credential reaches the step
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ steps.decide.outputs.credential == 'oauth' && secrets.claude-code-oauth-token || '' }}
-          ANTHROPIC_API_KEY: ${{ steps.decide.outputs.credential == 'api_key' && secrets.anthropic-api-key || '' }}
-          MODEL: ${{ steps.decide.outputs.model }}
-          SCHEMA: ${{ steps.decide.outputs.schema }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ needs.decide.outputs.credential == 'oauth' && secrets.claude-code-oauth-token || '' }}
+          ANTHROPIC_API_KEY: ${{ needs.decide.outputs.credential == 'api_key' && secrets.anthropic-api-key || '' }}
+          MODEL: ${{ needs.decide.outputs.model }}
+          SCHEMA: ${{ needs.decide.outputs.schema }}
           REVIEW_PROMPT: |
             You are the reviewer for ${{ github.repository }}, running as its pre-merge CI gate.
             ${{ inputs.charter }}
@@ -435,12 +645,12 @@ jobs:
             PR #${{ github.event.pull_request.number }} (read its title and body with git log; judge the diff, not the description)
             Diff under review: git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
             Commits: git log --oneline ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
-            Why this PR is in the review tier: ${{ steps.decide.outputs.reasons }}
+            Why this PR is in the review tier: ${{ needs.decide.outputs.reasons }}
 
             Open sibling PRs whose changed files intersect this one (context only; they may merge
             before or after this PR -- look for a SEMANTIC collision with this diff, e.g. a name
             one renames and another reads):
-            ${{ steps.siblings.outputs.text }}
+            ${{ needs.decide.outputs.siblings }}
 
             Read the diff before the description. For every guard the diff adds or edits, name the
             execution path that makes it fire and prove its red path (run the test, or mutate and
@@ -456,36 +666,18 @@ jobs:
 
       - name: Verdict
         id: verdict
-        if: steps.decide.outputs.required == 'true'
+        if: steps.admit.outputs.defer != 'true'
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
           REVIEW_JSON: ${{ steps.review.outputs.structured_output }}
           CAUSE: ${{ steps.review.outputs.cause }}
-          CRED_NAME: ${{ steps.decide.outputs.credential_name }}
-          BLIND: ${{ steps.decide.outputs.blind }}
-          REASONS: ${{ steps.decide.outputs.reasons }}
-          GATE: ${{ steps.kit.outputs.label }}
-          CARRIED: ${{ steps.carry.outputs.carried }}
-          CARRY_WHY: ${{ steps.carry.outputs.why }}
+          CRED_NAME: ${{ needs.decide.outputs.credential-name }}
+          REASONS: ${{ needs.decide.outputs.reasons }}
+          GATE: ${{ needs.decide.outputs.gate }}
+          CARRY_WHY: ${{ needs.decide.outputs.why }}
         run: |
           set -euo pipefail
-          if [ "$CARRIED" = "true" ] && [ -z "$BLIND" ]; then
-            # the PR's own diff has the same hash as one a previous run PASSED: only main moved
-            {
-              echo "<!-- review-gate -->"
-              echo "### review gate"
-              echo
-              echo "In the review tier because: $REASONS"
-              echo
-              echo "**PASS, $CARRY_WHY** -- the PR's own diff is unchanged since that review (only main moved), so the reviewer was not re-run."
-            } > body.md
-            echo "result=pass" >> "$GITHUB_OUTPUT"
-            echo "title=review gate passed: $CARRY_WHY" >> "$GITHUB_OUTPUT"
-            cat body.md >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
           echo "carry: ${CARRY_WHY:-not checked}" >> "$GITHUB_STEP_SUMMARY"
-          if [ -n "$BLIND" ]; then REVIEW_JSON=""; REASONS="$REASONS; BLIND: $BLIND"; fi
           # A BLIND with no cause is undiagnosable (td#2373: four BLINDs before anyone could read
           # "Credit balance is too low"). Each transport writes `cause` whenever it writes no verdict.
           if [ -z "$REVIEW_JSON" ] && [ -n "$CAUSE" ]; then REASONS="$REASONS; CAUSE ($CRED_NAME): $CAUSE"; fi
@@ -493,46 +685,23 @@ jobs:
           echo "_gate: ${GATE}_" >> body.md
           cat body.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Comment on the PR
-        if: (steps.decide.outputs.required == 'true' || steps.train.outputs.is_train == 'true') && !cancelled()
+      - name: Hand the verdict on
+        # to the `verdict` job, which comments and pushes for every mode (ONE copy of each)
+        id: body
+        if: steps.admit.outputs.defer != 'true' && !cancelled()
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
+          TITLE: ${{ steps.verdict.outputs.title }}
         run: |
-          set -euo pipefail
-          [ -f body.md ] || echo "<!-- review-gate -->"$'\n'"review gate: the verdict step did not run" > body.md
-          # one sticky comment, found by its marker, so a re-review edits instead of piling up
-          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
-                 -q '.[] | select(.body | startswith("<!-- review-gate -->")) | .id' | tail -1)
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@body.md >/dev/null
-          else
-            gh pr comment "$PR" --body-file body.md
-          fi
-
-      - name: Push a block to ntfy
-        # A blocked PR with no live session sits silently until someone looks; this is the push.
-        # Priority 3: a PR is never a reason to wake the operator.
-        if: (steps.decide.outputs.required == 'true' || steps.train.outputs.is_train == 'true') && (steps.verdict.outputs.result || steps.train.outputs.result) != 'pass' && steps.decide.outputs.unarmed != 'true' && !cancelled()
-        env:
-          NTFY_URL: ${{ secrets.ntfy-url }}
-          TITLE: ${{ steps.verdict.outputs.title || steps.train.outputs.title || 'review gate did not produce a verdict' }}
-          URL: ${{ github.event.pull_request.html_url }}
-          PR: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.event.repository.name }}
-          # via env, never ${{ }} inside `run:` -- a PR title is attacker-shaped text
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          if [ -z "${NTFY_URL:-}" ]; then echo "::warning::ntfy-url unset; the block was not pushed"; exit 0; fi
-          curl -fsS -X POST "$NTFY_URL" -H "Title: $REPO #$PR: $TITLE" \
-            -H "Priority: 3" -H "Tags: mag" -H "Click: $URL" \
-            --data-binary "$PR_TITLE" >/dev/null \
-            || echo "::warning::ntfy push failed"
+          [ -f body.md ] || printf '%s\n' "<!-- review-gate -->" "review gate: the verdict step did not run" > body.md
+          d="BODY_$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+          { echo "body<<$d"; cat body.md; echo; echo "$d"; echo "title=$TITLE"; } >> "$GITHUB_OUTPUT"
 
       - name: Gate
-        if: (steps.decide.outputs.required == 'true' || steps.train.outputs.is_train == 'true') && !cancelled()
+        if: steps.admit.outputs.defer != 'true' && !cancelled()
         env:
-          RESULT: ${{ steps.verdict.outputs.result || steps.train.outputs.result }}
+          RESULT: ${{ steps.verdict.outputs.result }}
+        # INLINE, never a script under $RUNNER_TEMP: in `review` the PR's own tests have run by now
+        # and could rewrite any file there; this YAML they cannot reach
         run: |
           case "$RESULT" in
             pass) echo "review gate: pass" ;;
@@ -540,16 +709,120 @@ jobs:
             *) echo "::error::review gate BLIND ($RESULT) -- the reviewer did not finish looking"; exit 1 ;;
           esac
 
+  defer:
+    # A PARKED review (either Admit above). RED on purpose: the PR is not reviewed, so it cannot
+    # merge -- nothing is waived. The `queue:parked` label and this job's name say it is the queue's
+    # timing, not a finding; pr_heal / redclass read the name and leave it to the scheduler.
+    name: review deferred
+    needs: [decide, review]
+    if: ${{ !cancelled() && (needs.decide.outputs.mode == 'defer' || needs.review.outputs.parked == 'true') }}
+    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Parked by the PR queue (not a failure of this PR)
+        env:
+          WHY: ${{ needs.decide.outputs.parked }}
+        run: |
+          msg="review PARKED by the PR queue -- NOT a failure of this PR, nothing to fix: ${WHY:-the queue head needs the sealed runner}. pr-autoupdate re-runs this review when this PR is the queue head or the pool is free."
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::$msg"
+          exit 1
+
+  verdict:
+    # THE IN-WORKFLOW AGGREGATE (v1.29.0). The caller's `review gate` judges this whole workflow, and
+    # GitHub counts a skipped job as passed: with the model review in its own job, `decide` green +
+    # `review` skipped would read as a pass. So: `review` may be skipped ONLY when `decide` said it
+    # is not needed (train, skip, finish, defer); in mode `review` it must have run and passed. A
+    # parked review fails here as a CONSEQUENCE of `review deferred` (redclass reads it so).
+    name: verdict
+    needs: [decide, review, defer]
+    if: ${{ !cancelled() }}
+    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write   # the ONE verdict comment, for every mode
+    env:
+      # the job that FINISHED the verdict: `model review` in mode review, `decide` otherwise (empty
+      # when neither did: a park, a skip, a review job that never started)
+      BODY: ${{ needs.decide.outputs.mode == 'review' && needs.review.outputs.body || needs.decide.outputs.body }}
+    steps:
+      - name: Comment on the PR
+        if: env.BODY != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$BODY" > body.md
+          # one sticky comment, found by its marker, so a re-review edits instead of piling up
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                 -q '.[] | select(.body | startswith("<!-- review-gate -->")) | .id' | tail -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@body.md >/dev/null
+          else
+            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body-file body.md
+          fi
+
+      - name: Push a block to ntfy
+        # A blocked PR with no live session sits silently until someone looks; this is the push.
+        # Priority 3: a PR is never a reason to wake the operator.
+        if: >-
+          env.BODY != '' && needs.decide.outputs.unarmed != 'true'
+          && (needs.decide.outputs.mode == 'review' && needs.review.outputs.result || needs.decide.outputs.result) != 'pass'
+        env:
+          NTFY_URL: ${{ secrets.ntfy-url }}
+          TITLE: ${{ (needs.decide.outputs.mode == 'review' && needs.review.outputs.title || needs.decide.outputs.title) || 'review gate did not produce a verdict' }}
+          URL: ${{ github.event.pull_request.html_url }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.event.repository.name }}
+          # via env, never ${{ }} inside `run:` -- a PR title is attacker-shaped text
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NTFY_URL:-}" ]; then echo "::warning::ntfy-url unset; the block was not pushed"; exit 0; fi
+          curl -fsS -X POST "$NTFY_URL" -H "Title: $REPO #$PR: $TITLE" \
+            -H "Priority: 3" -H "Tags: mag" -H "Click: $URL" \
+            --data-binary "$PR_TITLE" >/dev/null \
+            || echo "::warning::ntfy push failed"
+
+      # mode review: `model review` must run (and `defer` may skip); mode defer: `review deferred`
+      # must run (it is red); train / skip / finish: neither runs
+      - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+        with:
+          jobs: ${{ toJSON(needs) }}
+          allowed-skips: >-
+            ${{ needs.decide.outputs.mode == 'review' && 'defer'
+            || needs.decide.outputs.mode == 'defer' && 'review' || 'review, defer' }}
+      # A job's conclusion is not its verdict: a parked `model review` ends SUCCESS (its steps were
+      # skipped). Read the verdict itself -- in mode review only `pass` is green, whatever else
+      # the jobs above say; in mode defer nothing is.
+      - name: The review's own verdict
+        env:
+          MODE: ${{ needs.decide.outputs.mode }}
+          RESULT: ${{ needs.review.outputs.result }}
+        run: |
+          case "$MODE" in
+            review) [ "$RESULT" = pass ] || { echo "::error::model review result '${RESULT}' is not pass"; exit 1; } ;;
+            defer) echo "::error::review parked by the PR queue: not reviewed yet"; exit 1 ;;
+          esac
+
   record:
     # What a later run of this PR compares against to carry a verdict (ci_kit.review.carry).
     # A SEPARATE JOB on purpose: the review job runs the PR's own tests, which could rewrite any
     # file on that runner; this runner never checks the PR out. Pass AND block are recorded (the
-    # newest record wins, so an older pass cannot outvote a newer block); BLIND records nothing.
+    # newest record wins, so an older pass cannot outvote a newer block); BLIND records nothing,
+    # and neither does a parked run. The hash and origin come from `decide` (secure pool), the
+    # result from whichever job produced it: `decide` for a carry, `review` for a full review.
     # continue-on-error: a failure here only means the next run reviews in full, and must never
     # turn the caller's aggregate red.
     name: record verdict
-    needs: review
-    if: always() && needs.review.outputs.hash != '' && (needs.review.outputs.result == 'pass' || needs.review.outputs.result == 'block')
+    needs: [decide, review]
+    if: >-
+      always() && needs.decide.outputs.hash != ''
+      && ((needs.decide.outputs.mode == 'finish' && needs.decide.outputs.result == 'pass')
+          || (needs.decide.outputs.mode == 'review'
+              && (needs.review.outputs.result == 'pass' || needs.review.outputs.result == 'block')))
     # THE SECURE POOL when the caller sets CI_SECURE_RUNNER (2026-11-08): this job holds no
     # secret, but later runs TRUST the artifact it writes to carry a pass, so it never joins the
     # shared socket pool, where a concurrent PR job is root over docker and could rewrite it.
@@ -565,9 +838,9 @@ jobs:
       - name: Write
         env:
           PR: ${{ github.event.pull_request.number }}
-          HASH: ${{ needs.review.outputs.hash }}
-          ORIGIN: ${{ needs.review.outputs.origin }}
-          RESULT: ${{ needs.review.outputs.result }}
+          HASH: ${{ needs.decide.outputs.hash }}
+          ORIGIN: ${{ needs.decide.outputs.origin }}
+          RESULT: ${{ needs.decide.outputs.mode == 'review' && needs.review.outputs.result || needs.decide.outputs.result }}
         run: |
           python3 -c 'import json, os; e = os.environ; print(json.dumps({"pr": int(e["PR"]), "hash": e["HASH"], "head_sha": e["ORIGIN"], "result": e["RESULT"]}))' > verdict.json
           cat verdict.json >> "$GITHUB_STEP_SUMMARY"
