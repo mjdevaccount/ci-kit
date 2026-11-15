@@ -26,6 +26,14 @@ after main's last run at the PR's base. Under strict protection main records no 
 rule holds that PR exactly as before. It fires only when main ITSELF recorded the red (a scheduled
 or re-run on main, a push that bypassed the gate) and then recorded the green.
 
+THE NO-AUTHOR CASE (`bot_reason`, separately switched: `base-retry-bot-authors`, default empty =
+off). A PR whose author login is EXACTLY in that list (no pattern, no "[bot]" guessing) has nobody
+who will push the fix -- the date-dependent test above, on a Renovate PR, sat red indefinitely. Such
+a PR is retried with NO red-at-base evidence when main is GREEN on every failing check now and main
+MOVED (its newest commit the PR lacks) after the PR's red run finished. A failing check main never
+runs (the review gate: its verdict is on the diff, which merging main does not change) still holds
+it. Same markers, same cap (both reasons count together), same one-actor rule.
+
 THE BOUNDS. ONCE PER HEAD (a retry marker at the head holds it; a raced PUT spends it). A CAP on
 retries since the last NON-UPDATER commit: walking first parents through 2-parent merges (the
 updater's own, retry or plain update alike, or an equivalent hand merge of main), the retry markers
@@ -85,6 +93,7 @@ class Evidence:
     near: list[list[Run]]                   # merge base, then NEAR commits before it (newest first)
     lacking: list[list[Run]]                # main commits the PR lacks, newest first
     base: str = ""                          # main's newest commit the PR lacks
+    base_at: str = ""                       # its committer date (ISO 8601, UTC): when main last moved
     unread: list[str] = field(default_factory=list)
 
 
@@ -128,12 +137,47 @@ def transition(key: Key, ev: Evidence) -> str:
     name = key[2] if not key[1] else f"{key[2]} ({key[1]})"
     if not red_at_base(key, ev.near):
         return f"`{name}` never red on main at its base (main was fine: the red is the PR's)"
+    return green_since(key, ev)
+
+
+def green_since(key: Key, ev: Evidence) -> str:
+    """'' = SUCCESS is the newest finished result of `key` on the main commits the PR lacks. Pure."""
+    name = key[2] if not key[1] else f"{key[2]} ({key[1]})"
     for runs in ev.lacking:
         done = sorted((r for r in runs if r.key == key and r.conclusion), key=lambda r: -r.id)
         done = [r for r in done if r.conclusion not in ("SKIPPED", "NEUTRAL", "STALE", "CANCELLED")]
         if done:
             return "" if done[0].conclusion in _GREEN else f"`{name}` still {done[0].conclusion.lower()} on main"
     return f"`{name}` has no finished result on main since its merge base"
+
+
+def built_at(p: dict, names: list[str]) -> str:
+    """When the PR head's red run(s) finished: the latest completedAt (a status: createdAt) among the
+    failing checks in its rollup ('' = unknown). ISO 8601 UTC strings compare in time order. Pure."""
+    times = [str(c.get("completedAt") or c.get("createdAt") or "") for c in p.get("statusCheckRollup") or []
+             if (c.get("name") or c.get("context")) in names]
+    return "" if not times or "" in times else max(times)
+
+
+def bot_reason(p: dict, names: list[str], ev: Evidence, bots: frozenset[str]) -> str:
+    """THE NO-AUTHOR CASE ('' = retry): a PR whose author is in the configured `bots` list (exact
+    GraphQL login; nothing guessed) has nobody who will ever push the fix, so main need not have been
+    red at its base -- a check red only on the PR's own run (a date-dependent test main's runs predate)
+    gets ONE look per base move: main GREEN on every failing check now (so a check main never runs --
+    a review gate's verdict on the diff, which merging main does not change -- holds it), and main
+    MOVED after the PR's red run finished. Pure."""
+    who = str((p.get("author") or {}).get("login") or "")
+    if who not in bots:
+        return f"author `{who}` is not a configured no-author bot"
+    since = [r for r in (green_since(k, ev) for k in ev.failing) if r]
+    if since:
+        return "; ".join(since)
+    at = built_at(p, names)
+    if not at or not ev.base_at:
+        return "cannot tell whether main moved after its red run"
+    if ev.base_at <= at:
+        return f"main has not moved since its red run ({at})"
+    return ""
 
 
 def count(head: str, parents: Callable[[str], list[str]], retried: set[str], cap: int, limit: int = CHAIN) -> int:
@@ -215,26 +259,30 @@ def failing_keys(runs: list[Run], names: list[str]) -> list[Key]:
     return sorted(k for k, r in newest.items() if r.conclusion in _RED | {"CANCELLED"})
 
 
-def evidence(repo: str, p: dict, base_ref: str, names: list[str], read: Gh) -> Evidence:
+def evidence(repo: str, p: dict, base_ref: str, names: list[str], read: Gh, since: bool = False) -> Evidence:
     """The candidate's failing keys and main's runs near its merge base and since. Raises when
-    GitHub will not answer. Cheapest refusal first: no red near the base = no reads since."""
+    GitHub will not answer. Cheapest refusal first: no red near the base = no reads since, unless
+    `since` (a configured bot author: the no-author case reads main's commits since regardless)."""
     head = str(p["headRefOid"])
     ev = Evidence(failing_keys(runs_at(repo, head, read), names), [], [])
     got = [x.strip() for x in (read("api", "--paginate", f"repos/{repo}/compare/{head}...{base_ref}?per_page=100",
-                                    "--jq", ".merge_base_commit.sha, .commits[].sha").stdout or "").splitlines() if x.strip()]
+                                    "--jq", '.merge_base_commit.sha, (.commits[] | "\\(.sha) \\(.commit.committer.date)")'
+                                    ).stdout or "").splitlines() if x.strip()]
     if not got or not ev.failing:
         return ev
-    mb = got[0]
-    lacking = list(reversed([x for x in got[1:] if x != mb]))  # newest first
+    mb = got[0].split()[0]
+    dated = list(reversed([x.split() for x in got[1:] if x.split()[0] != mb]))  # newest first: [sha, date]
+    lacking = [d[0] for d in dated]
+    ev.base_at = dated[0][1] if dated and len(dated[0]) > 1 else ""
     near = [x.strip() for x in (read("api", f"repos/{repo}/commits?sha={mb}&per_page={NEAR + 1}", "--jq",
                                      ".[].sha").stdout or "").splitlines() if x.strip()] or [mb]
     ev.near = [runs_at(repo, sha, read) for sha in near[:NEAR + 1]]
     ev.base = lacking[0] if lacking else ""
-    if not all(red_at_base(k, ev.near) for k in ev.failing):
+    if not since and not all(red_at_base(k, ev.near) for k in ev.failing):
         return ev  # main was never red at its base on some check: no read of the commits since
     for sha in lacking[:LOOKBACK]:
         ev.lacking.append(runs_at(repo, sha, read))
-        if all(not transition(k, ev) for k in ev.failing):
+        if all(not green_since(k, ev) for k in ev.failing):
             break
     return ev
 
@@ -253,7 +301,7 @@ def whoami(write: Gh) -> str:
 
 def assess(repo: str, armed: list[dict], required: tuple[str, ...], conflict_label: str, machinery: frozenset[int],
            base_of: Callable[[dict], str], cap: int, read: Gh, comments: Callable[[str, int], list[tuple[str, str]]],
-           write: Gh, summary: list[str]) -> tuple[dict[int, str], int]:
+           write: Gh, summary: list[str], bots: frozenset[str] = frozenset()) -> tuple[dict[int, str], int]:
     """({PR: the marker comment to write before its update}, errors). A spent PR is surfaced here."""
     retry: dict[int, str] = {}
     errors = 0
@@ -269,20 +317,28 @@ def assess(repo: str, armed: list[dict], required: tuple[str, ...], conflict_lab
     for p in todo:
         n, head = int(p["number"]), str(p["headRefOid"])
         names = redclass.red_checks(p.get("statusCheckRollup"), required)
-        ev, done = Evidence([], [], []), 0
+        ev, done, why_ok = Evidence([], [], []), 0, ""
         try:
             notes = comments(repo, n)
             retried, spent = trusted(notes, me, _MARK), trusted(notes, me, _SPENT)
             laddered = any(h == head for h, *_ in pr_ladder.marks([b for _, b in notes], pr_ladder._HEAL))
             action, why = decide(head, retried, spent, laddered, "", 0, cap)
             if action in ("retry", "spent"):  # the record did not settle it: read main
-                ev = evidence(repo, p, base_of(p), names, read)
+                bot = str((p.get("author") or {}).get("login") or "") in bots
+                ev = evidence(repo, p, base_of(p), names, read, since=bot)
                 lost = sorted(set(names) - {k[2] for k in ev.failing})  # every red check must be identified
                 reason = "; ".join([f"`{c}` not identified at its head" for c in lost]
                                    + [r for r in (transition(k, ev) for k in ev.failing) if r]) if ev.failing else \
                     "its failing checks have no check run at its head"
+                if reason and bot and not lost and ev.failing:  # the second, separately switched reason
+                    no_author = bot_reason(p, names, ev, bots)
+                    reason = "" if not no_author else f"{reason}; no-author case: {no_author}"
+                    why_ok = "" if no_author else (f"NO-AUTHOR CASE (bot `{p['author']['login']}`, no red-at-base "
+                                                   "evidence): main green on its failing check(s) and moved since its red run")
                 done = count(head, parents_of(repo, read), retried, cap) if not reason and retried else 0
                 action, why = decide(head, retried, spent, laddered, reason, done, cap)
+                if action == "retry" and why_ok:
+                    why = f"{why_ok}: base-driven retry {done + 1} of {cap}"
         except (subprocess.CalledProcessError, ValueError, KeyError) as e:
             errors += 1
             print(f"::error::#{n}: base-driven retry could not read its evidence: {e} {(getattr(e, 'stderr', '') or '')[-300:]}")

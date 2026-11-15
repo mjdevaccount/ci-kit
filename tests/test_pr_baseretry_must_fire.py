@@ -23,7 +23,7 @@ H, H0, H2, X = "a" * 40, "c" * 40, "b" * 40, "d" * 40           # PR heads
 MB, A1, L1, L2 = "1" * 40, "3" * 40, "5" * 40, "6" * 40         # main: merge base, before it, lacked (old, new)
 CI, OTHER = ".github/workflows/ci.yml", ".github/workflows/nightly.yml"
 RED = {"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "FAILURE",
-       "startedAt": "2026-11-15T00:00:00Z"}
+       "startedAt": "2026-11-15T01:30:00Z", "completedAt": "2026-11-15T01:37:00Z"}
 GREEN = {**RED, "conclusion": "SUCCESS"}
 
 
@@ -50,14 +50,14 @@ class World:
 
     def __init__(self, mp: pytest.MonkeyPatch, rows: list[dict], *, main: dict | None = None,
                  parents: dict[str, list[str]] | None = None, notes: dict[int, list[tuple[str, str]]] | None = None,
-                 write_rc: int = 0, me: str = ME) -> None:
+                 write_rc: int = 0, me: str = ME, moved: str = "2026-11-15T02:00:00Z") -> None:
         self.calls: list[tuple] = []
         self.reads: list[tuple] = []
         self.comments: list[tuple[int, str]] = []
         self.order: list[str] = []
         self.main = {MB: [("test", "FAILURE", CI)], L2: [("test", "SUCCESS", CI)]} if main is None else main
         self.parents = {H: [H0]} if parents is None else parents
-        self.notes, self.write_rc, self.me = notes or {}, write_rc, me
+        self.notes, self.write_rc, self.me, self.moved = notes or {}, write_rc, me, moved
         mp.setattr(upd.pr_list, "rows", lambda _: rows)
         mp.setattr(upd, "_gh_read", self.read)
         mp.setattr(upd, "_gh", self.gh)
@@ -81,7 +81,8 @@ class World:
         path = next((x for x in a if x.startswith("repos/")), "")
         lines = lambda xs: _Done(out=chr(10).join(json.dumps(x) for x in xs))  # noqa: E731
         if "/compare/" in path:
-            return _Done(out=chr(10).join([MB, L1, L2]))  # merge base, then the lacked commits oldest first
+            # merge base, then the lacked commits oldest first, each with its committer date
+            return _Done(out=chr(10).join([MB, f"{L1} 2026-11-15T01:00:00Z", f"{L2} {self.moved}"]))
         if "/commits?sha=" in path:
             return _Done(out=chr(10).join([MB, A1]))
         sha = path.split("/commits/")[-1].split("/")[0] if "/commits/" in path else path.split("head_sha=")[-1][:40]
@@ -369,3 +370,94 @@ def test_the_one_reader_returns_authors_and_comments_of_is_unchanged(monkeypatch
     assert ops.comments_by("o/r", 7) == [(ME, "one"), (MALLORY, "two"), (ME, "three")]
     assert ops.comments_of("o/r", 7) == ["one", "two", "three"]
     assert ".user.login" in seen[0][-1] and "--paginate" in seen[0]
+
+
+# ── THE NO-AUTHOR CASE: a configured bot author, main never red, the fix landed on main ─────────
+ALWAYS_GREEN = {MB: [("test", "SUCCESS", CI)], L2: [("test", "SUCCESS", CI)]}  # main's runs predate the date
+BOT = {"author": {"__typename": "Bot", "login": "renovate"}}
+
+
+def _bot_run(w: World, cap: int = 1, bots: tuple[str, ...] = ("renovate",)) -> tuple[int, list[str]]:
+    summary: list[str] = []
+    rc = upd.run("o/r", summary, [], upd.Options(max_in_flight=1, rerun_limit=0, base_retry_cap=cap,
+                                                 base_retry_bots=bots))
+    return rc, summary
+
+
+def test_a_bot_pr_main_never_red_is_retried_once_then_held_at_the_cap_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+    w = World(monkeypatch, [_pr(649, **BOT)], main=ALWAYS_GREEN)
+    rc, summary = _bot_run(w)
+    assert rc == 0 and w.puts() == [649] and w.order == ["comment 649", "put 649"]
+    assert any("NO-AUTHOR CASE (bot `renovate`, no red-at-base evidence)" in s and "1 of 1" in s for s in summary)
+    # the retry's merge (H2, first parent H) is red again and main moved again: the SAME cap holds it
+    w2 = World(monkeypatch, [_pr(649, headRefOid=H2, **BOT)], main=ALWAYS_GREEN, parents={H2: [H, L2]},
+               notes={649: [(ME, w.comments[0][1])]})
+    rc, summary = _bot_run(w2)
+    assert rc == 1 and w2.puts() == [] and br.SPENT.format(head=H2) in w2.comments[0][1]
+
+
+def test_the_same_pr_by_a_human_is_held_as_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    w = World(monkeypatch, [_pr(649, author={"login": "someone"})], main=ALWAYS_GREEN)
+    rc, summary = _bot_run(w)
+    assert rc == 0 and w.puts() == [] and w.comments == []
+    assert any("never red on main at its base" in s for s in summary)
+    assert not any(L2 in x for r in w.reads for x in r)  # a human PR reads nothing past the base
+
+
+def test_an_empty_bot_list_reads_nothing_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    w = World(monkeypatch, [_pr(649, **BOT)], main=ALWAYS_GREEN)
+    rc, summary = _bot_run(w, bots=())
+    assert rc == 0 and w.puts() == [] and not any(L2 in x for r in w.reads for x in r)
+    human = World(monkeypatch, [_pr(649, author={"login": "someone"})], main=ALWAYS_GREEN)
+    _bot_run(human, bots=())
+    assert len(w.reads) == len(human.reads)  # the bot PR costs exactly what any PR costs
+
+
+def test_cap_zero_disables_the_no_author_case_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    w = World(monkeypatch, [_pr(649, **BOT)], main=ALWAYS_GREEN)
+    rc, _ = _bot_run(w, cap=0)
+    assert rc == 0 and w.puts() == [] and len(w.reads) == 1
+
+
+@pytest.mark.parametrize("world,why", [
+    ({"moved": "2026-11-15T01:30:00Z"}, "main has not moved since its red run"),          # main moved BEFORE it
+    ({"main": {MB: [("test", "SUCCESS", CI)], L2: [("test", "FAILURE", CI)]}}, "still failure on main"),
+    ({"main": {MB: [("test", "SUCCESS", CI)]}}, "no finished result on main"),            # main never runs it
+])
+def test_a_bot_pr_without_the_no_author_evidence_is_held(monkeypatch: pytest.MonkeyPatch, world: dict, why: str) -> None:
+    w = World(monkeypatch, [_pr(649, **BOT)], **{"main": ALWAYS_GREEN, **world})
+    rc, summary = _bot_run(w)
+    assert rc == 0 and w.puts() == [] and any("no-author case" in s and why in s for s in summary), summary
+
+
+def test_a_bot_pr_red_on_the_review_gate_is_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    # the review verdict is on the DIFF, which merging main does not change, and main never runs it
+    review = {"__typename": "StatusContext", "context": "review", "state": "FAILURE", "createdAt": "2026-11-15T01:37:00Z"}
+    w = World(monkeypatch, [_pr(649, RED, review, **BOT)], main=ALWAYS_GREEN)
+    assert _bot_run(w)[0] == 0 and w.puts() == []
+
+
+def test_a_bot_pr_whose_red_run_time_is_unknown_is_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    red = {k: v for k, v in RED.items() if k != "completedAt"}
+    w = World(monkeypatch, [_pr(649, red, **BOT)], main=ALWAYS_GREEN)
+    rc, summary = _bot_run(w)
+    assert w.puts() == [] and any("cannot tell whether main moved" in s for s in summary)
+
+
+def test_bot_authors_reach_the_options_exactly(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[upd.Options] = []
+    monkeypatch.setattr(upd, "run", lambda repo, s, r, opts, h=None: seen.append(opts) or 0)
+    for var in ("GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "CI_KIT_BASE_RETRY_BOT_AUTHORS"):
+        monkeypatch.delenv(var, raising=False)
+    assert upd.main(["--repo", "o/r"]) == 0 and seen[-1].base_retry_bots == ()
+    monkeypatch.setenv("CI_KIT_BASE_RETRY_BOT_AUTHORS", " renovate , dependabot,")
+    assert upd.main(["--repo", "o/r"]) == 0 and seen[-1].base_retry_bots == ("dependabot", "renovate")
+
+
+def test_bot_reason_matches_the_author_exactly() -> None:
+    ev = br.Evidence([("github-actions", CI, "test")], [], [[br.Run(("github-actions", CI, "test"), "SUCCESS", 1)]],
+                     base=L2, base_at="2026-11-15T02:00:00Z")
+    bots = frozenset({"renovate"})
+    assert br.bot_reason(_pr(649, **BOT), ["test"], ev, bots) == ""
+    for login in ("someone", "renovate[bot]", "app/renovate", "Renovate"):
+        assert "not a configured no-author bot" in br.bot_reason(_pr(649, author={"login": login}), ["test"], ev, bots)

@@ -90,6 +90,8 @@ class Options:
     # consecutive base-driven retries of a red BEHIND PR main has gone green on (pr_baseretry); 0 = off.
     # main() turns it ON (env CI_KIT_BASE_RETRY_CAP, default pr_baseretry.CAP)
     base_retry_cap: int = 0
+    # the NO-AUTHOR case (pr_baseretry.bot_reason): exact author logins, empty = off. Shares the cap above.
+    base_retry_bots: tuple[str, ...] = ()
     base_retry_error: str = ""  # an unreadable cap: the feature is refused, the pass goes on, the run is red
 
 
@@ -317,7 +319,8 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
     if opts.max_in_flight > 0 and opts.base_retry_cap > 0:  # with no queue every armed PR is updated anyway
         retry, e = pr_baseretry.assess(repo, armed, opts.required, opts.label, machinery | parked,
                                        lambda p: str(p.get("baseRefName") or default()), opts.base_retry_cap,
-                                       _gh_read, pr_heal.comments_by, pr_heal.write, summary)
+                                       _gh_read, pr_heal.comments_by, pr_heal.write, summary,
+                                       frozenset(opts.base_retry_bots))
         errors += e
     q = _train_plan(prs, armed, summary, opts, machinery | parked,
                     frozenset(cancel.restarted) if cancel else frozenset(), frozenset(retry))
@@ -600,7 +603,9 @@ def main(argv: list[str] | None = None) -> int:
                    train_stale_min=float(os.environ.get("CI_KIT_TRAIN_STALE_MIN", "").strip() or 90),
                    cancel_doomed=os.environ.get("CI_KIT_CANCEL_DOOMED", "true").strip().lower() not in ("false", "0", "no"),
                    ladder=pr_ladder.Config.from_env(),
-                   base_retry_cap=cap, base_retry_error=cap_error)
+                   base_retry_cap=cap, base_retry_error=cap_error,
+                   base_retry_bots=tuple(sorted({s.strip() for s in os.environ.get(
+                       "CI_KIT_BASE_RETRY_BOT_AUTHORS", "").split(",") if s.strip()})))
     summary: list[str] = []
     relock: list[int] = []
     healing: list[dict] = []

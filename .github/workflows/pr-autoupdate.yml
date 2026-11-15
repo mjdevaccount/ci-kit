@@ -213,6 +213,10 @@ on:
         description: base-driven retries (since the PR's last own commit) of an armed PR held red + BEHIND on a check MAIN went red -> green on (ci_kit/pr_baseretry.py; once per head, after every green PR; at the cap a marker comment + a red pass; 0 = off, the default)
         type: number
         default: 0
+      base-retry-bot-authors:
+        description: comma-separated EXACT author logins (as GraphQL reports them, e.g. Renovate's app is `renovate`) whose red + BEHIND PRs get the NO-AUTHOR base retry -- main green on the failing checks and moved since the red run, no red-at-base evidence -- under the same markers and cap ('' = off, the default; needs base-retry-cap > 0)
+        type: string
+        default: ''
     secrets:
       token:
         description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs --, with train-workflow, which dispatches, and with cancel-doomed-runs), administration read (cancel-doomed-runs reads whether the base is strict), commit statuses RW with queue-hold, on the caller repo
@@ -285,6 +289,7 @@ jobs:
       CI_KIT_HEAL_STALE_MIN: ${{ inputs.heal-stale-minutes }}
       # an env var, never a flag (the older-@v1-tool reason above)
       CI_KIT_BASE_RETRY_CAP: ${{ inputs.base-retry-cap }}
+      CI_KIT_BASE_RETRY_BOT_AUTHORS: ${{ inputs.base-retry-bot-authors }}
       CI_KIT_EVENT: ${{ github.event_name }}
       CI_KIT_BEFORE: ${{ github.event.before }}
       CI_KIT_SHA: ${{ github.sha }}
