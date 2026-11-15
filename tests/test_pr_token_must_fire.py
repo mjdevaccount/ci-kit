@@ -289,7 +289,7 @@ def test_an_unknown_scope_is_red(monkeypatch: pytest.MonkeyPatch, tmp_path: path
 
 
 TOKEN_JOBS = {"pr-autoupdate.yml": ["update"], "merge-train.yml": ["train"], "ci-green.yml": ["advance"],
-              "pr-heal.yml": ["claim", "push", "report"]}
+              "pr-heal.yml": ["claim", "push", "report"], "relock.yml": ["push"]}
 
 
 def token_faults(wf: dict, jobs: list[str]) -> list[str]:

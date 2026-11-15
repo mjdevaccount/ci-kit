@@ -1,0 +1,276 @@
+# relock -- push a refreshed lockfile to a dependency bot's PR whose manifest moved without it.
+#
+#   # .github/workflows/relock.yml in the caller
+#   name: relock
+#   on:
+#     pull_request:
+#       paths: [pyproject.toml, uv.lock, .github/workflows/relock.yml]
+#   permissions:
+#     contents: read
+#   concurrency:
+#     group: relock-${{ github.event.pull_request.number }}
+#     cancel-in-progress: true
+#   jobs:
+#     relock:
+#       uses: mjdevaccount/ci-kit/.github/workflows/relock.yml@v1
+#       # with: { lockfiles: uv.lock, branch-prefix: renovate/ }      # the defaults
+#       secrets:
+#         token: ${{ secrets.YOUR_PUSH_PAT }}                         # contents RW on this repo
+#         EDGE_BOT_PRIVATE_KEY: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}   # optional: the App (token-source)
+#
+# WHY. A dependency bot's regex manager (a release-wheel URL, a PEP 508 `pkg @ git+...@vX.Y.Z` pin)
+# rewrites the manifest and leaves the lockfile alone, and a hosted bot runs no post-upgrade task,
+# so every such bump opens a PR that is red on `uv lock --check` / `uv sync --locked` until someone
+# runs `uv lock` by hand. This is that `uv lock` (or any lockfile kind ci_kit/pr_regen.LOCKFILES
+# relocks: uv, npm, pnpm, NuGet), from the kit's ONE implementation of "regenerate a lockfile with no
+# secret, push it with a token" (ci_kit/pr_relock.py over pr_regen + pr_apply, the heal ladder's).
+#
+# ONLY A BOT BRANCH. A person's PR with a stale lock stays red: its author relocks, and a silent
+# relock would hide what they changed. The gate is the head ref starting with `branch-prefix` on a
+# same-repo PR -- only a collaborator can push a branch there, and a test branch named with the
+# prefix exercises the path end to end. An EMPTY prefix would admit every branch: red, by name.
+#
+# TWO JOBS, BECAUSE THE LOCK TOOL RUNS THE PR'S CODE (resolving can run a build backend, on a runner
+# with sudo):
+#   lock   HOSTED, deliberately -- not the caller's CI pool and never the secure pool. It holds no
+#          token, only (with `git-ssh-repos`) a read-only deploy key's agent for a private dependency,
+#          loaded in a step of its own (ci_kit/git_ssh.sh via heal-install) and killed straight after.
+#          On a shared self-hosted pool another job could rewrite its output (a shared cache, a docker
+#          socket), and CI on the relocked head would run on the same pool, so nothing downstream
+#          would catch it.
+#   push   a FRESH runner with the push token, running no PR code: git and ci-kit at `kit-ref`
+#          (PYTHONSAFEPATH keeps a PR-added `ci_kit/` off the path). It trusts NOTHING `lock` reports
+#          but the bytes of the lockfile(s): the paths come from its OWN `lockfiles` input (never a
+#          `lock` output: code in `lock` can append to $GITHUB_OUTPUT), the kit from its own
+#          `kit-ref`, and it refuses an artifact that is anything but those regular files (an extra
+#          file, a symlink, a path outside the set, a delete, a merge claim), a head that moved, a
+#          fork, a non-bot branch, and a commit touching anything else. The CONTENT of the lockfile
+#          is the PR's to choose: it pins what the PR's manifest names, and CI judges the push.
+#
+# THE TOKEN (ci-kit's pr-token composite, scope `push`): a GITHUB_TOKEN push fires no workflow, so CI
+# would never re-run on the relocked head. The PAT in `token` (contents RW), or the App per
+# `token-source` / the caller's PR_TOKEN_SOURCE variable. UNCONFIGURED IS RED, by name -- but only
+# when a relock is needed: a bot PR whose lock already matches passes without reading the token.
+# A Dependabot PR gets no repository secrets: there only the App (or a Dependabot secret) can push.
+#
+# AUTO-MERGE. The relock commit is authored github-actions[bot]; Renovate refuses to auto-merge a
+# branch carrying a commit it did not write unless `gitIgnoredAuthors` names that address (ci-kit's
+# renovate/default.json5 does). Cost: a bot rebase of a stale-lock branch is two CI runs.
+#
+# NO LOOP. A second relock needed on top of our own relock commit means the lock tool is not
+# deterministic here; `push` refuses rather than pushing again. A relock that re-runs on its own
+# commit and finds the lock current is the normal, quiet end.
+#
+# A caller wired to any other event (`pull_request_target` included: it would hand a token job the
+# PR's code) gets a RED `trigger` job, never a quiet skip. A failed or straying lock run is a red
+# `lock` job. NOT COVERED here: a caller whose `paths:` filter misses the manifest never runs this
+# at all (the PR stays red on its own CI, which is the signal), and a disabled workflow is silent.
+name: relock
+
+on:
+  workflow_call:
+    inputs:
+      lockfiles:
+        description: >-
+          the lockfiles to relock, repo-relative, space- or newline-separated; each a tracked file of a
+          kind ci_kit/pr_regen.LOCKFILES knows (uv.lock, package-lock.json, npm-shrinkwrap.json,
+          pnpm-lock.yaml, packages.lock.json), relocked in its own directory. The ONLY paths `push` writes
+        type: string
+        default: uv.lock
+      branch-prefix:
+        description: >-
+          the dependency bot's branch prefix; only a same-repo PR whose head ref starts with it is relocked,
+          matched case-INSENSITIVELY (GitHub's startsWith; ci_kit/pr_relock.refusal agrees). '' or any whitespace = red
+        type: string
+        default: renovate/
+      python-version:
+        description: setup-uv python-version ('' = uv's choice)
+        type: string
+        default: ""
+      dotnet-version:
+        description: setup-dotnet version for a NuGet relock ('' = 10.0.x, only when a packages.lock.json is listed)
+        type: string
+        default: ""
+      git-ssh-repos:
+        description: >-
+          PRIVATE GitHub repos (`owner/name`, space- or newline-separated) the lockfile names by https
+          URL; with the `git-ssh-key` secret the lock tool reaches them over ssh (ci_kit/git_ssh.sh: the
+          keys live only in their own step, the tool gets the agents, which are killed straight after).
+          Set this and an empty key fails loud. '' = off
+        type: string
+        default: ""
+      kit-ref:
+        description: the ci-kit ref whose ci_kit modules run in both jobs (a tag, branch or sha)
+        type: string
+        default: v1
+      token-source:
+        description: pat | app | app-required ('' = the caller repo's PR_TOKEN_SOURCE variable, else pat) -- ci_kit/pr_token.py
+        type: string
+        default: ""
+    secrets:
+      token:
+        description: the push token (fine-grained PAT, contents RW on the caller repo); empty while the PAT acts is red, only when a relock is needed
+        required: false
+      EDGE_BOT_PRIVATE_KEY:
+        description: the GitHub App's private key (with the EDGE_BOT_APP_ID variable); token-source decides who pushes
+        required: false
+      git-ssh-key:
+        description: >-
+          READ-ONLY deploy key(s) for `git-ssh-repos`, never a key that can write; one key per repo, in
+          `git-ssh-repos` order (a `|` block of `secrets.*` lines)
+        required: false
+    outputs:
+      result:
+        description: pushed | moved | nothing | refused | failed ('' = no relock was needed)
+        value: ${{ jobs.push.outputs.result }}
+
+permissions:
+  contents: read
+
+# every job runs ci_kit from $RUNNER_TEMP, never a `ci_kit/` the PR adds to the checkout
+env:
+  PYTHONSAFEPATH: "1"
+
+jobs:
+  trigger:
+    name: caller trigger is pull_request
+    # GitHub expressions have no trim(): a prefix holding a space, tab or newline (no branch name can)
+    # is red here too, never every job skipping green
+    if: >-
+      github.event_name != 'pull_request' || inputs.branch-prefix == '' || contains(inputs.branch-prefix, ' ')
+      || contains(inputs.branch-prefix, fromJSON('"\t"')) || contains(inputs.branch-prefix, fromJSON('"\n"'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - env:
+          EVENT: ${{ github.event_name }}
+          PREFIX: ${{ inputs.branch-prefix }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "::error::relock needs a pull_request caller (got '$EVENT'): only that event names the PR branch to relock"
+          else
+            echo "::error::relock's branch-prefix '$PREFIX' is empty or holds whitespace: fix the caller (no branch name can)"
+          fi
+          exit 1
+
+  lock:
+    name: lock (PR code, no token)
+    if: >-
+      github.event_name == 'pull_request'
+      && inputs.branch-prefix != ''
+      && !contains(inputs.branch-prefix, ' ')
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && startsWith(github.event.pull_request.head.ref, inputs.branch-prefix)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      # `push` reads `state` only to decide whether to run; it re-checks everything it relies on
+      state: ${{ steps.collect.outputs.state || steps.prepare.outputs.state || 'failed' }}
+    steps:
+      - name: Check out the PR head and fetch ci-kit at kit-ref
+        id: kit
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        with: {checkout: "${{ github.event.pull_request.head.sha }}", ref: "${{ inputs.kit-ref }}"}
+      - name: Prepare (gate, the lockfiles, a local snapshot -- no PR code yet)
+        id: prepare
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PREFIX: ${{ inputs.branch-prefix }}
+          LOCKFILES: ${{ inputs.lockfiles }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: >-
+          python3 -m ci_kit.pr_relock prepare --event "$EVENT" --head-repo "$HEAD_REPO" --repo "$GITHUB_REPOSITORY"
+          --ref "$HEAD_REF" --branch-prefix "$PREFIX" --lockfiles "$LOCKFILES" --base "$BASE"
+          --state-file "$RUNNER_TEMP/relock.json"
+      - uses: astral-sh/setup-uv@v10.3.3
+        if: steps.prepare.outputs.uv == 'true'
+        with:
+          python-version: ${{ inputs.python-version }}
+      - uses: actions/setup-node@v7
+        if: steps.prepare.outputs.node == 'true'
+        with:
+          node-version: 26
+          package-manager-cache: false
+      - uses: actions/setup-dotnet@v6
+        if: steps.prepare.outputs.dotnet == 'true'
+        with:
+          dotnet-version: ${{ inputs.dotnet-version || '10.0.x' }}
+      - name: Relock (PR code; a deploy key only in its own load step)
+        id: run
+        continue-on-error: true
+        uses: mjdevaccount/ci-kit/.github/actions/heal-install@v1
+        with:
+          kit: ${{ steps.kit.outputs.dir }}
+          then: PYTHONSAFEPATH=1 python3 -m ci_kit.pr_regen run --state-file "$RUNNER_TEMP/relock.json"
+          git-ssh-repos: ${{ inputs.git-ssh-repos }}
+          git-ssh-key: ${{ secrets.git-ssh-key }}
+      - name: Collect (only the lockfiles; anything else is red)
+        id: collect
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          FAILED: ${{ steps.run.outcome == 'failure' && (steps.run.outputs.failed || 'the lock tool') || '' }}
+        run: python3 -m ci_kit.pr_relock collect --state-file "$RUNNER_TEMP/relock.json" --out "$RUNNER_TEMP/relock" --failed "$FAILED"
+      - uses: actions/upload-artifact@v7
+        if: steps.collect.outputs.state == 'regen'
+        with:
+          name: relock-${{ github.event.pull_request.number }}
+          path: ${{ runner.temp }}/relock
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+
+  push:
+    # A FRESH runner with the push token; no PR code runs here (git + ci-kit at kit-ref). The secure
+    # pool's labels are HARD-CODED and CI_SECURE_RUNNER is only an on/off switch, as every ci-kit
+    # token job: a typo can never send this job to a runner with a docker socket. No `ci-secure`
+    # environment, unlike pr-heal's push: this job runs on a pull_request event, whose ref
+    # (refs/pull/N/merge) a default-branch-only environment policy refuses.
+    name: push (token, no PR code)
+    needs: lock
+    if: >-
+      needs.lock.outputs.state == 'regen'
+      && github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    outputs:
+      result: ${{ steps.apply.outputs.result || 'failed' }}
+      sha: ${{ steps.apply.outputs.sha }}
+    steps:
+      - name: Check out the PR branch, fetch the base and ci-kit at kit-ref
+        id: kit
+        uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
+        # no `base:` fetch: the depth-0 checkout already holds every branch's history (base.sha is
+        # an ancestor of the default branch), and an extra fetch after persist-credentials: false
+        # has no credential on a private caller
+        with: {checkout: "${{ github.event.pull_request.head.ref }}", ref: "${{ inputs.kit-ref }}"}
+      - uses: actions/download-artifact@v8
+        with:
+          name: relock-${{ github.event.pull_request.number }}
+          path: ${{ runner.temp }}/relock
+      - name: Push token (App or PAT)
+        id: token
+        uses: mjdevaccount/ci-kit/.github/actions/pr-token@v1
+        with: {scope: push, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", app-id: "${{ vars.EDGE_BOT_APP_ID }}",
+               private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}", pat: "${{ secrets.token }}"}
+      - name: Check the artifact, commit the lockfile(s), push fast-forward
+        id: apply
+        env:
+          PYTHONPATH: ${{ steps.kit.outputs.dir }}
+          CI_KIT_PUSH_TOKEN: ${{ steps.token.outputs.token }}
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          PREFIX: ${{ inputs.branch-prefix }}
+          LOCKFILES: ${{ inputs.lockfiles }}
+        run: >-
+          python3 -m ci_kit.pr_relock push --event "$EVENT" --head-repo "$HEAD_REPO" --repo "$GITHUB_REPOSITORY"
+          --ref "$HEAD_REF" --branch-prefix "$PREFIX" --lockfiles "$LOCKFILES" --artifact "$RUNNER_TEMP/relock"
+          --head "$HEAD" --base "$BASE"
