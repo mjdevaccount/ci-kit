@@ -1,0 +1,135 @@
+# pr-token -- the push token for a ci-kit token job: a GitHub App installation token or the caller's
+# PAT, WHO it is, and a record of which one acted (ci_kit/pr_token.py has the policy and its tests).
+#
+# ONE copy for every token job (pr-autoupdate, merge-train, ci-green, pr-heal's claim/push/report).
+# A composite cannot read `secrets` or `vars`: the calling job passes them in. Reference it as
+# `mjdevaccount/ci-kit/.github/actions/pr-token@v1` (a `./` path would resolve in the CALLER's repo).
+#
+#   - name: Push token (App or PAT)
+#     id: token
+#     uses: mjdevaccount/ci-kit/.github/actions/pr-token@v1
+#     with:
+#       scope: update                                               # the job's permission set (below)
+#       mode: ${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}    # '' = pat
+#       app-id: ${{ vars.EDGE_BOT_APP_ID }}
+#       private-key: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}
+#       pat: ${{ secrets.token }}
+#   - env: { GH_TOKEN: "${{ steps.token.outputs.token }}", CI_KIT_TOKEN_LOGIN: "${{ steps.token.outputs.login }}",
+#            CI_KIT_TRUSTED_LOGINS: "${{ steps.token.outputs.trusted }}" }
+#
+# THE PERMISSION TABLE lives HERE, once (ci_kit/pr_token.PERMISSIONS is the spec a test holds it to):
+#   update   pr-autoupdate: update-branch, comments, labels, queue statuses, reruns/cancels/dispatch,
+#            the strict read (cancel-doomed-runs)
+#   train    merge-train: push, open/merge/close trains, comments, labels, the lane's statuses, cancels
+#   push     ci-green, pr-heal push: a branch push (workflows: a range may touch .github/workflows/**)
+#   comment  pr-heal claim/report: marker comments and the PR body
+# The pat-mode canary gets metadata:read only, never the job's set.
+# The App token is scoped to THIS repository only, with only that set, and revoked by the mint
+# action's post step at job end. The token never passes through a shell: the `token` output is an
+# expression over the mint's output (masked by the action) and the `pat` input.
+name: pr-token
+description: mint a GitHub App token or fall back to the PAT (staged by mode), name the acting identity, record which acted
+inputs:
+  scope:
+    description: update | train | push | comment -- the job's App permission set (the table above)
+    required: true
+  mode:
+    description: pat | app | app-required ('' = pat). See ci_kit/pr_token.py
+    required: false
+    default: ""
+  app-id:
+    description: the GitHub App's id (or client id) -- the caller's EDGE_BOT_APP_ID variable
+    required: false
+    default: ""
+  private-key:
+    description: the GitHub App's private key -- the caller's EDGE_BOT_PRIVATE_KEY secret
+    required: false
+    default: ""
+  pat:
+    description: the fallback fine-grained PAT (the reusable's `token` secret)
+    required: false
+    default: ""
+outputs:
+  token:
+    description: the token that acts (masked)
+    # fail-closed: an app source with an empty mint token is '', never the PAT
+    value: ${{ steps.decide.outputs.source == 'app' && steps.mint.outputs.token || (steps.decide.outputs.source == 'pat' && inputs.pat || '') }}
+  source:
+    description: app | pat
+    value: ${{ steps.decide.outputs.source }}
+  login:
+    description: the acting identity's login, REST spelling (`<slug>[bot]` for the App)
+    value: ${{ steps.report.outputs.login }}
+  trusted:
+    description: comma-separated logins whose markers count (the acting identity + the other configured one)
+    value: ${{ steps.report.outputs.trusted }}
+runs:
+  using: composite
+  steps:
+    - id: decide
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../../..
+        PYTHONSAFEPATH: "1"
+        CI_KIT_TOKEN_MODE: ${{ inputs.mode }}
+        CI_KIT_TOKEN_SCOPE: ${{ inputs.scope }}
+        HAS_APP_ID: ${{ inputs.app-id != '' }}
+        HAS_KEY: ${{ inputs.private-key != '' }}
+        HAS_PAT: ${{ inputs.pat != '' }}
+      # A decide that could not RUN (no python3, an import error) wrote no outputs and no record:
+      # write the record's crash shape here, so the failure is still one greppable line.
+      run: |
+        python3 -m ci_kit.pr_token decide && exit 0 || rc=$?
+        grep -q '^source=' "$GITHUB_OUTPUT" 2>/dev/null && exit "$rc"
+        wf=${GITHUB_WORKFLOW_REF%%@*}; wf=${wf##*/}
+        # mode spelled as pr_token._field spells it: trimmed, lowercase, [[:space:]=] -> _
+        mode=${CI_KIT_TOKEN_MODE,,}; mode=${mode#"${mode%%[![:space:]]*}"}; mode=${mode%"${mode##*[![:space:]]}"}
+        mode=${mode//[[:space:]=]/_}
+        rec="pr-token: source=none mode=${mode:-pat} reason=decide-crashed app=absent repo=${GITHUB_REPOSITORY:-?} workflow=${wf:-?} job=${GITHUB_JOB:-?} login=unknown"
+        echo "::error title=pr-token::$rec"
+        printf '`%s`\n\n' "$rec" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+        exit "$rc"
+    # pat mode with the App configured mints too (a canary, never used, WRITE-FREE: metadata:read
+    # only): it proves the key before a flip and names the App so its markers stay trusted after a
+    # rollback. Its failure must not stop the PAT run and is a warning in the record. In app modes
+    # a failed mint FAILS the job.
+    - id: mint
+      if: steps.decide.outputs.mint == 'true'
+      continue-on-error: ${{ steps.decide.outputs.source == 'pat' }}
+      uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+      with:
+        client-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ${{ github.repository_owner }}
+        repositories: ${{ github.repository }}
+        # The job's set ONLY when the App acts; the pat-mode canary asks for metadata:read and nothing
+        # else. Never let every input go empty: '' = not requested, and with NO permission input the
+        # token inherits the installation's WHOLE permission set (create-github-app-token v3.3.0
+        # README, `permission-<permission name>`: "By default, the token inherits all of the
+        # installation's permissions"; lib/get-permissions-from-inputs.js returns undefined).
+        permission-metadata: ${{ steps.decide.outputs.source == 'pat' && 'read' || '' }}
+        permission-contents: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train","push"]'), inputs.scope) && 'write' || '' }}
+        permission-workflows: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train","push"]'), inputs.scope) && 'write' || '' }}
+        permission-pull-requests: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train","comment"]'), inputs.scope) && 'write' || '' }}
+        permission-issues: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train","comment"]'), inputs.scope) && 'write' || '' }}
+        permission-actions: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train"]'), inputs.scope) && 'write' || '' }}
+        permission-statuses: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train"]'), inputs.scope) && 'write' || '' }}
+        permission-checks: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train"]'), inputs.scope) && 'read' || '' }}
+        permission-administration: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update"]'), inputs.scope) && 'read' || '' }}
+    # always() after decide succeeded: a FAILED mint in an app mode still writes its record line
+    # (source=none reason=mint-failed) before the job goes red
+    - id: report
+      if: always() && steps.decide.outcome == 'success'
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/../../..
+        PYTHONSAFEPATH: "1"
+        CI_KIT_TOKEN_MODE: ${{ inputs.mode }}
+        CI_KIT_TOKEN_SCOPE: ${{ inputs.scope }}
+        MINT: ${{ steps.decide.outputs.mint }}
+        SOURCE: ${{ steps.decide.outputs.source }}
+        REASON: ${{ steps.decide.outputs.reason }}
+        MINT_OUTCOME: ${{ steps.mint.outcome }}
+        APP_SLUG: ${{ steps.mint.outputs.app-slug }}
+        CI_KIT_PAT: ${{ inputs.pat }}
+      run: python3 -m ci_kit.pr_token report

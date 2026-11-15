@@ -43,6 +43,8 @@ class FakeGH:
         self.jobs: dict = {"jobs": []}     # REST jobs of a red run (redclass)
         self.runs: list[dict] = []               # workflow runs: id, status, head_branch, path
         self.cancel_fail: dict[int, str] = {}    # run id -> what gh says when the cancel is refused
+        self.login = "me"                        # who the token is (an App: GET /user is 403, v1.37.0)
+        self.app = False
 
     def add(self, n: int, head: str, **k) -> None:
         self.prs[n] = {"number": n, "title": f"feat: {n}", "body": f"body {n}", "headRefName": f"pr{n}",
@@ -93,7 +95,11 @@ class FakeGH:
             assert urllib.parse.parse_qs(a[1].split("?", 1)[1])["branch"]  # the code's own filter is what's tested
             return json.dumps([{"repo": "o/r", **r} for r in self.runs])
         if a[:2] == ("api", "user"):
-            return json.dumps({"login": "me", "id": 1})
+            if self.app:  # an installation token cannot read /user (live GitHub: 403)
+                return 1, "HTTP 403: Resource not accessible by integration"
+            return json.dumps({"login": self.login, "id": 1})
+        if a[0] == "api" and str(a[1]).startswith("users/"):  # public: any token, the bot user too
+            return json.dumps({"login": a[1][len("users/"):], "id": 357})
         if a[0] == "api" and "/actions/workflows/" in a[1]:
             head = a[1].split("head_sha=")[1].split("&")[0]
             n = next((p["number"] for p in self.prs.values() if p["headRefOid"] == head), 0)
@@ -159,7 +165,7 @@ class FakeGH:
             head = git(self.repo.origin, "rev-parse", f"refs/heads/{branch}")
             git(self.repo.origin, "update-ref", f"refs/pull/{m}/head", head)
             self.add(m, head, headRefName=branch, title=a[a.index("--title") + 1], body=stdin or "",
-                     labels={TRAIN_LABEL}, statusCheckRollup=[], createdAt=NOW, author="me",
+                     labels={TRAIN_LABEL}, statusCheckRollup=[], createdAt=NOW, author=self.login,
                      root=git(self.repo.origin, "rev-parse", "main"))
             return f"https://github.com/o/r/pull/{m}\n"
         return ""  # label create
@@ -729,3 +735,68 @@ def test_a_held_pr_that_is_no_longer_the_head_gets_no_success_when_the_train_clo
     assert [(s, d) for sha, s, d in _statuses(fake) if sha == head] == [("pending", "waits its turn: the queue head is #3")]
     assert not [c for c in _statuses(fake) if c[0] == fake.prs[3]["headRefOid"]]
     assert any("#5: train hold dropped" in s for s in p.summary)
+
+
+# ── v1.37.0: the token may be a GitHub App (ci_kit/pr_token.py) -- both identities across a flip ──
+BOT = "edge-bot[bot]"
+
+
+def _as_app(fake: FakeGH, mp: pytest.MonkeyPatch, trusted: str = f"{BOT},me") -> None:
+    fake.app, fake.login = True, BOT
+    mp.setenv("CI_KIT_TOKEN_LOGIN", BOT)
+    mp.setenv("CI_KIT_TRUSTED_LOGINS", trusted)
+
+
+def test_an_app_token_composes_as_its_bot_user_without_reading_user_must_fire(
+        world: tuple[Repo, FakeGH], monkeypatch: pytest.MonkeyPatch) -> None:
+    # OLD CODE: ops.me() read GET /user, which an installation token is refused -> the pass raised
+    repo, fake = world
+    _as_app(fake, monkeypatch)
+    _riders(repo, fake, 2)
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 0, p.summary
+    train = fake.prs[100]
+    assert f"by={BOT} -->" in train["body"] and train["author"] == BOT
+    assert ("api", "user") not in [c[:2] for c in fake.calls]
+    # the train commits keep each RIDER's author; only the committer is the bot user (id from users/<login>)
+    rows = git(repo.origin, "log", "--format=%an|%cn|%ce", f"main..{train['headRefOid']}").splitlines()
+    assert rows and all(r.split("|")[0] != BOT for r in rows)
+    assert {r.split("|", 1)[1] for r in rows} == {f"{BOT}|357+{BOT}@users.noreply.github.com"}
+    _green(fake)
+    assert cli.run(_opts(), cli.Pass()) == 0 and len(fake.wrote("merge")) == 1
+
+
+def test_a_train_composed_under_the_pat_is_landed_after_the_flip_to_app_must_fire(
+        world: tuple[Repo, FakeGH], monkeypatch: pytest.MonkeyPatch) -> None:
+    # OLD CODE: the PAT-composed train read as "not this workflow's token user", red, left open forever
+    repo, fake = world
+    _riders(repo, fake, 2)
+    assert cli.run(_opts(), cli.Pass()) == 0 and fake.prs[100]["author"] == "me"
+    _green(fake)
+    _as_app(fake, monkeypatch)
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 0, p.summary
+    assert len(fake.wrote("merge")) == 1 and fake.wrote("merge")[0][2] == "100"
+
+
+def test_a_train_by_an_identity_outside_the_trusted_set_is_still_refused(
+        world: tuple[Repo, FakeGH], monkeypatch: pytest.MonkeyPatch) -> None:
+    # the other direction: trusting the configured pair adds nobody else
+    repo, fake = world
+    _riders(repo, fake, 2)
+    assert cli.run(_opts(), cli.Pass()) == 0
+    _green(fake)
+    _as_app(fake, monkeypatch, trusted=BOT)    # the PAT identity NOT configured as trusted
+    p = cli.Pass()
+    assert cli.run(_opts(), p) == 1 and not fake.wrote("merge")
+    assert any("not this workflow's token user" in s and BOT in s for s in p.summary)
+
+
+def test_an_unreadable_app_identity_fails_the_pass_never_guesses(
+        world: tuple[Repo, FakeGH], monkeypatch: pytest.MonkeyPatch) -> None:
+    from ci_kit.merge_train import ops
+    _repo, fake = world
+    fake.app = True                                   # an App token, but no CI_KIT_TOKEN_LOGIN given
+    monkeypatch.delenv("CI_KIT_TOKEN_LOGIN", raising=False)
+    with pytest.raises(subprocess.CalledProcessError):
+        ops.me()

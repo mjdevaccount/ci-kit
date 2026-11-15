@@ -27,6 +27,7 @@
 #       install: uv sync --all-groups --frozen
 #     secrets:
 #       token: ${{ secrets.PR_UPDATE_TOKEN }}                       # the push (a PAT: CI must see it)
+#       EDGE_BOT_PRIVATE_KEY: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}   # v1.37.0, optional: the App (token-source)
 #       ntfy-url: ${{ secrets.NTFY_URL }}                           # tier 4
 #       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # tier 3 (or anthropic-api-key)
 #
@@ -133,10 +134,17 @@ on:
         description: PRIVATE repos the install fetches by https (ci_kit/git_ssh.sh), with the git-ssh-key secret
         type: string
         default: ""
+      token-source:
+        description: pat | app | app-required ('' = the caller repo's PR_TOKEN_SOURCE variable, else pat) -- ci_kit/pr_token.py (v1.37.0)
+        type: string
+        default: ""
     secrets:
       token:
-        description: the push token (fine-grained PAT, contents + pull requests RW on the repo); comments too
-        required: true
+        description: the push token (fine-grained PAT, contents + pull requests RW on the repo); comments too. Not required since v1.37.0 (empty while the PAT acts is still red)
+        required: false
+      EDGE_BOT_PRIVATE_KEY:
+        description: the GitHub App's private key (v1.37.0, with the EDGE_BOT_APP_ID variable); token-source decides who acts in claim, push and report
+        required: false
       ntfy-url:
         description: tier 4's page topic ('' = not pushed, named in the record)
         required: false
@@ -288,11 +296,17 @@ jobs:
         uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
         with:
           ref: ${{ needs.plan.outputs.kit-sha }}
+      # the App or the PAT (v1.37.0, ci_kit/pr_token.py): the attempt marker is a PR comment
+      - name: Push token (App or PAT)
+        id: token
+        uses: mjdevaccount/ci-kit/.github/actions/pr-token@v1
+        with: {scope: comment, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", app-id: "${{ vars.EDGE_BOT_APP_ID }}",
+               private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}", pat: "${{ secrets.token }}"}
       - name: Record the attempt, or refuse a second one at this head
         id: claim
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
-          GH_TOKEN: ${{ secrets.token }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
           PR: ${{ inputs.pr }}
           HEAD: ${{ inputs.head }}
         run: python3 -m ci_kit.pr_ladder claim --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD" --run "$GITHUB_RUN_ID"
@@ -422,11 +436,16 @@ jobs:
         with:
           name: ${{ needs.fix.outputs.state == 'fixed' && format('heal-fix-{0}', inputs.pr) || format('heal-regen-{0}', inputs.pr) }}
           path: ${{ runner.temp }}/heal
+      - name: Push token (App or PAT)
+        id: token
+        uses: mjdevaccount/ci-kit/.github/actions/pr-token@v1
+        with: {scope: push, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", app-id: "${{ vars.EDGE_BOT_APP_ID }}",
+               private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}", pat: "${{ secrets.token }}"}
       - name: Apply and push (fast-forward only)
         id: apply
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
-          CI_KIT_PUSH_TOKEN: ${{ secrets.token }}
+          CI_KIT_PUSH_TOKEN: ${{ steps.token.outputs.token }}
           CI_KIT_REGEN_MAP: ${{ inputs.regen }}
           HEAD: ${{ inputs.head }}
           BASE: ${{ needs.plan.outputs.base }}
@@ -451,11 +470,17 @@ jobs:
         uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
         with:
           ref: ${{ needs.plan.outputs.kit-sha || inputs.kit-ref }}
+      # the App or the PAT (v1.37.0, ci_kit/pr_token.py): the `healed` / `paged` marker comments
+      - name: Push token (App or PAT)
+        id: token
+        uses: mjdevaccount/ci-kit/.github/actions/pr-token@v1
+        with: {scope: comment, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", app-id: "${{ vars.EDGE_BOT_APP_ID }}",
+               private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}", pat: "${{ secrets.token }}"}
       - name: Record, and page once per head when nothing was pushed
         id: report
         env:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
-          GH_TOKEN: ${{ secrets.token }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
           NTFY_URL: ${{ secrets.ntfy-url }}
           PR: ${{ inputs.pr }}
           HEAD: ${{ inputs.head }}

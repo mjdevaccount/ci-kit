@@ -98,7 +98,10 @@ def test_the_train_job_holds_its_token_off_the_socket_pool() -> None:
     wf = yaml.safe_load((ROOT / "merge-train.yml").read_text(encoding="utf-8"))
     job = wf["jobs"]["train"]
     assert job["runs-on"] == SECURE
-    assert "GH_TOKEN" in job["env"] and "github.token" not in job["env"]["GH_TOKEN"]
+    # the push token comes from the one pr-token step (v1.37.0: the App or the PAT), never GITHUB_TOKEN;
+    # an empty one is red inside that step (ci_kit/pr_token.decide, tests/test_pr_token_must_fire.py)
     first = job["steps"][0]
-    assert "exit 1" in first["run"] and "GH_TOKEN" in first["run"]       # unconfigured is red
+    assert first["id"] == "token" and first["uses"] == "mjdevaccount/ci-kit/.github/actions/pr-token@v1"
+    one = next(s for s in job["steps"] if "ci-merge-train" in str(s.get("with", {}).get("tool", "")))
+    assert one["env"]["GH_TOKEN"] == "${{ steps.token.outputs.token }}" and "GH_TOKEN" not in job["env"]
     assert not any("checkout" in str(s.get("uses", "")) for s in job["steps"])   # no PR code on the token's runner

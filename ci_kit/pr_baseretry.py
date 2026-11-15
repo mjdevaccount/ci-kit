@@ -41,10 +41,13 @@ on that chain are counted; an author commit or a rebase ends the chain. At the c
 head, `::error::`, a red pass, then held. ONE ACTOR PER HEAD: a head the heal ladder took is never
 base-retried, and pr_autoupdate gives a PR this pass retried to neither the ladder nor pr_heal.
 
-TRUST. A marker GRANTS a retry budget only when the token's OWN identity wrote it (`comments_by` +
-`whoami`); counts come from markers along the head's ancestry, never from a number in a comment. A
-forged retry marker is ignored (it neither grants nor resets); the heal ladder's markers are read
-from every author, which is fail-safe here: a forged one can only HOLD a PR.
+TRUST. A marker GRANTS a retry budget only when a TRUSTED identity wrote it (`comments_by` +
+`whoami`): the acting token's own login, plus -- since v1.37.0 -- the OTHER configured token identity
+(ci_kit/pr_token.py: the PAT owner and the App's `<slug>[bot]`, from config, never a hardcoded
+login), so a repo flipping between them neither resets the cap nor re-fires a spent head. Counts
+come from markers along the head's ancestry, never from a number in a comment. A forged retry
+marker is ignored (it neither grants nor resets); the heal ladder's markers are read from every
+author, which is fail-safe here: a forged one can only HOLD a PR.
 
 ORDER. A retry takes a queue slot only AFTER every green eligible PR (pr_queue.plan's `base_retry`),
 is never the queue head (pr_queue.blocked still counts it red), and its marker is written BEFORE the
@@ -60,7 +63,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from ci_kit import pr_ladder, redclass
+from ci_kit import pr_ladder, pr_token, redclass
 from ci_kit.merge_train import OPT_OUT, RIDING, TRAIN_PREFIX
 
 PARKED = "queue:parked"  # ci_kit/pr_sched.PARKED, literal: pr_sched imports pr_autoupdate
@@ -123,9 +126,11 @@ def candidate(p: dict, required: tuple[str, ...], conflict_label: str, machinery
     return ""
 
 
-def trusted(comments: list[tuple[str, str]], me: str, pattern: re.Pattern[str]) -> set[str]:
-    """The heads named by `pattern` markers the token's own identity wrote. Pure."""
-    return {m.group(1) for who, body in comments if me and who == me for m in pattern.finditer(body or "")}
+def trusted(comments: list[tuple[str, str]], me: str | frozenset[str], pattern: re.Pattern[str]) -> set[str]:
+    """The heads named by `pattern` markers a TRUSTED identity wrote (`me`: one login, or the set
+    pr_token.trusted_logins gives). An empty identity trusts nothing. Pure."""
+    who_ok = frozenset([me] if isinstance(me, str) else me) - {""}
+    return {m.group(1) for who, body in comments if who in who_ok for m in pattern.finditer(body or "")}
 
 
 def red_at_base(key: Key, near: list[list[Run]]) -> bool:
@@ -305,7 +310,11 @@ def parents_of(repo: str, read: Gh) -> Callable[[str], list[str]]:
 
 
 def whoami(write: Gh) -> str:
-    """The push token's login: the one identity whose markers are trusted ('' = unknown)."""
+    """The push token's login ('' = unknown). Under ci-kit's token step (v1.37.0) it is
+    CI_KIT_TOKEN_LOGIN, which works for an App token too: an installation token gets 403 on
+    `GET /user`. Without it (a caller running the tool on its own PAT), `GET /user` as before."""
+    if got := pr_token.acting_login():
+        return got
     r = write("api", "user", "--jq", ".login")
     return (r.stdout or "").strip() if r.returncode == 0 else ""
 
@@ -343,7 +352,8 @@ def assess(repo: str, armed: list[dict], required: tuple[str, ...], conflict_lab
         return retry, 0
     me = whoami(write)
     if not me:
-        print("::error::base-driven retry: the push token's identity could not be read (GET /user); feature skipped this pass")
+        print("::error::base-driven retry: the push token's identity could not be read (CI_KIT_TOKEN_LOGIN / GET /user); "
+              "feature skipped this pass")
         summary.append("base-driven retry SKIPPED: the push token's identity is unknown, so no marker could be trusted")
         return retry, 1
     for p in todo:
@@ -352,7 +362,8 @@ def assess(repo: str, armed: list[dict], required: tuple[str, ...], conflict_lab
         ev, done, said = Evidence([], [], []), 0, FIXED_ON_MAIN
         try:
             notes = comments(repo, n)
-            retried, spent = trusted(notes, me, _MARK), trusted(notes, me, _SPENT)
+            trust = pr_token.trusted_logins(me)
+            retried, spent = trusted(notes, trust, _MARK), trusted(notes, trust, _SPENT)
             laddered = any(h == head for h, *_ in pr_ladder.marks([b for _, b in notes], pr_ladder._HEAL))
             action, why = decide(head, retried, spent, laddered, "", 0, cap)
             if action in ("retry", "spent") and read_left <= 0:

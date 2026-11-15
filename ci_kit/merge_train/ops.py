@@ -8,6 +8,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ci_kit import pr_token
 from ci_kit.merge_train import COMMENT_MARK, LABELS, TRAIN_PREFIX, github
 from ci_kit.merge_train import git as tgit
 from ci_kit.pr_autoupdate import add_label
@@ -279,8 +280,22 @@ def fetch_head(d: Path, number: int, sha: str) -> None:
 
 
 def me() -> tgit.Identity:
-    """The train token's user: the committer of every train commit, the author of every train PR."""
-    got = github.gh_json("api", "user")
+    """The train token's user: the committer of every train commit, the author of every train PR.
+    Under ci-kit's token step (v1.37.0) the login is CI_KIT_TOKEN_LOGIN -- an App installation token
+    gets 403 on `GET /user` -- and its id comes from the public `GET /users/<login>` (the App's bot
+    user: `<id>+<slug>[bot]@users.noreply.github.com`, the email GitHub attributes to it). Without
+    it, `GET /user` as before. Unreadable = raise: the pass never guesses who it is."""
+    login = pr_token.acting_login()
+    got = github.gh_json("api", f"users/{login}") if login else github.gh_json("api", "user")
     if isinstance(got, dict) and got.get("login") and got.get("id"):
+        if login and str(got["login"]) != login:
+            raise ValueError(f"gh api users/{login}: answered for {got['login']}")
         return tgit.Identity(str(got["login"]), f"{got['id']}+{got['login']}@users.noreply.github.com")
-    raise ValueError("gh api user: no login")
+    raise ValueError(f"gh api {'users/' + login if login else 'user'}: no login")
+
+
+def trusted(me: tgit.Identity) -> frozenset[str]:
+    """Whose train PRs this pass may judge, land or close: its own identity plus the OTHER
+    configured token identity (pr_token.trusted_logins), so a train composed before a PAT <-> App
+    flip is finished, not orphaned as "a train this workflow did not compose"."""
+    return pr_token.trusted_logins(me.name)

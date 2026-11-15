@@ -93,9 +93,10 @@ def run(o: Opts, p: Pass) -> int:
     phases.finalize(o, p, d)
     prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(o.repo)).stdout))
     me = ops.me()
+    trust = ops.trusted(me)
     trains: list[dict] = []
     for t in sorted((x for x in prs if policy.is_train(x)), key=lambda x: int(x["number"])):
-        why = phases.authority(o, t, me.name)
+        why = phases.authority(o, t, trust)
         if why:  # never judged, merged or closed here; the review gate blocks it too
             p.error(f"#{t['number']} is a `train/` PR this workflow did not compose ({why}): left alone")
         else:
