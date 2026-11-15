@@ -140,7 +140,7 @@ Staged rollout -- each stage is config in the CALLER repo, no ci-kit change:
    variable is set the runs read `source=pat ... app=minted`: the key is proven before the flip.
    Rollback: delete the variable. Keep the `EDGE_BOT_PRIVATE_KEY` mapping when you do: the PAT
    run learns the App's login from the canary, so a caller that drops the key on rollback stops
-   trusting the App's base-retry markers and trains (the record line says so in a notice).
+   trusting the App's base-retry markers and trains (its record line then reads `app=absent`).
 2. **Flip the default.** The same two edits in every caller repo (the variable per repo -- a
    personal account has no organisation variables). A repo without them stays on the PAT.
 3. **Make the PAT fail loud.** `PR_TOKEN_SOURCE=app-required` per repo: an App that is absent or
@@ -153,12 +153,18 @@ IDENTITY: the App acts as `<app-slug>[bot]` (REST spelling; GraphQL says `<app-s
 login (the mint's `app-slug`; `GET /user` with the PAT for the PAT) and passes it as
 `CI_KIT_TOKEN_LOGIN`, with the other configured identity in `CI_KIT_TRUSTED_LOGINS`: base-retry
 markers and open merge trains written by either side of a flip are honoured, nobody else's.
-An unreadable acting identity is a red run. Train commits keep each rider as author; the
+An unreadable acting identity is a red run where a tool trusts markers with it (scopes `update`
+and `train`: base-retry, the merge train); in ci-green and pr-heal nothing reads it, so it is a
+`::warning::`, `login=unknown`, and the token is still handed out. Train commits keep each rider as author; the
 committer is the acting identity (`<id>+<slug>[bot]@users.noreply.github.com` for the App). Heal
 commits stay `github-actions[bot]` whichever token pushes them.
 
-THE RECORD: every token job prints ONE line, as a `::notice` and in the step summary:
-`pr-token: source=app|pat|none mode=<mode> reason=<configured|mode=pat|var-absent|key-absent|mint-failed|identity-unreadable|mode-invalid> app=<minted|failed|absent> repo=<owner/repo> workflow=<file> job=<id> login=<login>`.
+THE RECORD: every token job prints ONE line, as a `::notice` (an `::error` when the decide step
+could not run at all) and in the step summary:
+`pr-token: source=app|pat|none mode=<mode> reason=<configured|mode-pat|var-absent|key-absent|mode-invalid|scope-invalid|mint-failed|identity-unreadable|decide-crashed> app=<minted|failed|absent> repo=<owner/repo> workflow=<file> job=<id> login=<login|unknown>`.
+Its grammar is a CONTRACT: a detector parses it. Fields are space-separated `key=value` in this
+order and no value holds `=` or a space; a new reason or field is a ci-kit release, listed here
+(`tests/test_pr_token_must_fire.py` holds this list to what the code can emit).
 Read it from outside with `gh run view <run> --log | grep 'pr-token: '` or the job's check-run
 annotations (`gh api repos/<owner>/<repo>/check-runs/<job id>/annotations`); the step summary is
 for humans (no REST endpoint serves it).

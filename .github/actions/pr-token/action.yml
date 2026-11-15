@@ -76,7 +76,16 @@ runs:
         HAS_APP_ID: ${{ inputs.app-id != '' }}
         HAS_KEY: ${{ inputs.private-key != '' }}
         HAS_PAT: ${{ inputs.pat != '' }}
-      run: python3 -m ci_kit.pr_token decide
+      # A decide that could not RUN (no python3, an import error) wrote no outputs and no record:
+      # write the record's crash shape here, so the failure is still one greppable line.
+      run: |
+        python3 -m ci_kit.pr_token decide && exit 0 || rc=$?
+        grep -q '^source=' "$GITHUB_OUTPUT" 2>/dev/null && exit "$rc"
+        wf=${GITHUB_WORKFLOW_REF%%@*}; wf=${wf##*/}; mode=${CI_KIT_TOKEN_MODE:-pat}
+        rec="pr-token: source=none mode=${mode//[ =]/_} reason=decide-crashed app=absent repo=${GITHUB_REPOSITORY:-?} workflow=${wf:-?} job=${GITHUB_JOB:-?} login=unknown"
+        echo "::error title=pr-token::$rec"
+        printf '`%s`\n\n' "$rec" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+        exit "$rc"
     # pat mode with the App configured mints too (a canary, never used, WRITE-FREE: metadata:read
     # only): it proves the key before a flip and names the App so its markers stay trusted after a
     # rollback. Its failure must not stop the PAT run and is a warning in the record. In app modes
@@ -113,6 +122,7 @@ runs:
         PYTHONPATH: ${{ github.action_path }}/../../..
         PYTHONSAFEPATH: "1"
         CI_KIT_TOKEN_MODE: ${{ inputs.mode }}
+        CI_KIT_TOKEN_SCOPE: ${{ inputs.scope }}
         MINT: ${{ steps.decide.outputs.mint }}
         SOURCE: ${{ steps.decide.outputs.source }}
         REASON: ${{ steps.decide.outputs.reason }}

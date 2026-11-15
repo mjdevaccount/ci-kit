@@ -10,9 +10,14 @@ the PR (the mint itself, the post-step revoke, `vars` resolution in a called wor
 """
 from __future__ import annotations
 
+import ast
 import json
+import os
 import pathlib
 import re
+import shutil
+import subprocess
+import sys
 
 import pytest
 import yaml
@@ -29,9 +34,9 @@ PAT_USER, BOT = "mjdevaccount", "mjdev-edge-bot[bot]"
 # ── the policy ───────────────────────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("mode,app_id,key,pat,want", [
     # the DEFAULT is the PAT whatever is configured: v1 moving cuts nobody over
-    ("", True, True, True, ("pat", "mode=pat", True)),           # key passed: a canary mint, unused
-    ("pat", True, False, True, ("pat", "mode=pat", False)),
-    ("PAT", False, False, True, ("pat", "mode=pat", False)),
+    ("", True, True, True, ("pat", "mode-pat", True)),           # key passed: a canary mint, unused
+    ("pat", True, False, True, ("pat", "mode-pat", False)),
+    ("PAT", False, False, True, ("pat", "mode-pat", False)),
     # app: the App when configured, else the PAT with the reason
     ("app", True, True, True, ("app", "configured", True)),
     ("app", True, True, False, ("app", "configured", True)),     # no PAT needed
@@ -48,7 +53,7 @@ def test_decide_the_table(mode: str, app_id: bool, key: bool, pat: bool, want: t
 @pytest.mark.parametrize("mode,app_id,key,pat,reason", [
     ("app-required", False, True, True, "var-absent"),   # never the PAT, even when it is there
     ("app-required", True, False, True, "key-absent"),
-    ("pat", True, True, False, "mode=pat"),               # nothing to act with: red, as before
+    ("pat", True, True, False, "mode-pat"),               # nothing to act with: red, as before
     ("app", True, False, False, "key-absent"),
     ("apps", True, True, True, "mode-invalid"),           # a typo is red, never a silent PAT
 ])
@@ -82,10 +87,13 @@ def test_an_unreadable_acting_identity_is_red_must_fire() -> None:
     assert pt.resolve(pt.decide("app", True, True, True), "success", "", PAT_USER)[3]       # no app-slug
 
 
-def test_one_spelling_and_only_a_bot_gets_the_suffix() -> None:
-    assert pt.rest_login("mjdev-edge-bot", "Bot") == BOT                # GraphQL's spelling of the App
-    assert pt.rest_login(BOT, "Bot") == BOT
-    assert pt.rest_login("mjdev-edge-bot", "User") == "mjdev-edge-bot"  # a person who took the slug
+def test_an_unreadable_identity_is_not_red_where_nothing_trusts_markers() -> None:
+    plain = pt.decide("pat", False, False, True)
+    assert pt.resolve(plain, "skipped", "", "", needs_identity=False) == ("", [], "absent", "")
+    assert pt.resolve(pt.decide("app", True, True, True), "success", "", PAT_USER, needs_identity=False)[3]  # still red
+
+
+def test_the_app_login_is_the_rest_spelling() -> None:
     assert pt.bot_login("mjdev-edge-bot") == BOT and pt.bot_login("") == ""
 
 
@@ -339,3 +347,143 @@ def test_the_identity_reaches_every_tool_that_trusts_markers() -> None:
         s = next(x for x in steps if (x.get("id") == step if step else "ci-merge-train" in json.dumps(x)))
         assert s["env"]["CI_KIT_TOKEN_LOGIN"] == "${{ steps.token.outputs.login }}"
         assert s["env"]["CI_KIT_TRUSTED_LOGINS"] == "${{ steps.token.outputs.trusted }}"
+
+
+def test_identity_scopes_are_exactly_the_jobs_that_hand_the_identity_to_a_tool() -> None:
+    for name, jobs in TOKEN_JOBS.items():
+        for job in jobs:
+            steps = _yaml(WF / name)["jobs"][job]["steps"]
+            scopes = {s["with"]["scope"] for s in steps if "pr-token" in str(s.get("uses", ""))}
+            reads = any(pt.LOGIN_ENV in (s.get("env") or {}) for s in steps)
+            assert scopes and all((sc in pt.IDENTITY_SCOPES) == reads for sc in scopes), (name, job, scopes, reads)
+
+
+# ── the REAL GET /user read (_pat_login), through a fake `gh` on PATH ─────────────────────────────
+def _fake_gh(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, rc: int) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    if sys.platform == "win32":
+        (bin_dir / "gh.cmd").write_text(f"@exit /b {rc}", encoding="utf-8")
+    else:
+        gh = bin_dir / "gh"
+        gh.write_text(f"#!/bin/sh\nexit {rc}\n", encoding="utf-8")
+        gh.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+
+
+def _report_real(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, scope: str) -> tuple[int, dict[str, str], str]:
+    out, summ = tmp_path / "out", tmp_path / "summary"
+    for k, v in {"GITHUB_OUTPUT": str(out), "GITHUB_STEP_SUMMARY": str(summ), "GITHUB_REPOSITORY": "o/r",
+                 "GITHUB_JOB": "j", "CI_KIT_TOKEN_MODE": "", "CI_KIT_TOKEN_SCOPE": scope, "MINT": "false",
+                 "SOURCE": "pat", "REASON": "mode-pat", "MINT_OUTCOME": "", "APP_SLUG": "",
+                 "CI_KIT_PAT": "not-a-real-token"}.items():
+        monkeypatch.setenv(k, v)
+    rc = pt.main(["report"])
+    outs = dict(x.split("=", 1) for x in out.read_text(encoding="utf-8").splitlines()) if out.exists() else {}
+    return rc, outs, summ.read_text(encoding="utf-8") if summ.exists() else ""
+
+
+@pytest.mark.parametrize("gh_rc", [1, 0], ids=["gh-exits-nonzero", "gh-prints-nothing"])
+def test_unreadable_pat_identity_is_red_where_a_tool_trusts_markers_must_fire(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str], gh_rc: int) -> None:
+    _fake_gh(tmp_path, monkeypatch, gh_rc)
+    rc, outs, summary = _report_real(monkeypatch, tmp_path, "update")
+    assert rc == 1 and outs == {} and "reason=identity-unreadable" in summary
+    assert "::error title=pr-token::" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("gh_rc", [1, 0], ids=["gh-exits-nonzero", "gh-prints-nothing"])
+@pytest.mark.parametrize("scope", ["push", "comment"])
+def test_unreadable_pat_identity_is_a_warning_where_nothing_trusts_markers_must_fire(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str],
+        gh_rc: int, scope: str) -> None:
+    _fake_gh(tmp_path, monkeypatch, gh_rc)
+    rc, outs, summary = _report_real(monkeypatch, tmp_path, scope)
+    said = capsys.readouterr().out
+    assert rc == 0 and outs == {"login": "", "trusted": ""}
+    assert "source=pat mode=pat reason=mode-pat app=absent" in summary and summary.rstrip().endswith("login=unknown`")
+    assert "::warning title=pr-token::" in said and "::error" not in said
+
+
+# ── the "one identity" notice only where a second one was expected ───────────────────────────────
+@pytest.mark.parametrize(("env", "pat_login", "noticed"), [
+    ({"CI_KIT_TOKEN_MODE": "", "SOURCE": "pat", "REASON": "mode-pat", "MINT": "false"}, PAT_USER, False),  # no key: normal
+    ({"CI_KIT_TOKEN_MODE": "", "SOURCE": "pat", "REASON": "mode-pat", "MINT": "true",
+      "MINT_OUTCOME": "failure"}, PAT_USER, True),                                                      # canary failed
+    ({"CI_KIT_TOKEN_MODE": "app", "SOURCE": "pat", "REASON": "key-absent", "MINT": "false"}, PAT_USER, True),
+    ({"CI_KIT_TOKEN_MODE": "app", "SOURCE": "app", "REASON": "configured", "MINT": "true",
+      "MINT_OUTCOME": "success", "APP_SLUG": "mjdev-edge-bot"}, "", True),                               # no PAT login
+])
+def test_the_one_identity_notice_fires_only_where_two_were_expected(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str],
+        env: dict[str, str], pat_login: str, noticed: bool) -> None:
+    rc, _, _ = _cli(monkeypatch, tmp_path, "report", pat_login, CI_KIT_TOKEN_SCOPE="update", **env)
+    assert rc == 0 and ("trusted identities:" in capsys.readouterr().out) == noticed
+
+
+# ── the record's grammar is a contract ───────────────────────────────────────────────────────────
+def _emitted_reasons() -> set[str]:
+    """Every `reason` the code can put in the record: decide()'s table, the literals given to
+    Decision(...) in pr_token.py, and the composite shell's own crash line."""
+    got = {pt.decide(m, a, k, p).reason for m in (*pt.MODES, "bogus") for a in (True, False)
+           for k in (True, False) for p in (True, False)}
+    tree = ast.parse((ROOT / "ci_kit" / "pr_token.py").read_text(encoding="utf-8"))
+    def values(n: ast.expr) -> set[str]:  # a literal, or either branch of `x if cond else y` -- never a cond
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            return {n.value}
+        return values(n.body) | values(n.orelse) if isinstance(n, ast.IfExp) else set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Decision" and len(node.args) >= 3:
+            got |= values(node.args[2])
+    got |= set(re.findall(r"reason=([A-Za-z0-9_-]+)", ACTION.read_text(encoding="utf-8")))
+    return got - {""}
+
+
+def test_every_reason_the_code_emits_is_listed_and_parseable_must_fire() -> None:
+    emitted = _emitted_reasons()
+    assert {"decide-crashed", "scope-invalid", "mint-failed", "identity-unreadable"} <= emitted  # the scan sees them
+    assert emitted <= set(pt.REASONS)
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    listed = re.search(r"reason=<([^>]+)>", readme.split("THE RECORD:", 1)[1]).group(1).split("|")
+    assert set(listed) == set(pt.REASONS)
+    assert all("=" not in r and " " not in r for r in pt.REASONS)
+
+
+# ── the decide step's shell: a decide that cannot run still writes its record ─────────────────────
+BASH = shutil.which("bash")
+
+
+def _run_decide_shell(tmp_path: pathlib.Path, fake_python: str) -> tuple[int, str, str]:
+    bin_dir = tmp_path / "pybin"
+    bin_dir.mkdir()
+    py = bin_dir / "python3"
+    py.write_text(f"#!/bin/sh\n{fake_python}\n", encoding="utf-8", newline="\n")
+    py.chmod(0o755)
+    script = tmp_path / "decide.sh"
+    run = next(s for s in _yaml(ACTION)["runs"]["steps"] if s["id"] == "decide")["run"]
+    script.write_text(run, encoding="utf-8", newline="\n")
+    out, summ = tmp_path / "out", tmp_path / "summary"
+    out.write_text("", encoding="utf-8")
+    env = {**os.environ, "GITHUB_OUTPUT": out.as_posix(), "GITHUB_STEP_SUMMARY": summ.as_posix(),
+           "GITHUB_REPOSITORY": "o/r", "GITHUB_JOB": "update", "CI_KIT_TOKEN_MODE": "app",
+           "GITHUB_WORKFLOW_REF": "o/r/.github/workflows/pr-autoupdate.yml@refs/heads/main",
+           "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")}  # bash converts a Windows PATH
+    r = subprocess.run([BASH, "--noprofile", "--norc", "-eo", "pipefail", "-c", f'. "{script.as_posix()}"'],
+                       capture_output=True, text=True, env=env, check=False)
+    return r.returncode, r.stdout, summ.read_text(encoding="utf-8") if summ.exists() else ""
+
+
+@pytest.mark.skipif(BASH is None, reason="no bash on this host")
+def test_a_decide_that_cannot_run_still_writes_a_crash_record_must_fire(tmp_path: pathlib.Path) -> None:
+    rc, said, summary = _run_decide_shell(tmp_path, "echo 'No module named ci_kit' >&2; exit 1")
+    line = ("pr-token: source=none mode=app reason=decide-crashed app=absent repo=o/r "
+            "workflow=pr-autoupdate.yml job=update login=unknown")
+    assert rc == 1 and f"::error title=pr-token::{line}" in said and line in summary
+
+
+@pytest.mark.skipif(BASH is None, reason="no bash on this host")
+@pytest.mark.parametrize("fake", ['echo source=none >> "$GITHUB_OUTPUT"; exit 1', "exit 0"],
+                         ids=["ran-and-refused", "ran-ok"])
+def test_a_decide_that_ran_keeps_its_own_outcome(tmp_path: pathlib.Path, fake: str) -> None:
+    rc, said, _ = _run_decide_shell(tmp_path, fake)
+    assert rc == (1 if "exit 1" in fake else 0) and "decide-crashed" not in said

@@ -78,6 +78,6 @@ jobs:
       ntfy-url: ${{ secrets.NTFY_URL }}
       # THE APP CANARY (v1.37.0): with the key passed and no PR_TOKEN_SOURCE variable (mode pat) the
       # PAT still acts; each pass also mints the App token, unused, so its record line reads
-      # `pr-token: source=pat mode=pat reason=mode=pat app=minted ...` -- the key is proven before
+      # `pr-token: source=pat mode=pat reason=mode-pat app=minted ...` -- the key is proven before
       # any flip. Cut over: set the repo variable PR_TOKEN_SOURCE=app (README "The push token").
       EDGE_BOT_PRIVATE_KEY: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}

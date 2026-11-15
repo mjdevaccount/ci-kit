@@ -25,16 +25,22 @@ read used to go (pr_baseretry.whoami, merge_train.ops.me). The App's login comes
 cannot be registered by a person); the PAT's from `GET /user` with the PAT. The tools get
 `CI_KIT_TOKEN_LOGIN` (the identity that acts) and `CI_KIT_TRUSTED_LOGINS` (it plus the OTHER
 configured identity), so a marker or a train written under either side of a flip is honoured.
-The acting identity unreadable = the step FAILS, never "trust nobody" or "trust anybody".
+The acting identity unreadable = the step FAILS where a tool trusts markers with it
+(IDENTITY_SCOPES), never "trust nobody" or "trust anybody"; in the other jobs nothing reads it,
+so it is a `::warning::` and the record says `login=unknown`.
 
 THE RECORD: one line per token job, as a `::notice` (in `gh run view --log` and the check run's
-annotations API) and in the step summary, in ONE fixed shape a detector can grep:
-  pr-token: source=app|pat|none mode=<mode> reason=<why> app=<minted|failed|absent> repo=<o/r> workflow=<file> job=<id> login=<login>
+annotations API) and in the step summary, in ONE fixed shape -- a CONTRACT, a detector parses it:
+  pr-token: source=app|pat|none mode=<mode> reason=<REASONS> app=<minted|failed|absent> repo=<o/r>
+            workflow=<file> job=<id> login=<login|unknown>          (one line; wrapped here)
+Every value is free of `=` and spaces. The decide step's shell writes `reason=decide-crashed`
+itself when this module cannot run at all.
 """
 from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -51,6 +57,14 @@ PERMISSIONS: dict[str, dict[str, str]] = {
     "push": {"contents": "write", "workflows": "write"},
     "comment": {"pull-requests": "write", "issues": "write"},
 }
+# Every `reason=` value the record can carry (README "THE RECORD" lists the same; a test holds both
+# to this, and to every reason this module and the composite's shell actually emit).
+REASONS = ("configured", "mode-pat", "var-absent", "key-absent", "mode-invalid", "scope-invalid",
+           "mint-failed", "identity-unreadable", "decide-crashed")
+# The scopes whose job hands CI_KIT_TOKEN_LOGIN / CI_KIT_TRUSTED_LOGINS to a tool that trusts markers
+# with them (pr-autoupdate's base-retry, merge-train's authority): there an unreadable identity is
+# red. ci-green and pr-heal read neither (a test holds this set to the reusables' env).
+IDENTITY_SCOPES = frozenset({"update", "train"})
 LOGIN_ENV = "CI_KIT_TOKEN_LOGIN"
 TRUSTED_ENV = "CI_KIT_TRUSTED_LOGINS"
 PREFIX = "pr-token:"
@@ -60,7 +74,7 @@ PREFIX = "pr-token:"
 class Decision:
     mint: bool      # run create-github-app-token
     source: str     # app | pat | none (none = the job fails)
-    reason: str     # configured | mode=pat | var-absent | key-absent | ... (the record's `reason=`)
+    reason: str     # one of REASONS (the record's `reason=`)
     error: str = ""  # non-empty = fail the job with this message
 
 
@@ -78,7 +92,7 @@ def decide(mode: str, has_app_id: bool, has_key: bool, has_pat: bool) -> Decisio
         return Decision(True, "app", "configured")
     if mode == "app" and configured:
         return Decision(True, "app", "configured")
-    reason = "mode=pat" if mode == "pat" else missing
+    reason = "mode-pat" if mode == "pat" else missing
     if not has_pat:
         return Decision(configured, "none", reason, "secret `token` is empty and the App is not acting "
                         f"({reason}): nothing is pushed. Map the PAT onto `token`, or opt in with token-source app")
@@ -89,16 +103,6 @@ def bot_login(slug: str) -> str:
     """The App's login as REST reports it (comments' user.login, a PR's user.login). '' = unknown."""
     slug = (slug or "").strip()
     return f"{slug}[bot]" if slug else ""
-
-
-def rest_login(login: str, typename: str = "") -> str:
-    """ONE spelling for comparisons: GraphQL names an App `renovate` / `mjdev-edge-bot` with
-    __typename Bot, REST `renovate[bot]`. Only a Bot gets the suffix, so a User who registered
-    the bare slug never compares equal to the App. Pure."""
-    login = (login or "").strip()
-    if typename == "Bot" and login and not login.endswith("[bot]"):
-        return f"{login}[bot]"
-    return login
 
 
 def trusted_set(acting: str, others: list[str]) -> list[str]:
@@ -160,14 +164,15 @@ def _flag(name: str) -> bool:
 
 
 def _pat_login() -> str:
-    """GET /user with the PAT (CI_KIT_PAT, never argv). '' = unreadable or no PAT."""
+    """GET /user with the PAT (CI_KIT_PAT, never argv). '' = unreadable, no PAT, or no `gh`."""
     pat = os.environ.get("CI_KIT_PAT", "")
-    if not pat:
+    gh = shutil.which("gh")  # resolved explicitly (PATHEXT on Windows); absent = unreadable, not a crash
+    if not pat or not gh:
         return ""
     env = {**os.environ, "GH_TOKEN": pat}
     env.pop("GITHUB_TOKEN", None)
     try:
-        r = subprocess.run(["gh", "api", "user", "--jq", ".login"], capture_output=True, text=True, env=env, check=False)
+        r = subprocess.run([gh, "api", "user", "--jq", ".login"], capture_output=True, text=True, env=env, check=False)
     except OSError:
         return ""
     return (r.stdout or "").strip() if r.returncode == 0 else ""
@@ -189,8 +194,11 @@ def cmd_decide() -> int:
     return 0
 
 
-def resolve(d: Decision, mint_outcome: str, slug: str, pat_login: str) -> tuple[str, list[str], str, str]:
-    """(acting login, trusted logins, app= field, error). Pure given the two identity reads."""
+def resolve(d: Decision, mint_outcome: str, slug: str, pat_login: str,
+            needs_identity: bool = True) -> tuple[str, list[str], str, str]:
+    """(acting login, trusted logins, app= field, error). Pure given the two identity reads.
+    `needs_identity` False (a scope outside IDENTITY_SCOPES): an unreadable PAT login is acting ''
+    with nothing trusted, not an error -- no tool in that job trusts a marker."""
     app = {"success": "minted", "failure": "failed"}.get(mint_outcome, "absent")
     app_login = bot_login(slug) if app == "minted" else ""
     if d.source == "app":
@@ -198,6 +206,8 @@ def resolve(d: Decision, mint_outcome: str, slug: str, pat_login: str) -> tuple[
             return "", [], app, "the App token was not minted (or named no app-slug): failing rather than using the PAT"
         return app_login, trusted_set(app_login, [pat_login]), app, ""
     if not pat_login:
+        if not needs_identity:
+            return "", [], app, ""
         return "", [], app, "the PAT's identity is unreadable (GET /user): no marker could be trusted, refusing to act"
     return pat_login, trusted_set(pat_login, [app_login]), app, ""
 
@@ -207,7 +217,8 @@ def cmd_report() -> int:
     mode = os.environ.get("CI_KIT_TOKEN_MODE", "")
     d = Decision(_flag("MINT"), os.environ.get("SOURCE", ""), os.environ.get("REASON", ""))
     outcome = os.environ.get("MINT_OUTCOME", "")
-    acting, trusted, app, err = resolve(d, outcome, os.environ.get("APP_SLUG", ""), _pat_login())
+    needs = os.environ.get("CI_KIT_TOKEN_SCOPE", "") not in PERMISSIONS.keys() - IDENTITY_SCOPES  # unknown: needs it
+    acting, trusted, app, err = resolve(d, outcome, os.environ.get("APP_SLUG", ""), _pat_login(), needs)
     if err:
         d = Decision(d.mint, "none", "mint-failed" if d.source == "app" else "identity-unreadable")
     rec = line(d, mode, app, os.environ.get("GITHUB_REPOSITORY", ""), _workflow(), os.environ.get("GITHUB_JOB", ""), acting)
@@ -216,7 +227,12 @@ def cmd_report() -> int:
     if d.source == "pat" and app == "failed":
         print("::warning title=pr-token::the App canary mint FAILED (the PAT acts, mode=pat): fix the App key or "
               "installation before flipping this repo to token-source app")
-    if d.source != "none" and len(trusted) < 2:
+    if d.source != "none" and not acting:
+        print("::warning title=pr-token::the PAT's identity is unreadable (GET /user): acting as login=unknown -- "
+              "no tool in this job trusts markers, so the token is still handed out")
+    # Only where the second identity was EXPECTED (an App mode, or a canary that failed): without the
+    # key in pat mode one identity is the normal state, and an always-present notice says nothing.
+    if d.source != "none" and acting and len(trusted) < 2 and (d.reason != "mode-pat" or app == "failed"):
         print(f"::notice title=pr-token::trusted identities: {', '.join(trusted)} only -- markers written by the other "
               "token identity (before or after a flip) are NOT honoured in this run")
     if err:
