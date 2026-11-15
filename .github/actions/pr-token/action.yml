@@ -23,6 +23,7 @@
 #   train    merge-train: push, open/merge/close trains, comments, labels, the lane's statuses, cancels
 #   push     ci-green, pr-heal push: a branch push (workflows: a range may touch .github/workflows/**)
 #   comment  pr-heal claim/report: marker comments and the PR body
+# The pat-mode canary gets metadata:read only, never the job's set.
 # The App token is scoped to THIS repository only, with only that set, and revoked by the mint
 # action's post step at job end. The token never passes through a shell: the `token` output is an
 # expression over the mint's output (masked by the action) and the `pat` input.
@@ -51,7 +52,8 @@ inputs:
 outputs:
   token:
     description: the token that acts (masked)
-    value: ${{ steps.decide.outputs.source == 'app' && steps.mint.outputs.token || inputs.pat }}
+    # fail-closed: an app source with an empty mint token is '', never the PAT
+    value: ${{ steps.decide.outputs.source == 'app' && steps.mint.outputs.token || (steps.decide.outputs.source == 'pat' && inputs.pat || '') }}
   source:
     description: app | pat
     value: ${{ steps.decide.outputs.source }}
@@ -75,8 +77,10 @@ runs:
         HAS_KEY: ${{ inputs.private-key != '' }}
         HAS_PAT: ${{ inputs.pat != '' }}
       run: python3 -m ci_kit.pr_token decide
-    # pat mode with the App configured mints too (a canary, never used): its failure must not
-    # stop the PAT run, and is a warning in the record. In app modes a failed mint FAILS the job.
+    # pat mode with the App configured mints too (a canary, never used, WRITE-FREE: metadata:read
+    # only): it proves the key before a flip and names the App so its markers stay trusted after a
+    # rollback. Its failure must not stop the PAT run and is a warning in the record. In app modes
+    # a failed mint FAILS the job.
     - id: mint
       if: steps.decide.outputs.mint == 'true'
       continue-on-error: ${{ steps.decide.outputs.source == 'pat' }}
@@ -86,15 +90,20 @@ runs:
         private-key: ${{ inputs.private-key }}
         owner: ${{ github.repository_owner }}
         repositories: ${{ github.repository }}
-        # '' = not requested (the action skips an empty permission input)
-        permission-contents: ${{ contains(fromJSON('["update","train","push"]'), inputs.scope) && 'write' || '' }}
-        permission-workflows: ${{ contains(fromJSON('["update","train","push"]'), inputs.scope) && 'write' || '' }}
-        permission-pull-requests: ${{ contains(fromJSON('["update","train","comment"]'), inputs.scope) && 'write' || '' }}
-        permission-issues: ${{ contains(fromJSON('["update","train","comment"]'), inputs.scope) && 'write' || '' }}
-        permission-actions: ${{ contains(fromJSON('["update","train"]'), inputs.scope) && 'write' || '' }}
-        permission-statuses: ${{ contains(fromJSON('["update","train"]'), inputs.scope) && 'write' || '' }}
-        permission-checks: ${{ contains(fromJSON('["update","train"]'), inputs.scope) && 'read' || '' }}
-        permission-administration: ${{ contains(fromJSON('["update"]'), inputs.scope) && 'read' || '' }}
+        # The job's set ONLY when the App acts; the pat-mode canary asks for metadata:read and nothing
+        # else. Never let every input go empty: '' = not requested, and with NO permission input the
+        # token inherits the installation's WHOLE permission set (create-github-app-token v3.3.0
+        # README, `permission-<permission name>`: "By default, the token inherits all of the
+        # installation's permissions"; lib/get-permissions-from-inputs.js returns undefined).
+        permission-metadata: ${{ steps.decide.outputs.source == 'pat' && 'read' || '' }}
+        permission-contents: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train","push"]'), inputs.scope) && 'write' || '' }}
+        permission-workflows: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train","push"]'), inputs.scope) && 'write' || '' }}
+        permission-pull-requests: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train","comment"]'), inputs.scope) && 'write' || '' }}
+        permission-issues: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train","comment"]'), inputs.scope) && 'write' || '' }}
+        permission-actions: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train"]'), inputs.scope) && 'write' || '' }}
+        permission-statuses: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train"]'), inputs.scope) && 'write' || '' }}
+        permission-checks: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update","train"]'), inputs.scope) && 'read' || '' }}
+        permission-administration: ${{ steps.decide.outputs.source == 'app' && contains(fromJSON('["update"]'), inputs.scope) && 'read' || '' }}
     # always() after decide succeeded: a FAILED mint in an app mode still writes its record line
     # (source=none reason=mint-failed) before the job goes red
     - id: report

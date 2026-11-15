@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 
 import pytest
 import yaml
@@ -206,36 +207,70 @@ def test_the_composite_pins_the_mint_by_sha_and_never_shells_the_token() -> None
     assert mint["with"]["repositories"] == "${{ github.repository }}"                  # this repo only
     assert mint["continue-on-error"] == "${{ steps.decide.outputs.source == 'pat' }}"  # app modes: a failed mint is red
     assert steps["report"]["if"].startswith("always()")                                # the record survives a failed mint
-    out = _yaml(ACTION)["outputs"]["token"]["value"]
-    assert out == "${{ steps.decide.outputs.source == 'app' && steps.mint.outputs.token || inputs.pat }}"
     for s in steps.values():  # no shell ever holds the key or the App token (the PAT only for GET /user)
         env = list((s.get("env") or {}).values())
         assert "${{ inputs.private-key }}" not in env and not any("mint.outputs.token" in v for v in env)
 
 
-def granted(action: dict) -> dict[str, dict[str, str]]:
-    """The App permissions the composite's mint step asks for, per scope, read off its expressions."""
+# The expression subset the composite's `with:`/`outputs:` use, evaluated (no GitHub expression
+# library on PyPI covers it; this is the one-off a test needs): `&&`/`||` return an OPERAND, like
+# Python's and/or, and '' is falsy in both.
+_NAMES = {"steps.decide.outputs.source": "source", "steps.mint.outputs.token": "mint_token",
+          "inputs.pat": "pat", "inputs.scope": "scope"}
+
+
+def gh_eval(expr: str, **ctx: str) -> str:
+    body = expr.strip().removeprefix("${{").removesuffix("}}")
+    body = re.sub(r"contains\(fromJSON\('(\[[^']*\])'\), (inputs\.scope)\)", r"(\2 in \1)", body)
+    for k, v in _NAMES.items():
+        body = body.replace(k, v)
+    body = body.replace("&&", " and ").replace("||", " or ")
+    return eval(body, {"__builtins__": {}}, ctx)  # noqa: S307 -- the test's own fixture text
+
+
+def granted(action: dict, source: str) -> dict[str, dict[str, str]]:
+    """The App permissions the composite's mint step asks for, per scope, when `source` acts."""
     mint = next(s for s in action["runs"]["steps"] if s.get("id") == "mint")
-    out: dict[str, dict[str, str]] = {s: {} for s in pt.PERMISSIONS}
-    for k, v in mint["with"].items():
-        if not k.startswith("permission-"):
-            continue
-        scopes = json.loads(v.split("fromJSON('")[1].split("')")[0])
-        level = v.split("&& '")[1].split("'")[0]
-        for s in scopes:
-            out.setdefault(s, {})[k[len("permission-"):]] = level
+    out: dict[str, dict[str, str]] = {}
+    for scope in pt.PERMISSIONS:
+        got = {k[len("permission-"):]: gh_eval(v, source=source, scope=scope)
+               for k, v in mint["with"].items() if k.startswith("permission-")}
+        out[scope] = {k: v for k, v in got.items() if v}
     return out
 
 
-def test_the_composite_asks_for_exactly_the_permission_table() -> None:
-    assert granted(_yaml(ACTION)) == pt.PERMISSIONS
+def test_the_app_asks_for_exactly_the_permission_table() -> None:
+    assert granted(_yaml(ACTION), "app") == pt.PERMISSIONS
+
+
+def test_the_pat_mode_canary_asks_for_metadata_read_and_nothing_else_must_fire() -> None:
+    assert granted(_yaml(ACTION), "pat") == {s: {"metadata": "read"} for s in pt.PERMISSIONS}
+
+
+def test_no_mint_ever_requests_an_empty_set_which_inherits_everything() -> None:
+    # create-github-app-token: NO permission input => the installation's WHOLE permission set
+    for source in ("app", "pat"):
+        assert all(granted(_yaml(ACTION), source).values()), source
 
 
 def test_a_widened_grant_is_caught_must_fire() -> None:
     action = _yaml(ACTION)
     mint = next(s for s in action["runs"]["steps"] if s.get("id") == "mint")
     mint["with"]["permission-administration"] = "${{ contains(fromJSON('[\"update\",\"comment\"]'), inputs.scope) && 'write' || '' }}"
-    assert granted(action) != pt.PERMISSIONS
+    assert granted(action, "app") != pt.PERMISSIONS
+    assert granted(action, "pat") != {s: {"metadata": "read"} for s in pt.PERMISSIONS}  # ungated: the canary gets it
+
+
+@pytest.mark.parametrize(("source", "mint_token", "pat", "want"), [
+    ("app", "APP", "PAT", "APP"),
+    ("app", "", "PAT", ""),        # an empty App token is '', NEVER the PAT
+    ("pat", "CANARY", "PAT", "PAT"),  # the canary is never handed out
+    ("pat", "", "PAT", "PAT"),
+    ("", "", "PAT", ""),           # no decided source: nothing
+])
+def test_the_token_output_is_fail_closed(source: str, mint_token: str, pat: str, want: str) -> None:
+    out = _yaml(ACTION)["outputs"]["token"]["value"]
+    assert gh_eval(out, source=source, mint_token=mint_token, pat=pat) == want
 
 
 def test_an_unknown_scope_is_red(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:

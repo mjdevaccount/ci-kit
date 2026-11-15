@@ -121,9 +121,16 @@ else `pat` (`ci_kit/pr_token.py`):
 
 | mode | acts | App absent | App mint fails |
 |---|---|---|---|
-| `pat` (default) | the PAT; the App, if its key is passed, is minted and NOT used (a canary) | PAT | `::warning::`, PAT acts |
+| `pat` (default) | the PAT; the App, if its key is passed, is minted with `metadata: read` ONLY and NOT used (a canary) | PAT | `::warning::`, PAT acts |
 | `app` | the App | PAT, `reason=var-absent` / `key-absent` | **red** -- a broken key never hides behind the PAT |
 | `app-required` | the App; `token` is never read | **red** | **red** |
+
+THE CANARY is on by default, not opt-in: it is the only thing that proves the key AND the
+App's installation in a repo BEFORE that repo flips (opt-in would mean it never runs), and a
+`pr-token: ... app=failed` warning across repos is the early signal. It is write-free: the mint
+asks for `metadata: read` and nothing else -- never NO permission input, which
+`create-github-app-token` answers with the installation's WHOLE permission set. Cost: one API
+call per job.
 
 Staged rollout -- each stage is config in the CALLER repo, no ci-kit change:
 
@@ -131,7 +138,9 @@ Staged rollout -- each stage is config in the CALLER repo, no ci-kit change:
    under `secrets:` (pr-autoupdate, merge-train, ci-green, pr-heal), then set the repo variable
    `PR_TOKEN_SOURCE=app` (`gh variable set PR_TOKEN_SOURCE -R owner/repo --body app`). Until the
    variable is set the runs read `source=pat ... app=minted`: the key is proven before the flip.
-   Rollback: delete the variable.
+   Rollback: delete the variable. Keep the `EDGE_BOT_PRIVATE_KEY` mapping when you do: the PAT
+   run learns the App's login from the canary, so a caller that drops the key on rollback stops
+   trusting the App's base-retry markers and trains (the record line says so in a notice).
 2. **Flip the default.** The same two edits in every caller repo (the variable per repo -- a
    personal account has no organisation variables). A repo without them stays on the PAT.
 3. **Make the PAT fail loud.** `PR_TOKEN_SOURCE=app-required` per repo: an App that is absent or
