@@ -1,39 +1,48 @@
-"""Base-driven retry: an armed PR held red and BEHIND is re-queued when main has FIXED the check.
+"""Base-driven retry: an armed PR held red and BEHIND is re-queued when MAIN went red -> green on its check.
 
 WHY (2026-11-15). pr_queue holds a BEHIND PR whose required check fails at its head: "the author's
-fix re-queues it". That assumes the fix is a push to the PR. When the cause is on the BASE -- a
-time-dependent test on main, fixed on main by a separate PR -- nothing ever pushes to the held PR: a
-Renovate PR sat red and armed for good, and a hand update-branch is not how this estate lands work.
-A held-forever PR that nothing re-examines is the defect.
+fix re-queues it". That assumes the fix is a push to the PR. When the cause is on the BASE and the
+fix lands on main, nothing ever pushes to the held PR: an armed Renovate PR sat red for good, and a
+hand update-branch is not how this estate lands work.
 
 WHAT ELSE WAS CHECKED. GitHub's merge queue (needs an organisation; ci-kit runs its own queue for
 that reason, ci_kit/merge_train). Renovate `rebaseWhen` is `conflicted` in every serial-queue repo
-(renovate/default.json5: a second updater raced the queue), so Renovate never refreshes a BEHIND
-branch there. The heal ladder (ci_kit/pr_ladder.py) fixes the PR's OWN code (relock, regen, Claude)
--- the wrong place when the PR is fine and main was broken. pr_heal reruns MACHINERY reds only. None
-re-merges the base into a judgment-red PR, which is the one action that can turn it green here.
+(renovate/default.json5), so Renovate never refreshes a BEHIND branch there. The heal ladder
+(ci_kit/pr_ladder.py) fixes the PR's OWN code; pr_heal reruns MACHINERY reds only. None re-merges
+the base into a judgment-red PR.
 
-THE RULE (`decide`, pure). A candidate (`candidate`: armed, same repo, not a draft/train/rider/
-parked, no conflict label or `autoland-off`, BEHIND and not CONFLICTING, red on a required check
-that is not machinery -- machinery is already eligible) is RETRIED when
-  * EVIDENCE: every failing required check has a conclusion on a base commit the PR does not yet
-    contain (main since the PR's merge base, newest concluded first) and that conclusion is GREEN.
-    Absent there (a check main never runs, e.g. the PR review) or red there = held: no evidence
-    the base can help. Only commits since the merge base count, so the same green cannot buy a
-    second retry: after the update they ARE the merge base, and main must move again;
-  * ONCE PER HEAD: no retry marker already names this head (a raced or refused PUT spends it);
-  * CAP: fewer than `cap` CONSECUTIVE base-driven retries. Consecutive = the head is a 2-parent
-    merge whose first parent is the last retry's head (the updater's own merge commit, or an
-    equivalent hand merge of main); an author's commit, a Renovate rebase, or a plain queue
-    update in between starts the count again.
-At the cap the PR is SURFACED once per head (a marker comment, `::error::`, a red pass) and held.
-A retry takes a queue slot only AFTER every green eligible PR (pr_queue.plan's `base_retry`), it is
-never the queue head (pr_queue.blocked still counts it red), and its marker is written BEFORE the
-PUT (pr_autoupdate._drive): a failed record means no update -- the record is the budget.
+THE EVIDENCE RULE: A RED -> GREEN TRANSITION ON MAIN, per failing check. "Green on newer main" alone
+is no evidence: under strict protection main is green by construction, so it holds for EVERY
+judgment red (review of 6e69e0d, finding 1). So for each failing required check, identified by
+(app, workflow file, name) -- a status by its context -- BOTH must hold:
+  * RED AT ITS BASE: a finished failing run of that check on the PR's merge-base commit or one of
+    the `NEAR` commits just before it (commits the PR already contains). Skipped, neutral, stale,
+    cancelled or absent is not red;
+  * GREEN SINCE: the newest finished result on the main commits the PR LACKS (newest first, at
+    most `LOOKBACK`) is SUCCESS. Neutral and skipped are not green.
+Main never red there = HELD, the old behaviour. WHAT IT DOES NOT COVER: a check that is red only on
+the PR's run while main's own runs stayed green -- e.g. a time-dependent test that started failing
+after main's last run at the PR's base. Under strict protection main records no red then, so this
+rule holds that PR exactly as before. It fires only when main ITSELF recorded the red (a scheduled
+or re-run on main, a push that bypassed the gate) and then recorded the green.
 
-THE RECORD (append-only PR comments, read back as the budget, like pr_heal's):
-`<!-- smart-merge:base-retry head=<sha> base=<sha> n=<k> -->` and
-`<!-- smart-merge:base-retry-spent head=<sha> n=<k> -->`.
+THE BOUNDS. ONCE PER HEAD (a retry marker at the head holds it; a raced PUT spends it). A CAP on
+retries since the last NON-UPDATER commit: walking first parents through 2-parent merges (the
+updater's own, retry or plain update alike, or an equivalent hand merge of main), the retry markers
+on that chain are counted; an author commit or a rebase ends the chain. At the cap: ONE comment per
+head, `::error::`, a red pass, then held. ONE ACTOR PER HEAD: a head the heal ladder took is never
+base-retried, and pr_autoupdate gives a PR this pass retried to neither the ladder nor pr_heal.
+
+TRUST. A marker GRANTS a retry budget only when the token's OWN identity wrote it (`comments_by` +
+`whoami`); counts come from markers along the head's ancestry, never from a number in a comment. A
+forged retry marker is ignored (it neither grants nor resets); the heal ladder's markers are read
+from every author, which is fail-safe here: a forged one can only HOLD a PR.
+
+ORDER. A retry takes a queue slot only AFTER every green eligible PR (pr_queue.plan's `base_retry`),
+is never the queue head (pr_queue.blocked still counts it red), and its marker is written BEFORE the
+PUT (pr_autoupdate._drive): no record, no update. Default OFF (`base-retry-cap` 0): nothing is read.
+
+THE RECORD: `<!-- smart-merge:base-retry head=<sha> base=<sha> -->`, `<!-- smart-merge:base-retry-spent head=<sha> -->`.
 """
 from __future__ import annotations
 
@@ -41,30 +50,42 @@ import json
 import re
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from ci_kit import redclass
+from ci_kit import pr_ladder, redclass
 from ci_kit.merge_train import OPT_OUT, RIDING, TRAIN_PREFIX
 
 PARKED = "queue:parked"  # ci_kit/pr_sched.PARKED, literal: pr_sched imports pr_autoupdate
-CAP = 2
-LOOKBACK = 10  # base commits read (newest first) for a failing check's conclusion
-MARK = "<!-- smart-merge:base-retry head={head} base={base} n={n} -->"
-SPENT = "<!-- smart-merge:base-retry-spent head={head} n={n} -->"
-_MARK = re.compile(r"<!-- smart-merge:base-retry head=([0-9a-f]{40}) base=([0-9a-f]{40}) n=(\d+) -->")
-_SPENT = re.compile(r"<!-- smart-merge:base-retry-spent head=([0-9a-f]{40}) n=(\d+) -->")
-_GREEN = {"SUCCESS", "NEUTRAL"}
-_ABSENT = {"SKIPPED", "STALE", ""}
+CAP = 0          # default OFF: one repo turns it on first and is watched
+NEAR = 3         # commits before the merge base read for the RED observation
+LOOKBACK = 10    # main commits the PR lacks read (newest first) for the GREEN one
+CHAIN = 30       # first-parent merge steps walked when counting retries
+MARK = "<!-- smart-merge:base-retry head={head} base={base} -->"
+SPENT = "<!-- smart-merge:base-retry-spent head={head} -->"
+_MARK = re.compile(r"<!-- smart-merge:base-retry head=([0-9a-f]{40})\b")
+_SPENT = re.compile(r"<!-- smart-merge:base-retry-spent head=([0-9a-f]{40})\b")
+_RED = {"FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ERROR"}
+_GREEN = {"SUCCESS"}
 
 Gh = Callable[..., subprocess.CompletedProcess]
+Key = tuple[str, str, str]  # (app slug | "status", workflow path, check name | status context)
 
 
 @dataclass(frozen=True)
+class Run:
+    key: Key
+    conclusion: str  # upper case; '' = not finished
+    id: int
+
+
+@dataclass
 class Evidence:
-    """What GitHub says about one candidate: the base commits it lacks, newest first, and the head's parents."""
-    base: list[str]
-    parents: list[str]
-    results: dict[str, str]  # failing check -> green | red | absent (newest concluded result on `base`)
+    """What GitHub says about one candidate."""
+    failing: list[Key]                      # the PR's failing required checks, fully identified
+    near: list[list[Run]]                   # merge base, then NEAR commits before it (newest first)
+    lacking: list[list[Run]]                # main commits the PR lacks, newest first
+    base: str = ""                          # main's newest commit the PR lacks
+    unread: list[str] = field(default_factory=list)
 
 
 # ── pure ──────────────────────────────────────────────────────────────────────────────────────
@@ -92,61 +113,73 @@ def candidate(p: dict, required: tuple[str, ...], conflict_label: str, machinery
     return ""
 
 
-def chain(bodies: list[str], head: str, parents: list[str]) -> int:
-    """Consecutive base-driven retries leading to `head`: the last marker's n when `head` is a merge
-    whose first parent is that marker's head, else 0. Pure."""
-    marks = [m.groups() for b in bodies for m in _MARK.finditer(b or "")]
-    if not marks or len(parents) != 2 or parents[0] != marks[-1][0]:
-        return 0
-    return int(marks[-1][2])
+def trusted(comments: list[tuple[str, str]], me: str, pattern: re.Pattern[str]) -> set[str]:
+    """The heads named by `pattern` markers the token's own identity wrote. Pure."""
+    return {m.group(1) for who, body in comments if me and who == me for m in pattern.finditer(body or "")}
 
 
-def verdict(results: dict[str, str]) -> str:
-    """'' = every failing check is green on the new base commits, else the hold reason. Pure."""
-    bad = {k: v for k, v in sorted(results.items()) if v != "green"}
-    if not results or bad:
-        return "no evidence the base fixed it (" + ", ".join(f"`{k}` {v} on main" for k, v in bad.items()) + ")"
-    return ""
+def red_at_base(key: Key, near: list[list[Run]]) -> bool:
+    """A finished FAILING run of `key` on the merge base or the commits just before it. Pure."""
+    return any(r.key == key and r.conclusion in _RED for runs in near for r in runs)
 
 
-def settled(head: str, bodies: list[str]) -> tuple[str, str]:
-    """(action, why) when the record alone decides this head (no GitHub read owed), else ('', ''). Pure."""
-    if any(m.group(1) == head for b in bodies for m in _SPENT.finditer(b or "")):
+def transition(key: Key, ev: Evidence) -> str:
+    """'' = main went RED (at the PR's base) -> GREEN (since) on `key`, else the hold reason. Pure."""
+    name = key[2] if not key[1] else f"{key[2]} ({key[1]})"
+    if not red_at_base(key, ev.near):
+        return f"`{name}` never red on main at its base (main was fine: the red is the PR's)"
+    for runs in ev.lacking:
+        done = sorted((r for r in runs if r.key == key and r.conclusion), key=lambda r: -r.id)
+        done = [r for r in done if r.conclusion not in ("SKIPPED", "NEUTRAL", "STALE", "CANCELLED")]
+        if done:
+            return "" if done[0].conclusion in _GREEN else f"`{name}` still {done[0].conclusion.lower()} on main"
+    return f"`{name}` has no finished result on main since its merge base"
+
+
+def count(head: str, parents: Callable[[str], list[str]], retried: set[str], cap: int, limit: int = CHAIN) -> int:
+    """Retries since the last non-updater commit: walk first parents through 2-parent merges from
+    `head`, counting the (trusted) retried heads met. An author commit or a rebase ends it. Pure
+    given `parents`."""
+    n, h = 0, head
+    for _ in range(limit):
+        ps = parents(h)
+        if len(ps) != 2:
+            break
+        h = ps[0]
+        n += h in retried
+        if n >= cap:
+            break
+    return n
+
+
+def decide(head: str, retried: set[str], spent: set[str], laddered: bool, reason: str, done: int,
+           cap: int) -> tuple[str, str]:
+    """(action, why) for one candidate: retry | hold | spent | quiet. Pure: the policy the tests pin."""
+    if head in spent:
         return "quiet", "base-driven retries spent at this head, already named"
-    if any(m.group(1) == head for b in bodies for m in _MARK.finditer(b or "")):
+    if head in retried:
         return "hold", "already retried once from this head (base-driven)"
-    return "", ""
-
-
-def decide(head: str, bodies: list[str], ev: Evidence, cap: int) -> tuple[str, str, int]:
-    """(action, why, n) for one candidate: retry | hold | spent | quiet. Pure: the policy the tests pin."""
-    action, why = settled(head, bodies)
-    if action:
-        return action, why, 0
-    if not ev.base:
-        return "hold", "no base commits it lacks", 0
-    why = verdict(ev.results)
-    if why:
-        return "hold", why, 0
-    n = chain(bodies, head, ev.parents) + 1
-    if n > cap:
-        return "spent", f"{cap} base-driven retries and still red: needs the author or a session", 0
-    return "retry", f"failing check(s) green on main since its merge base: base-driven retry {n} of {cap}", n
+    if laddered:
+        return "hold", "the heal ladder took this head (one actor per head)"
+    if reason:
+        return "hold", f"no evidence main fixed it: {reason}"
+    if done >= cap:
+        return "spent", f"{done} base-driven retries since its last own commit and still red: needs the author or a session"
+    return "retry", f"main went red -> green on its failing check(s): base-driven retry {done + 1} of {cap}"
 
 
 def mark_comment(head: str, base: str, n: int, cap: int, checks: list[str]) -> str:
     return "\n".join([
-        MARK.format(head=head, base=base, n=n),
-        f"**smart auto-merge**: red at `{head[:12]}` on {', '.join(f'`{c}`' for c in checks)}, and green on main since "
-        f"this PR's merge base (`{base[:12]}`). Updating the branch from main: base-driven retry {n} of {cap}."])
+        MARK.format(head=head, base=base),
+        f"**smart auto-merge**: red at `{head[:12]}` on {', '.join(f'`{c}`' for c in checks)}; main was red on it at this "
+        f"PR's base and is green since (`{base[:12]}`). Updating the branch from main: base-driven retry {n} of {cap}."])
 
 
 def spent_comment(head: str, cap: int, checks: list[str]) -> str:
     return "\n".join([
-        SPENT.format(head=head, n=cap),
+        SPENT.format(head=head),
         f"**smart auto-merge**: still red at `{head[:12]}` on {', '.join(f'`{c}`' for c in checks)} after {cap} "
-        "consecutive base-driven retries, though main is green on it. Not retried again: the PR itself needs the author "
-        "or a session. A push re-runs CI."])
+        "base-driven retries since its last own commit. Not retried again: the PR itself needs the author or a session."])
 
 
 # ── GitHub ────────────────────────────────────────────────────────────────────────────────────
@@ -154,69 +187,114 @@ def _lines(read: Gh, *args: str) -> list[dict]:
     return [json.loads(x) for x in (read(*args).stdout or "").splitlines() if x.strip()]
 
 
-def evidence(repo: str, p: dict, base_ref: str, failing: list[str], read: Gh) -> Evidence:
-    """Read the base commits the PR lacks, its head's parents, and each failing check's newest
-    concluded result on those commits. Raises when GitHub will not answer."""
+def runs_at(repo: str, sha: str, read: Gh) -> list[Run]:
+    """Every check run and commit status at `sha`, identified by (app, workflow file, name)."""
+    paths = {int(w["suite"]): str(w.get("path") or "") for w in _lines(
+        read, "api", "--paginate", f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100",
+        "--jq", ".workflow_runs[] | {suite: .check_suite_id, path}") if w.get("suite")}
+    out = []
+    for c in _lines(read, "api", "--paginate", f"repos/{repo}/commits/{sha}/check-runs?per_page=100",
+                    "--jq", ".check_runs[] | {name, status, conclusion, id, app: .app.slug, suite: .check_suite.id}"):
+        done = (c.get("status") or "").lower() == "completed"
+        out.append(Run((str(c.get("app") or ""), paths.get(int(c.get("suite") or 0), ""), str(c.get("name") or "")),
+                       str(c.get("conclusion") or "").upper() if done else "", int(c.get("id") or 0)))
+    for s in _lines(read, "api", "--paginate", f"repos/{repo}/commits/{sha}/statuses?per_page=100",
+                    "--jq", ".[] | {context, state, id}"):
+        state = str(s.get("state") or "").upper()
+        out.append(Run(("status", "", str(s.get("context") or "")), "" if state == "PENDING" else state,
+                       int(s.get("id") or 0)))
+    return out
+
+
+def failing_keys(runs: list[Run], names: list[str]) -> list[Key]:
+    """The PR head's red checks, by full identity: the newest run per key, red, named in `names`. Pure."""
+    newest: dict[Key, Run] = {}
+    for r in runs:
+        if r.key[2] in names and (r.key not in newest or r.id > newest[r.key].id):
+            newest[r.key] = r
+    return sorted(k for k, r in newest.items() if r.conclusion in _RED | {"CANCELLED"})
+
+
+def evidence(repo: str, p: dict, base_ref: str, names: list[str], read: Gh) -> Evidence:
+    """The candidate's failing keys and main's runs near its merge base and since. Raises when
+    GitHub will not answer. Cheapest refusal first: no red near the base = no reads since."""
     head = str(p["headRefOid"])
-    # paginated: one page lists the OLDEST commits, and the newest are the ones that can carry the fix
-    got = read("api", "--paginate", f"repos/{repo}/compare/{head}...{base_ref}?per_page=100", "--jq", ".commits[].sha")
-    base = list(reversed([x.strip() for x in (got.stdout or "").splitlines() if x.strip()]))  # newest first
-    parents = json.loads(read("api", f"repos/{repo}/commits/{head}", "--jq", "[.parents[].sha]").stdout or "[]")
-    results: dict[str, str] = {}
-    for sha in base[:LOOKBACK]:
-        todo = [c for c in failing if c not in results]
-        if not todo:
+    ev = Evidence(failing_keys(runs_at(repo, head, read), names), [], [])
+    got = [x.strip() for x in (read("api", "--paginate", f"repos/{repo}/compare/{head}...{base_ref}?per_page=100",
+                                    "--jq", ".merge_base_commit.sha, .commits[].sha").stdout or "").splitlines() if x.strip()]
+    if not got or not ev.failing:
+        return ev
+    mb = got[0]
+    lacking = list(reversed([x for x in got[1:] if x != mb]))  # newest first
+    near = [x.strip() for x in (read("api", f"repos/{repo}/commits?sha={mb}&per_page={NEAR + 1}", "--jq",
+                                     ".[].sha").stdout or "").splitlines() if x.strip()] or [mb]
+    ev.near = [runs_at(repo, sha, read) for sha in near[:NEAR + 1]]
+    ev.base = lacking[0] if lacking else ""
+    if not all(red_at_base(k, ev.near) for k in ev.failing):
+        return ev  # main was never red at its base on some check: no read of the commits since
+    for sha in lacking[:LOOKBACK]:
+        ev.lacking.append(runs_at(repo, sha, read))
+        if all(not transition(k, ev) for k in ev.failing):
             break
-        seen: dict[str, str] = {}
-        newest: dict[str, int] = {}  # a re-run is a newer check run at the same sha: the highest id answers
-        for c in _lines(read, "api", "--paginate", f"repos/{repo}/commits/{sha}/check-runs?per_page=100",
-                        "--jq", ".check_runs[] | {name, status, conclusion, id}"):
-            if c.get("name") in todo and (c.get("status") or "").lower() == "completed" \
-                    and int(c.get("id") or 0) >= newest.get(c["name"], 0):
-                newest[c["name"]] = int(c.get("id") or 0)
-                seen[c["name"]] = str(c.get("conclusion") or "").upper()
-        for s in _lines(read, "api", f"repos/{repo}/commits/{sha}/status", "--jq", ".statuses[] | {context, state}"):
-            if s.get("context") in todo and (s.get("state") or "").lower() != "pending":
-                seen.setdefault(s["context"], "SUCCESS" if s["state"].lower() == "success" else "FAILURE")
-        for name, concl in seen.items():
-            if concl not in _ABSENT:
-                results[name] = "green" if concl in _GREEN else "red"
-    return Evidence(base, list(parents), {c: results.get(c, "absent") for c in failing})
+    return ev
+
+
+def parents_of(repo: str, read: Gh) -> Callable[[str], list[str]]:
+    def get(sha: str) -> list[str]:
+        return list(json.loads(read("api", f"repos/{repo}/commits/{sha}", "--jq", "[.parents[].sha]").stdout or "[]"))
+    return get
+
+
+def whoami(write: Gh) -> str:
+    """The push token's login: the one identity whose markers are trusted ('' = unknown)."""
+    r = write("api", "user", "--jq", ".login")
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
 
 
 def assess(repo: str, armed: list[dict], required: tuple[str, ...], conflict_label: str, machinery: frozenset[int],
-           base_of: Callable[[dict], str], cap: int, read: Gh, comments: Callable[[str, int], list[str]], write: Gh,
-           summary: list[str]) -> tuple[dict[int, str], int]:
+           base_of: Callable[[dict], str], cap: int, read: Gh, comments: Callable[[str, int], list[tuple[str, str]]],
+           write: Gh, summary: list[str]) -> tuple[dict[int, str], int]:
     """({PR: the marker comment to write before its update}, errors). A spent PR is surfaced here."""
     retry: dict[int, str] = {}
     errors = 0
-    if cap <= 0:
+    todo = [p for p in sorted(armed, key=lambda x: int(x["number"]))
+            if not candidate(p, required, conflict_label, machinery)]
+    if cap <= 0 or not todo:
         return retry, 0
-    for p in sorted(armed, key=lambda x: int(x["number"])):
-        if candidate(p, required, conflict_label, machinery):
-            continue
+    me = whoami(write)
+    if not me:
+        print("::error::base-driven retry: the push token's identity could not be read (GET /user); feature skipped this pass")
+        summary.append("base-driven retry SKIPPED: the push token's identity is unknown, so no marker could be trusted")
+        return retry, 1
+    for p in todo:
         n, head = int(p["number"]), str(p["headRefOid"])
-        failing = redclass.red_checks(p.get("statusCheckRollup"), required)
+        names = redclass.red_checks(p.get("statusCheckRollup"), required)
+        ev, done = Evidence([], [], []), 0
         try:
-            bodies = comments(repo, n)
-            action, why = settled(head, bodies)
-            if action:  # the record decides: no compare or check reads on every pass
-                summary.append(f"#{n}: red and behind -> base-driven {action}: {why}")
-                continue
-            ev = evidence(repo, p, base_of(p), failing, read)
+            notes = comments(repo, n)
+            retried, spent = trusted(notes, me, _MARK), trusted(notes, me, _SPENT)
+            laddered = any(h == head for h, *_ in pr_ladder.marks([b for _, b in notes], pr_ladder._HEAL))
+            action, why = decide(head, retried, spent, laddered, "", 0, cap)
+            if action in ("retry", "spent"):  # the record did not settle it: read main
+                ev = evidence(repo, p, base_of(p), names, read)
+                lost = sorted(set(names) - {k[2] for k in ev.failing})  # every red check must be identified
+                reason = "; ".join([f"`{c}` not identified at its head" for c in lost]
+                                   + [r for r in (transition(k, ev) for k in ev.failing) if r]) if ev.failing else \
+                    "its failing checks have no check run at its head"
+                done = count(head, parents_of(repo, read), retried, cap) if not reason and retried else 0
+                action, why = decide(head, retried, spent, laddered, reason, done, cap)
         except (subprocess.CalledProcessError, ValueError, KeyError) as e:
             errors += 1
             print(f"::error::#{n}: base-driven retry could not read its evidence: {e} {(getattr(e, 'stderr', '') or '')[-300:]}")
             summary.append(f"#{n}: red and behind, base-driven retry NOT assessed (GitHub would not say): {e}")
             continue
-        action, why, k = decide(head, bodies, ev, cap)
         line = f"#{n}: red and behind -> base-driven {action}: {why}"
         if action == "retry":
-            retry[n] = mark_comment(head, ev.base[0], k, cap, failing)
+            retry[n] = mark_comment(head, ev.base or head, done + 1, cap, names)
         elif action == "spent":
             errors += 1  # loud once per head: the run goes red, the comment is the outside record
             print(f"::error::#{n}: {why}")
-            r = write("pr", "comment", str(n), "-R", repo, "--body-file", "-", input_text=spent_comment(head, cap, failing))
+            r = write("pr", "comment", str(n), "-R", repo, "--body-file", "-", input_text=spent_comment(head, cap, names))
             line += "" if r.returncode == 0 else "; its comment FAILED"
         summary.append(line)
     return retry, errors
@@ -228,4 +306,3 @@ def record(repo: str, n: int, body: str, write: Gh) -> bool:
     if r.returncode:
         print(f"::error::#{n}: base-driven retry marker FAILED, not updated: {(r.stderr or r.stdout or '').strip()[:300]}")
     return r.returncode == 0
-

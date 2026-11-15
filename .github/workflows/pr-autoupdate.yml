@@ -210,9 +210,9 @@ on:
         type: number
         default: 135
       base-retry-cap:
-        description: consecutive base-driven retries of an armed PR held red + BEHIND whose failing checks main has since turned green (ci_kit/pr_baseretry.py; once per head, after every green PR; at the cap a marker comment + a red pass; 0 = off)
+        description: base-driven retries (since the PR's last own commit) of an armed PR held red + BEHIND on a check MAIN went red -> green on (ci_kit/pr_baseretry.py; once per head, after every green PR; at the cap a marker comment + a red pass; 0 = off, the default)
         type: number
-        default: 2
+        default: 0
     secrets:
       token:
         description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs --, with train-workflow, which dispatches, and with cancel-doomed-runs), administration read (cancel-doomed-runs reads whether the base is strict), commit statuses RW with queue-hold, on the caller repo

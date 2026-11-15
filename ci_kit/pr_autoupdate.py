@@ -90,6 +90,7 @@ class Options:
     # consecutive base-driven retries of a red BEHIND PR main has gone green on (pr_baseretry); 0 = off.
     # main() turns it ON (env CI_KIT_BASE_RETRY_CAP, default pr_baseretry.CAP)
     base_retry_cap: int = 0
+    base_retry_error: str = ""  # an unreadable cap: the feature is refused, the pass goes on, the run is red
 
 
 @dataclass(frozen=True)
@@ -309,10 +310,14 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
                                base=base, stale_s=opts.head_stall_min * 120, required=opts.required,
                                train_stale_s=opts.train_stale_min * 60)
     retry: dict[int, str] = {}
+    if opts.base_retry_error:
+        errors += 1
+        print(f"::error::{opts.base_retry_error}")
+        summary.append(f"base-driven retry OFF this pass: {opts.base_retry_error}")
     if opts.max_in_flight > 0 and opts.base_retry_cap > 0:  # with no queue every armed PR is updated anyway
         retry, e = pr_baseretry.assess(repo, armed, opts.required, opts.label, machinery | parked,
                                        lambda p: str(p.get("baseRefName") or default()), opts.base_retry_cap,
-                                       _gh_read, pr_heal.comments_of, pr_heal.write, summary)
+                                       _gh_read, pr_heal.comments_by, pr_heal.write, summary)
         errors += e
     q = _train_plan(prs, armed, summary, opts, machinery | parked,
                     frozenset(cancel.restarted) if cancel else frozenset(), frozenset(retry))
@@ -325,6 +330,13 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
         summary += [f"#{p['number']}: held, {why}" for p, why in q.held]
     attempted, updated, conflicts, err = _drive(repo, q, head, opts, relock, summary, cancel, retry)
     errors += err + (cancel.errors if cancel else 0)
+    # ONE ACTOR PER HEAD: a PR this pass base-retried has a new head on its way; its old head goes to
+    # neither the ladder (whose dispatch marker would spend a tier-3 slot on a head already gone) nor pr_heal
+    retried = set(retry) & updated
+    if retried:
+        heal = {n: v for n, v in heal.items() if n not in retried}
+        summary.append("base-retried this pass, not offered to the heal ladder or smart auto-merge: "
+                       + ", ".join(f"#{n}" for n in sorted(retried)))
     e, taken = _ladder(repo, heal, conflicts + [p for p in renovate_pool(prs, opts) if _dirty(p)], opts, summary, healing)
     errors += e
     errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, pr_heal.write, summary, frozenset(taken))
@@ -531,6 +543,19 @@ def unlabel_resolved(repo: str, prs: list[dict], attempted: set[int], opts: Opti
     return errors
 
 
+def base_retry_cap(raw: str) -> tuple[int, str]:
+    """(cap, error) from CI_KIT_BASE_RETRY_CAP. Unreadable or negative = (0, why): that ONE feature is
+    refused and named, never the whole updater crashed (review of 6e69e0d, finding 7). Pure."""
+    raw = (raw or "").strip()
+    if not raw:
+        return pr_baseretry.CAP, ""
+    try:
+        cap = int(raw)
+    except ValueError:
+        return 0, f"base-retry-cap {raw!r} is not an integer: base-driven retry refused"
+    return (cap, "") if cap >= 0 else (0, f"base-retry-cap {cap} is negative: base-driven retry refused")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ci-pr-autoupdate", description=__doc__.split("\n", 1)[0])
     ap.add_argument("--repo", required=True)
@@ -559,6 +584,7 @@ def main(argv: list[str] | None = None) -> int:
         scarce = tuple(sorted(pr_sched.capacity_of(args.scarce_pools).items()))
     except ValueError as e:
         ap.error(str(e))
+    cap, cap_error = base_retry_cap(os.environ.get("CI_KIT_BASE_RETRY_CAP", ""))
     opts = Options(review_workflow=args.review_workflow, tracker=args.tracker, relock=args.relock,
                    label=args.label, max_in_flight=args.max_in_flight,
                    required=tuple(s.strip() for s in args.required_checks.split(",") if s.strip()),
@@ -574,7 +600,7 @@ def main(argv: list[str] | None = None) -> int:
                    train_stale_min=float(os.environ.get("CI_KIT_TRAIN_STALE_MIN", "").strip() or 90),
                    cancel_doomed=os.environ.get("CI_KIT_CANCEL_DOOMED", "true").strip().lower() not in ("false", "0", "no"),
                    ladder=pr_ladder.Config.from_env(),
-                   base_retry_cap=int(os.environ.get("CI_KIT_BASE_RETRY_CAP", "").strip() or pr_baseretry.CAP))
+                   base_retry_cap=cap, base_retry_error=cap_error)
     summary: list[str] = []
     relock: list[int] = []
     healing: list[dict] = []
