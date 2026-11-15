@@ -1,7 +1,7 @@
 # ruff: noqa: F811 -- every test takes the imported `world` fixture by name
 """A train the pass closes takes its unfinished workflow runs with it (ops.close_train).
 
-THE CASE (trade-data 2026-11-12): train #2998 was closed at 02:24:40Z (recomposed as #2999, main
+THE CASE (a consumer, 2026-11-12): train #2998 was closed at 02:24:40Z (recomposed as #2999, main
 had moved), but its CI run 43140976318 kept unit-testing on the ONE heavy runner for ~25 min while
 real PRs queued behind it, until a human cancelled it. Closing a PR and deleting its branch cancels
 nothing. Every close path goes through close_train; a cancel GitHub refuses turns the pass red.

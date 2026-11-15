@@ -1,12 +1,12 @@
 """Renovate's PRs JOIN THE PR QUEUE: each pass of pr-autoupdate arms GitHub auto-merge on every
 Renovate PR whose preset verdict is automerge, so no session has to.
 
-WHY (trade-data, 2026-11-14). The serial queue (ci_kit/pr_queue.py) orders ARMED PRs only, and with
+WHY (a consumer, 2026-11-14). The serial queue (ci_kit/pr_queue.py) orders ARMED PRs only, and with
 the queue hold on (ci_kit/pr_hold.py) an unarmed PR reads `queue/position` pending forever. In a
 serial-queue repo Renovate never merges and never arms (renovate/default.json5: `automergeType:
 pr-comment`, `platformAutomerge: false`), so every automerge PR sat outside the queue until a
-session ran `gh pr merge --squash --auto` on it by hand: td#3081, #3092, #3093, #3103 (opened 17:17Z).
-mcp pr_reconcile's hourly arm (workstation-side) could not help in a hold repo: it arms only a PR
+session ran `gh pr merge --squash --auto` on it by hand: #3081, #3092, #3093, #3103 (opened 17:17Z).
+An outside reconciler's hourly arm (off the runners) could not help in a hold repo: it arms only a PR
 whose WHOLE rollup is SUCCESS, and the hold's own pending `queue/position` keeps that rollup PENDING.
 
 THE RULE, per open Renovate PR (author the Renovate GitHub App -- a Bot, login `renovate`; a User
@@ -30,7 +30,7 @@ who registered that name is not it), unarmed, same-repo, not a draft, not a trai
       - CLEAN / UNSTABLE / HAS_HOOKS: GitHub would merge it the moment it is armed (gh's `--auto`
         merges an UNSTABLE PR at once -- past a red non-required check). Never in a hold repo (an
         unarmed PR's `queue/position` is pending, so it is BLOCKED); elsewhere it is armed once main
-        moves, and mcp pr_reconcile lands a CLEAN one when nothing is in flight. This is the one
+        moves, and an outside reconciler lands a CLEAN one when nothing is in flight. This is the one
         hold that is NOT an error: a summary line only, so in a repo without the hold whose PR stays
         CLEAN the witness is pr_reconcile (`land`), not this run.
   * otherwise ARMED: GraphQL `enablePullRequestAutoMerge` (SQUASH, `expectedHeadOid` = the head this
@@ -45,10 +45,10 @@ gets at open; a red required check keeps it from landing exactly as it keeps the
 
 TELEMETRY. What fails silently: an automerge PR that stays unarmed. Here every arm the token is
 refused, every answer without `autoMergeRequest`, and every PR whose body/timeline could not be read
-is an ERROR (`::error::`, a red pr-autoupdate run, whose red streak mcp ci-schedule-audit reads) --
+is an ERROR (`::error::`, a red pr-autoupdate run, whose red streak an outside schedule audit reads) --
 except GitHub refusing because the PR turned mergeable-now or its head moved since the list was read
 (`raced`): the next pass reads the new state, so that is a summary line, not a red.
-Each held PR is named in the run summary with why. From outside: mcp pr_reconcile's `stalled`
+Each held PR is named in the run summary with why. From outside: a PR reconciler's `stalled`
 finding (armed hours and still open) and `red` / `conflict` findings for any Renovate PR.
 
 TOKEN: the push token (pr-autoupdate's `token`) arms -- Pull requests: Read and write, which it
@@ -119,7 +119,7 @@ def automerge_verdict(body: str) -> str | None:
     Read ONLY after the LAST `### Configuration` heading: Renovate's default prBodyTemplate is
     header, table, notes, CHANGELOGS, then the config block, so upstream release notes (text the
     upstream maintainer writes) come FIRST and may carry `- **Automerge**: Enabled.` -- a first-match
-    read armed a held database update on it (reviewer, 2026-11-14, on the live td#3093 layout).
+    read armed a held database update on it (reviewer, 2026-11-14, on a live consumer PR's layout).
     Nothing after the config block is upstream text (controls, footer)."""
     heads = list(_CONFIG.finditer(body or ""))
     if not heads:
@@ -234,7 +234,7 @@ def join(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str]) ->
     the pass treats it as armed. Returns the errors. Never raises: a look that fails is one error."""
     errors = 0
     # unarmed: decide whether it joins. ARMED and conflicting: GitHub never disarms on a conflict
-    # (trade-data's AutoMergeDisabledEvents: manually_disabled, closed, head_mismatch only), so an
+    # (a consumer's AutoMergeDisabledEvents: manually_disabled, closed, head_mismatch only), so an
     # armed kit PR that went DIRTY is no candidate yet still needs its rebase box (reviewer, 11-14)
     look = [p for p in prs if candidate(p) or (is_renovate(p) and p.get("autoMergeRequest")
                                                and not p.get("isDraft") and conflicted(p))]

@@ -11,9 +11,10 @@
 #     with:
 #       scope: update                                               # the job's permission set (below)
 #       mode: ${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}    # '' = pat
-#       app-id: ${{ vars.EDGE_BOT_APP_ID }}
-#       private-key: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}
+#       client-id: ${{ inputs.app-client-id }}                       # the App's client id (or app id)
+#       private-key: ${{ secrets.app-private-key }}
 #       pat: ${{ secrets.token }}
+#       deprecated: ''      # `old>new` pairs the CALLER resolved through a deprecated name (a ::notice each)
 #   - env: { GH_TOKEN: "${{ steps.token.outputs.token }}", CI_KIT_TOKEN_LOGIN: "${{ steps.token.outputs.login }}",
 #            CI_KIT_TRUSTED_LOGINS: "${{ steps.token.outputs.trusted }}" }
 #
@@ -37,12 +38,22 @@ inputs:
     description: pat | app | app-required ('' = pat). See ci_kit/pr_token.py
     required: false
     default: ""
+  client-id:
+    description: the GitHub App's client id (or app id) -- create-github-app-token's `client-id` (v1.40.0)
+    required: false
+    default: ""
   app-id:
-    description: the GitHub App's id (or client id) -- the caller's EDGE_BOT_APP_ID variable
+    description: DEPRECATED alias of client-id (identical behaviour, a ::notice when used; removed in v2) -- create-github-app-token deprecated its own `app-id` the same way
     required: false
     default: ""
   private-key:
-    description: the GitHub App's private key -- the caller's EDGE_BOT_PRIVATE_KEY secret
+    description: the GitHub App's private key
+    required: false
+    default: ""
+  deprecated:
+    description: >-
+      whitespace-separated `old>new` pairs naming each deprecated spelling the CALLER resolved a value
+      through (e.g. a reusable's secret alias); each is one ::notice naming the replacement. '' = none
     required: false
     default: ""
   pat:
@@ -73,7 +84,10 @@ runs:
         PYTHONSAFEPATH: "1"
         CI_KIT_TOKEN_MODE: ${{ inputs.mode }}
         CI_KIT_TOKEN_SCOPE: ${{ inputs.scope }}
-        HAS_APP_ID: ${{ inputs.app-id != '' }}
+        HAS_APP_ID: ${{ inputs.client-id != '' || inputs.app-id != '' }}
+        # the deprecated spellings (v1.40.0): notices only, never a different decision or record
+        CI_KIT_DEPRECATED: ${{ inputs.deprecated }}
+        APP_ID_ALIAS: ${{ inputs.client-id == '' && inputs.app-id != '' }}
         HAS_KEY: ${{ inputs.private-key != '' }}
         HAS_PAT: ${{ inputs.pat != '' }}
       # A decide that could not RUN (no python3, an import error) wrote no outputs and no record:
@@ -98,7 +112,7 @@ runs:
       continue-on-error: ${{ steps.decide.outputs.source == 'pat' }}
       uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
       with:
-        client-id: ${{ inputs.app-id }}
+        client-id: ${{ inputs.client-id || inputs.app-id }}
         private-key: ${{ inputs.private-key }}
         owner: ${{ github.repository_owner }}
         repositories: ${{ github.repository }}

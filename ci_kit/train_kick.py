@@ -1,8 +1,8 @@
 """Wake the merge train when a pr-autoupdate pass sees work for it (v1.34.0).
 
-WHY (trade-data, 2026-11-14 00:00-17:38Z). merge-train ran on a cron, "7,27,47 * * * *": 49 of
+WHY (a consumer, 2026-11-14 00:00-17:38Z). merge-train ran on a cron, "7,27,47 * * * *": 49 of
 its 52 passes logged "fewer than 2 candidates", and each was a single-use job on the caller's
-SECURE pool (three slots estate-wide, ~1.64 runner-min a job whatever its length). pr-autoupdate
+SECURE pool (three slots in all, ~1.64 runner-min a job whatever its length). pr-autoupdate
 already reads every open PR with its checks on every push and every PR's last check, so it can
 say when a train pass would find work, and dispatch one then. The caller's cron stays as an
 hourly BACKSTOP: a pass this misses (an unreadable run list, a candidate a later event never
@@ -32,7 +32,7 @@ WHEN, pure (`decide`). Dispatch the caller's train workflow only when ALL hold:
 
 WHAT IS A PASS. The train workflow also fires on every CI / review / image completion and on PR
 labels and closes; its job `if:` skips all but a train's, and GitHub still records each as a run
-(conclusion `skipped`) -- 9 of the newest 10 on trade-data, 2026-11-14. Such a run judged nothing,
+(conclusion `skipped`) -- 9 of the newest 10 on a consumer, 2026-11-14. Such a run judged nothing,
 so the run list is read per PASS EVENT (`schedule`, `workflow_dispatch`: never skipped by the
 `if:`) and a skipped or cancelled run is not a pass either. The caller's OTHER real passes -- a
 `merge-train` label, a train closing, a train's own check completing -- are not read: when one of
@@ -47,7 +47,7 @@ every pass because the dedup could not read would cost more than the cron it rep
 
 TELEMETRY. Every decision is a summary line (`merge train: ...`), so the run list says when and
 why a train was woken; the caller's merge-train run list shows each dispatched pass as event
-`workflow_dispatch`. From outside, mcp ci-schedule-audit watches the backstop cron.
+`workflow_dispatch`. From outside, a schedule audit watches the backstop cron.
 """
 from __future__ import annotations
 

@@ -3,7 +3,7 @@ the queue HEAD's commit -- so an armed PR behind the head cannot merge out of tu
 checks say. ORDER only: it removes or weakens no check; every required check still runs and passes
 at the merging head.
 
-THE CASE (2026-11-14 06:19:20Z): td#3083 was armed and green while #3082 was the head; GitHub's
+THE CASE (2026-11-14 06:19:20Z, a consumer): #3083 was armed and green while #3082 was the head; GitHub's
 auto-merge landed #3083 first and #3082 had to re-test. pr_sched.out_of_queue PAGED that -- after
 it happened. The hold makes it impossible.
 
@@ -31,9 +31,9 @@ base gets success, nothing is posted pending -- this pass holds nothing new -- a
 A post the token is refused is an ERROR (a red run). The head still reading not-success on a
 SECOND pass is a page: the first failing pass leaves a marker comment on the PR
 (`<!-- queue:head-held sha=... -->`, the pr_heal pattern), the second pages ntfy once and marks it
-paged. The run's red streak is what mcp ci-schedule-audit reads. A head that HAS success, every
+paged. The run's red streak is what an outside schedule audit reads. A head that HAS success, every
 required check green (or never reported), current with main, and still open `stale_s` after its
-last check finished is the same alarm (a required check that never reports, td#2258's shape; a
+last check finished is the same alarm (a required check that never reports, a consumer's #2258 shape; a
 merge GitHub refuses for a reason no check shows): with the hold on, no other PR's merge moves
 main to shake it loose, so the hold must say so itself.
 

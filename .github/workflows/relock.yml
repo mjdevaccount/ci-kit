@@ -107,12 +107,34 @@ on:
         description: pat | app | app-required ('' = the caller repo's PR_TOKEN_SOURCE variable, else pat) -- ci_kit/pr_token.py
         type: string
         default: ""
+      app-client-id:
+        description: >-
+          the GitHub App's client id (or app id), create-github-app-token's `client-id` (v1.40.0), with the
+          `app-private-key` secret. '' = the caller repo's EDGE_BOT_APP_ID variable, a DEPRECATED alias
+          (identical behaviour, a ::notice when used; removed in v2)
+        type: string
+        default: ""
+      secure-runner:
+        description: >-
+          THE SECURE POOL (v1.40.0): runs-on for the jobs that hold a write token, as a JSON label list
+          read with fromJSON, e.g. '["self-hosted","secure"]'. Precedence: this input; else the caller
+          repo's CI_SECURE_RUNNER variable, an ON/OFF switch for the kit's default labels
+          ["self-hosted","home-secure"] (a variable never carries labels: a typo there must not send a
+          token job to a docker-socket runner); else ubuntu-latest. The secure pool runs in the caller's
+          `ci-secure` environment wherever this workflow used one
+        type: string
+        default: ""
     secrets:
       token:
         description: the push token (fine-grained PAT, contents RW on the caller repo); empty while the PAT acts is red, only when a relock is needed
         required: false
+      app-private-key:
+        description: >-
+          the GitHub App's private key (v1.40.0; create-github-app-token's `private-key`), with the
+          `app-client-id` input; token-source decides who acts
+        required: false
       EDGE_BOT_PRIVATE_KEY:
-        description: the GitHub App's private key (with the EDGE_BOT_APP_ID variable); token-source decides who pushes
+        description: DEPRECATED alias of app-private-key (identical behaviour, a ::notice when used; removed in v2)
         required: false
       git-ssh-key:
         description: >-
@@ -236,7 +258,7 @@ jobs:
       needs.lock.outputs.state == 'regen'
       && github.event_name == 'pull_request'
       && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.secure-runner && fromJSON(inputs.secure-runner) || vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
       result: ${{ steps.apply.outputs.result || 'failed' }}
@@ -256,8 +278,16 @@ jobs:
       - name: Push token (App or PAT)
         id: token
         uses: mjdevaccount/ci-kit/.github/actions/pr-token@v1
-        with: {scope: push, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", app-id: "${{ vars.EDGE_BOT_APP_ID }}",
-               private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}", pat: "${{ secrets.token }}"}
+        with:
+          scope: push
+          mode: ${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}
+          # the generic name first, the deprecated alias second (identical value, v1.40.0)
+          client-id: ${{ inputs.app-client-id || vars.EDGE_BOT_APP_ID }}
+          private-key: ${{ secrets.app-private-key || secrets.EDGE_BOT_PRIVATE_KEY }}
+          pat: ${{ secrets.token }}
+          deprecated: >-
+            ${{ !inputs.app-client-id && vars.EDGE_BOT_APP_ID && 'EDGE_BOT_APP_ID>app-client-id' || '' }}
+            ${{ !secrets.app-private-key && secrets.EDGE_BOT_PRIVATE_KEY && 'EDGE_BOT_PRIVATE_KEY>app-private-key' || '' }}
       - name: Check the artifact, commit the lockfile(s), push fast-forward
         id: apply
         env:

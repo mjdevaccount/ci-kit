@@ -107,7 +107,7 @@ def count_by_dir(rels: Iterable[str], dirs: Iterable[str]) -> dict[str, int]:
     """{dir: files under it} for EVERY one of `dirs`, 0 when none -- the read a per-dir floor judges.
 
     A total floor over several trees cannot see one of them go dark: `sources/` read as zero
-    hides under `service/`'s hundreds. v1.9.0: nine trade-data gates each hand-counted this."""
+    hides under `service/`'s hundreds. v1.9.0: nine gates in one consumer each hand-counted this."""
     out = dict.fromkeys(dirs, 0)
     for rel in rels:
         for d in out:
@@ -133,7 +133,7 @@ def tracked_each(scan_dirs: Iterable[str], *, gate: str, suffix: str = ".py",
 
     The STRICT variant (v1.14.0). The gate cannot know how many files a directory ought to hold,
     but one it was told to scan that yielded nothing means it did not finish looking. Four copies
-    of this loop existed (this kit's sql casts / decimal_reads / pit_reads, trade-data
+    of this loop existed (this kit's sql casts / decimal_reads / pit_reads, a consumer's
     lint_pf_scoping) before it lived here."""
     base = root if root is not None else repo_root()
     skip = {pathlib.Path(p).resolve() for p in exclude}
@@ -152,7 +152,7 @@ def tracked_or_empty(scan_dirs: Iterable[str], *, suffix: str = ".py",
     The LENIENT variant (v1.14.0), for a gate that owns its blind message: it checks the empty
     list itself and exits 2 in its own words (`tracked` would exit 2 in the kit's). A failing
     `git ls-files` is still exit 2 inside `tracked` -- only "no scan dir at all" is []. Three
-    trade-data gates (lint_null_guards / lint_hardcoded_none / lint_silent_zero) each carried
+    gates in one consumer (lint_null_guards / lint_hardcoded_none / lint_silent_zero) each carried
     this copy before it lived here."""
     scan_dirs = list(scan_dirs)
     base = root if root is not None else repo_root()

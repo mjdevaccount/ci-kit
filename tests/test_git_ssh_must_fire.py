@@ -108,7 +108,7 @@ def test_key_with_no_repo_fails(tmp_path: pathlib.Path) -> None:
 @needs_tools
 def test_malformed_repo_fails(tmp_path: pathlib.Path) -> None:
     key, _ = _keypair(tmp_path)
-    for bad in ("market-ports", "https://github.com/o/r", "o/r/x", "o/r;id", "*", "o/*"):
+    for bad in ("my-kit", "https://github.com/o/r", "o/r/x", "o/r;id", "*", "o/*"):
         r, outputs = _load(tmp_path, key=key, repos=bad)
         assert r.returncode == 1 and "is not owner/name" in r.stdout and outputs == {}, bad
 

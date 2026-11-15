@@ -181,6 +181,25 @@ on:
           red until reviewed. false = every review runs at once, as before.
         type: boolean
         default: false
+      secure-runner:
+        description: >-
+          THE SECURE POOL (v1.40.0): runs-on for the jobs that hold a write token, as a JSON label list
+          read with fromJSON, e.g. '["self-hosted","secure"]'. Precedence: this input; else the caller
+          repo's CI_SECURE_RUNNER variable, an ON/OFF switch for the kit's default labels
+          ["self-hosted","home-secure"] (a variable never carries labels: a typo there must not send a
+          token job to a docker-socket runner); else ubuntu-latest. The secure pool runs in the caller's
+          `ci-secure` environment wherever this workflow used one
+        type: string
+        default: ""
+      sealed-runner:
+        description: >-
+          THE SEALED POOL (v1.40.0): runs-on for the job that holds the model credential AND runs PR code
+          (one job per machine, rolled back after it), as a JSON label list, e.g. '["self-hosted","sealed"]'.
+          Precedence: this input; else the caller repo's CI_SEALED_RUNNER variable, an ON/OFF switch for
+          the kit's default labels ["self-hosted","home-sealed"]; else ubuntu-latest. Its LAST label names
+          the pool to the scheduler (queue-priority / scarce-pools)
+        type: string
+        default: ""
     secrets:
       git-ssh-key:
         description: >-
@@ -218,7 +237,7 @@ jobs:
     # for a full review. Named `review` (the old job's name): mcp review_gate_auth.py reads this
     # job's log for the tier's lines. Unset CI_SECURE_RUNNER = hosted, as before.
     name: review
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.secure-runner && fromJSON(inputs.secure-runner) || vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     env:
       PYTHONSAFEPATH: "1"
@@ -386,8 +405,12 @@ jobs:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-          POOL: ${{ vars.CI_SEALED_RUNNER && 'home-sealed' || '' }}
+          # the sealed pool's labels, resolved as the `model review` job's runs-on resolves them
+          POOL_LABELS: ${{ inputs.sealed-runner || vars.CI_SEALED_RUNNER && '["self-hosted","home-sealed"]' || '' }}
         run: |
+          # the scheduler's pool is the sealed list's LAST label ('' = hosted, not scarce: admit);
+          # -I: no cwd on sys.path, so nothing in a checkout can shadow json
+          POOL=$(python3 -I -c 'import json,os; v=os.environ["POOL_LABELS"]; v=json.loads(v) if v else []; v=[v] if isinstance(v,str) else v; print(v[-1] if v else "")') || POOL=""
           python3 -m ci_kit.pr_admit --repo "$GITHUB_REPOSITORY" --pr "$PR" --pool "$POOL" --pending \
             --attempt "$GITHUB_RUN_ATTEMPT" \
             || printf 'defer=false\nwhy=admission crashed; reviewing\n' >> "$GITHUB_OUTPUT"
@@ -532,7 +555,7 @@ jobs:
     name: model review
     needs: decide
     if: needs.decide.outputs.mode == 'review'
-    runs-on: ${{ vars.CI_SEALED_RUNNER && fromJSON('["self-hosted","home-sealed"]') || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.sealed-runner && fromJSON(inputs.sealed-runner) || vars.CI_SEALED_RUNNER && fromJSON('["self-hosted","home-sealed"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       # every `python -m ci_kit...` runs with the PR checkout as cwd, and -m puts the cwd AHEAD of
@@ -577,8 +600,12 @@ jobs:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-          POOL: ${{ vars.CI_SEALED_RUNNER && 'home-sealed' || '' }}
+          # the sealed pool's labels, resolved as the `model review` job's runs-on resolves them
+          POOL_LABELS: ${{ inputs.sealed-runner || vars.CI_SEALED_RUNNER && '["self-hosted","home-sealed"]' || '' }}
         run: |
+          # the scheduler's pool is the sealed list's LAST label ('' = hosted, not scarce: admit);
+          # -I: no cwd on sys.path, so nothing in a checkout can shadow json
+          POOL=$(python3 -I -c 'import json,os; v=os.environ["POOL_LABELS"]; v=json.loads(v) if v else []; v=[v] if isinstance(v,str) else v; print(v[-1] if v else "")') || POOL=""
           python3 -m ci_kit.pr_admit --repo "$GITHUB_REPOSITORY" --pr "$PR" --pool "$POOL" \
             --attempt "$GITHUB_RUN_ATTEMPT" \
             || printf 'defer=false\nwhy=admission crashed; reviewing\n' >> "$GITHUB_OUTPUT"
@@ -778,7 +805,7 @@ jobs:
     name: verdict
     needs: [decide, review]
     if: ${{ !cancelled() && !(needs.decide.result == 'success' && needs.decide.outputs.finished == 'true') }}
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.secure-runner && fromJSON(inputs.secure-runner) || vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       pull-requests: write   # the ONE verdict comment, for every mode

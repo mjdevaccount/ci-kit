@@ -214,7 +214,7 @@ def add_label(repo: str, n: int, label: str, color: str = LABEL_COLOR,
               description: str = LABEL_DESCRIPTION) -> tuple[bool, bool]:
     """(added, created). A failed add creates the label when the repo lacks it, then retries ONCE.
 
-    Live 2026-10-30: home-host had no `conflict` label, so every add failed and the run went red
+    Live 2026-10-30: a consumer had no `conflict` label, so every add failed and the run went red
     six times in a row while armed PRs sat behind main; ten more repos had the same hole.
     """
     edit = ("pr", "edit", str(n), "-R", repo, "--add-label", label)
@@ -265,7 +265,7 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
         # spare holds only eligible PRs, never DIRTY: with a train open only an EJECTED or
         # train-needs-update one may take a slot. Each slot the hold just emptied goes to the next
         # of those, so an ordinary lower-numbered PR held for the train cannot idle the slot an
-        # ejected PR needs (td#2980's idle slot, train edition -- review of 1.26.1, finding 1).
+        # ejected PR needs (#2980's idle slot, train edition -- review of 1.26.1, finding 1).
         q.spare = [p for p in q.spare
                    if any(lb.get("name") in (EJECTED, NEEDS_UPDATE) for lb in p.get("labels") or [])]
         promoted, q.spare = q.spare[:len(held)], q.spare[len(held):]
@@ -378,7 +378,7 @@ def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock:
             summary.append(f"#{n}: skipped, review gate running (retried when it completes)")
             if (p.get("mergeStateStatus") or "").upper() != "DIRTY" and spare:
                 # the slot it would have taken is free: the next PR in line takes it, so one PR's
-                # running review does not idle the queue (td#2980, 2026-11-11: skipped 21:10-23:32Z
+                # running review does not idle the queue (a consumer's #2980, 2026-11-11: skipped 21:10-23:32Z
                 # with 0/1 in flight while five armed PRs waited behind it)
                 nxt = spare.pop(0)
                 summary.append(f"#{nxt['number']}: takes the slot #{n}'s running review left free")
@@ -460,7 +460,7 @@ def _head_first(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, sum
                 skip: frozenset[int] = frozenset()) -> int | None:
     """Update the queue HEAD the moment it is safe, ahead of the slot count: BEHIND main, armed, not
     red on its own checks, and no review run still owes a verdict (`pr_sched.review_settled`) -- the
-    gate's tail is not a reason to wait (td#3073, 03:58Z 11-14: verdict recorded, update held for the
+    gate's tail is not a reason to wait (a consumer's #3073, 03:58Z 11-14: verdict recorded, update held for the
     tail job, then the sealed runner went to another PR). Returns the head's number when it was moved
     up (so the loop does not skip it for that tail), else None. Off unless the scheduler is on."""
     h = pr_queue.head(prs, skip)
@@ -526,7 +526,7 @@ def stale_labels(prs: list[dict], attempted: set[int], label: str) -> list[int]:
     """Open PRs carrying the conflict label that GitHub now reports MERGEABLE, not attempted this
     run. Pure. The label was only ever removed from a PR the queue ATTEMPTED; a conflict resolved
     by a session's push leaves the PR current with main, so it was never attempted again and kept
-    the label (td#2983, 2026-11-11: labelled 23:05Z, resolved 23:32Z, still labelled). `mergeable`
+    the label (a consumer's #2983, 2026-11-11: labelled 23:05Z, resolved 23:32Z, still labelled). `mergeable`
     is GitHub's own test merge against the CURRENT base, recomputed after every push to it;
     UNKNOWN (not computed yet) keeps the label until a run that knows."""
     return sorted(int(p["number"]) for p in prs

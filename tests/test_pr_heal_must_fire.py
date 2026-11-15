@@ -1,6 +1,6 @@
 """Smart auto-merge (ci_kit/redclass.py + ci_kit/pr_heal.py), BOTH directions, on recorded GitHub answers.
 
-MUST FIRE: trade-data#2988's lost sealed reviewer (run 43115550872, 2026-11-11) is MACHINERY and is
+MUST FIRE: a consumer's #2988 lost sealed reviewer (run 43115550872, 2026-11-11) is MACHINERY and is
 rerun. MUST NOT FIRE: the same head's migration-contract lint failure (run 43115550424) is
 JUDGMENT and is never rerun -- and a head carrying both is judgment as a whole.
 """
@@ -18,8 +18,8 @@ from ci_kit.merge_train import policy
 from ci_kit.merge_train.ops import bodies
 
 FIX = Path(__file__).parent / "fixtures" / "github"
-LOST = json.loads((FIX / "jobs_trade-data_43115550872_machinery.json").read_text(encoding="utf-8"))
-LINT = json.loads((FIX / "jobs_trade-data_43115550424_lint.json").read_text(encoding="utf-8"))
+LOST = json.loads((FIX / "jobs_example-repo_43115550872_machinery.json").read_text(encoding="utf-8"))
+LINT = json.loads((FIX / "jobs_example-repo_43115550424_lint.json").read_text(encoding="utf-8"))
 LOST_NOTE = ("The self-hosted runner lost communication with the server. Verify the machine is running and has a "
              "healthy network connection.")
 HEAD = "7334c9083574c4aa9cd3a35f4a9136539061a58d"
@@ -89,7 +89,7 @@ def test_review_of_1_27_0_judgment_is_never_dressed_as_machinery_must_not_fire()
                               ["Error when evaluating 'strategy' for job 'test'"])[0] == "judgment"
     began = {"conclusion": "failure", "steps": [{"name": "Set up job", "conclusion": "success"},
                                                 {"name": "Review", "conclusion": None}]}
-    assert redclass.job_class(began)[0] == "machinery"         # td#2988's shape: still healed
+    assert redclass.job_class(began)[0] == "machinery"         # #2988's shape: still healed
 
 
 def test_the_train_reads_the_same_rollup_classifier() -> None:
@@ -238,7 +238,7 @@ def test_a_403_that_is_not_the_grant_does_not_blame_the_grant() -> None:
 
 def test_an_exhausted_head_that_fell_behind_is_updated_not_held_must_fire() -> None:
     """Reviewer finding 2: the exhausted marker skipped the PR, so pr_queue held it forever -- the
-    td#2988 stall. BEHIND, it is assessed again and counted machinery: its update is free."""
+    #2988 stall. BEHIND, it is assessed again and counted machinery: its update is free."""
     marks = [pr_heal.EXHAUSTED.format(head=HEAD)]
     summary: list[str] = []
     heal, _ = pr_heal.assess_armed("o/r", [_pr(("review gate",), "BEHIND")], ("review gate",), 2, _read(),
@@ -261,7 +261,7 @@ def test_off_means_off() -> None:
     assert pr_heal.assess_armed("o/r", [_pr(("review gate",))], (), 0, pytest.fail, pytest.fail, []) == ({}, 0)
 
 
-# ── the stale conflict label (td#2983) and the idle slot (td#2980) ─────────────────────────────
+# ── the stale conflict label (#2983) and the idle slot (#2980) ─────────────────────────────
 def test_a_resolved_conflict_loses_its_label_must_fire() -> None:
     lab = [{"name": "conflict"}]
     prs = [{"number": 2983, "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED", "labels": lab},

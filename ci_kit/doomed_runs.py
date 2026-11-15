@@ -1,7 +1,7 @@
 """Cancel the PR runs that can never be the ones that merge -- and whose result nothing reads (v1.34.0).
 
 WHY (operator, 2026-11-14: "if its not gonna merge with 100% certainty... DO THE SMART AND
-EFFICIENT MOVE"). local-mcp#499 started its full CI at 19:17:48Z; main moved 54s later. Under
+EFFICIENT MOVE"). A consumer PR started its full CI at 19:17:48Z; main moved 54s later. Under
 STRICT protection ("require branches to be up to date") a PR whose head does not contain main
 cannot merge at that head: GitHub needs a new head first -- the queue's update, or a conflict
 fix -- and that new head runs every required job again.
@@ -28,7 +28,7 @@ UNSTABLE / UNKNOWN (UNKNOWN is GitHub not having computed it yet -- never a cert
 
 A CANCELLED RUN IS NEVER GREEN. A cancelled required check blocks the merge like a missing one;
 pr_heal reads it as machinery and, the PR being BEHIND, leaves it to the queue's update. It does
-read as a FAILURE rollup to an outside watcher: mcp pr_reconcile learns the same rule (an armed
+read as a FAILURE rollup to an outside watcher: an outside PR reconciler learns the same rule (an armed
 BEHIND PR whose only red is CANCELLED is waiting for the queue, not failing).
 
 STRICT, READ NOT ASSUMED (`strict`): classic protection's `required_status_checks.strict`, or a

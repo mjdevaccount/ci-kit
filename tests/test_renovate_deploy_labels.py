@@ -1,10 +1,10 @@
 """A compose image's PR label says what merging it DOES -- must fire.
 
-trade-infra's compose is shipped by deploy-reconcile, but WHICH services a merge recreates is
-edge-host scripts/infra_config.py's POLICY. The services it never recreates on its own (manual, or
+One consumer's compose is shipped by a deploy reconciler, but WHICH services a merge recreates is
+that consumer's deploy POLICY. The services it never recreates on its own (manual, or
 absent = manual) were labelled `deploys-on-merge` (2026-11-14: langfuse stack, chainguard minio,
-and through "compose images" caddy, crawl4ai, valkey) -- merged, they changed nothing on the box.
-Their image names are pinned here from that POLICY (edge-host origin/main, 2026-11-14); a service
+and through "compose images" caddy, crawl4ai, valkey) -- merged, they changed nothing on the host.
+Their image names are pinned here from that POLICY (as of 2026-11-14); a service
 that moves between recreate and manual there changes this list.
 
 The effective labels are computed the way Renovate does it: every matching rule in order, a later
@@ -19,7 +19,7 @@ import pytest
 
 PRESET = pathlib.Path(__file__).resolve().parent.parent / "renovate" / "default.json5"
 REPO = "mjdevaccount/trade-infra"
-# image -> the infra_config service(s) it runs: none of them may be recreated by a merge
+# image -> the policy service(s) it runs: none of them may be recreated by a merge
 HELD = {
     "langfuse/langfuse": "langfuse-web (unpolicied)",
     "langfuse/langfuse-worker": "langfuse-worker (unpolicied)",
@@ -30,7 +30,7 @@ HELD = {
     "unclecode/crawl4ai": "crawl4ai (unpolicied)",
     "valkey/valkey": "valkey (unpolicied)",
 }
-# a merge DOES recreate these (infra_config POLICY recreate): the label must stay deploys-on-merge
+# a merge DOES recreate these (deploy POLICY recreate): the label must stay deploys-on-merge
 RECREATED = ("grafana/loki", "prom/node-exporter", "searxng/searxng")
 
 

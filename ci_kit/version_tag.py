@@ -2,7 +2,7 @@
 
 WHY. In a VERSION-FIRST repo the release PR moves `version` in pyproject.toml, and someone then
 pushes the `vX.Y.Z` tag that starts the release workflow. That push is a hand step nothing
-checks: llm-ports 1.19.0 merged (2026-11-09) and was never tagged -- no wheel, no PyPI upload, no
+checks: a consumer library's 1.19.0 merged (2026-11-09) and was never tagged -- no wheel, no PyPI upload, no
 GitHub release, nothing red. This turns the hand step into a check that also acts.
 
 WHAT IT DOES, for every version the version file took on HEAD's first-parent history (the commit

@@ -11,7 +11,7 @@ depths of GitHub's answer:
     test, moved here unchanged.
   * the JOBS of the workflow run behind a check (REST `actions/runs/{id}/jobs`), their steps,
     their check-run annotations and, for a failed SETUP step, the tail of its log. This is the
-    depth that sees trade-data#2988's red (run 43115550872, 2026-11-11 22:55-23:11Z): the sealed
+    depth that sees a consumer's #2988 red (run 43115550872, 2026-11-11 22:55-23:11Z): the sealed
     reviewer job "failed" while its VM restarted -- no step failed (the `Review` step never
     concluded), the annotation says "The self-hosted runner lost communication with the server",
     and the log API answers BlobNotFound/404. Its alls-green `review gate` job then failed as a
@@ -146,7 +146,7 @@ def job_class(job: dict, annotations: list[str] = (), log_error: str = "", log_t
             return MACHINERY, "timed out before a runner ran any step (provisioning)"
         return JUDGMENT, "timed out while running its steps"
     if not failed:
-        # td#2988's shape ONLY: a runner ran steps and one began and never concluded. A failure with
+        # #2988's shape ONLY: a runner ran steps and one began and never concluded. A failure with
         # no step at all is a workflow-expression error (strategy, runs-on, if:) -- the PR's.
         if ran and any(not _concl(s) for s in steps):
             gone = " (its log is gone: " + log_error.strip()[:60] + ")" if log_error and LOG_GONE.search(log_error) else ""

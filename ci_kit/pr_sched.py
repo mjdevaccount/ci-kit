@@ -11,10 +11,10 @@ measured thresholds are there). This module is its two actors:
         in landing order rather than GitHub's;
       - takes the label off a PR with nothing parked left (a new push replaced the parked run);
       - pages an OUT-OF-QUEUE MERGE: a push to main that merged a PR other than the head while the
-        head was in flight against the old main (td#3072, Renovate's own automerge, 03:53Z
+        head was in flight against the old main (a consumer's #3072, Renovate's own automerge, 03:53Z
         11-14, invalidated head #3073);
       - names the head, its wait per pool, every parking and re-run in the summary, and returns an
-        error for a STALLED head so the run goes red (mcp ci-schedule-audit reads that streak);
+        error for a STALLED head so the run goes red (an outside schedule audit reads that streak);
         a non-head STARVED in its park is named in every pass and paged ONCE per head, never red
         (v1.35.0: a waiting state on every pass hid the real failures).
   * the review gate's admission (`python -m ci_kit.pr_admit`, its own module): parks a non-head
@@ -56,7 +56,7 @@ PARKED_OFF = "PR queue OFF: the push token cannot re-run runs (Actions: write). 
 DEFERRED_JOB = "review deferred"   # the review gate's job (a STEP of `verdict` since v1.35.0) that fails on a park
 RECORD_JOB = "record verdict"      # the review gate's job (a STEP of `verdict` since v1.35.0) that writes the record
 VERDICT_JOB = "verdict"            # the review gate's aggregate: completed = record written and any park red
-PRE_JOB = "review"                 # the review gate's first job (the name mcp review_gate_auth reads)
+PRE_JOB = "review"                 # the review gate's first job (the name an outside auth audit reads)
 MAX_ATTEMPT = 4                    # a run re-run this often is never parked again (no starving)
 
 RENOVATE = ("renovate", "renovate[bot]", "app/renovate")  # the bot's logins (pr_renovate.py, out_of_queue)
@@ -84,7 +84,7 @@ def _json(read: Gh, *args: str) -> object:
 
 
 def capacity_of(text: str) -> dict[str, int]:
-    """'{"home-sealed": 1, "home-heavy": 1}' -> dict; '' = the scheduler is off. Raises on junk."""
+    """'{"sealed": 1, "heavy": 1}' -> dict; '' = the scheduler is off. Raises on junk."""
     if not text.strip():
         return {}
     got = json.loads(text)
@@ -242,11 +242,11 @@ def out_of_queue(repo: str, prs: list[dict], before: str, sha: str, read: Gh, sk
     """'' or the page body: the push `before..sha` merged a PR OUTSIDE the queue while the head was
     in flight (current with `before`, no failing check) -- only an in-flight head was hurt. Outside
     = numbered after the head (the head was passed over), or a Renovate PR that merged UNARMED,
-    whatever its number: Renovate merging itself (td#3072 past head #3073, 03:53Z 11-14) or mcp
-    pr_reconcile landing a CLEAN one ci_kit/pr_renovate.py held. An ARMED lower-numbered merge was
+    whatever its number: Renovate merging itself (#3072 past head #3073, 03:53Z 11-14) or an
+    outside reconciler landing a CLEAN one ci_kit/pr_renovate.py held. An ARMED lower-numbered merge was
     the head itself (closed now, so `head` is the next one) -- Renovate's included since v1.32.0,
     when pr_renovate.py arms its automerge PRs and they land as members. Arming is read from the
-    merged PR's `auto_merge`, which GitHub keeps after the merge (trade-data #3102-#3104)."""
+    merged PR's `auto_merge`, which GitHub keeps after the merge (a consumer's #3102-#3104)."""
     if not before or not sha or set(before) == {"0"}:
         return ""
     merged = _json(read, "api", f"repos/{repo}/commits/{sha}/pulls")

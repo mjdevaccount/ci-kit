@@ -1,6 +1,6 @@
 """The review gate's two pre-steps: carry a verdict across a base-only update, and name siblings.
 
-WHY (trade-data 2026-09-26, its docs/decisions/concurrent-agent-merge-setup-2026-09.md phase 1).
+WHY (a consumer, 2026-09-26, phase 1 of its concurrent-agent merge setup).
 Once the armed-PR updater (`pr-autoupdate.yml`, this kit) merges main into every armed PR on each push to main, a
 PR's head moves without its author touching it. Re-running the Opus reviewer on each of those
 moves costs a review per open PR per merge and finds nothing new: the PR's OWN change did not

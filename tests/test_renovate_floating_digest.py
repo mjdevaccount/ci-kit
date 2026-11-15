@@ -2,8 +2,8 @@
 
 Renovate reads release timestamps from Docker Hub only and ages a digest update against the
 matched version, so an unversioned `latest` on cgr.dev is held "indefinitely" under the default
-minimumReleaseAgeBehaviour (docs.renovatebot.com/key-concepts/minimum-release-age/). trade-infra's
-two langfuse-minio pins sat behind for 25 days with no PR (dashboard trade-infra#515). The preset
+minimumReleaseAgeBehaviour (docs.renovatebot.com/key-concepts/minimum-release-age/). A consumer's
+two langfuse-minio pins sat behind for 25 days with no PR (its dependency dashboard). The preset
 replaces the age gate for that one package with review: no age wait, no auto-merge.
 
 packageRules apply in order and a later match wins, so this resolves the WHOLE list for the

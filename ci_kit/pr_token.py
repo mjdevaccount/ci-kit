@@ -1,14 +1,14 @@
 """The push token: a GitHub App installation token or the caller's PAT, and WHO it is (v1.37.0).
 
 ci-kit's token jobs (pr-autoupdate, merge-train, ci-green, pr-heal's claim/push/report) pushed,
-commented and merged with the caller's fine-grained PAT. A GitHub App (`EDGE_BOT_APP_ID` variable,
-`EDGE_BOT_PRIVATE_KEY` secret) replaces it. ONE composite action
+commented and merged with the caller's fine-grained PAT. A GitHub App (the reusables' `app-client-id`
+input and `app-private-key` secret, v1.40.0) replaces it. ONE composite action
 (`.github/actions/pr-token/action.yml`) mints the App token with `actions/create-github-app-token`
 (no JWT code here), falls back to the PAT, and records which one each run used. This module is its
 decision and its record, so both are unit-tested; the composite only wires it.
 
 STAGED (`mode`, the reusables' `token-source` input, else the caller repo's `PR_TOKEN_SOURCE`
-variable, else `pat`). Every repo already holds the App's variable and key, so keying on their
+variable, else `pat`). A consumer may already hold the App's id and key, so keying on their
 presence alone would cut every consumer over the moment `v1` moved:
   pat           the PAT acts, exactly as before. If the caller ALSO passes the key, the App token
                 is minted anyway and NOT used: a canary that proves the key before the flip, and
@@ -35,6 +35,13 @@ annotations API) and in the step summary, in ONE fixed shape -- a CONTRACT, a de
             workflow=<file> job=<id> login=<login|unknown>          (one line; wrapped here)
 Every value is free of `=` and spaces. The decide step's shell writes `reason=decide-crashed`
 itself when this module cannot run at all.
+
+DEPRECATED NAMES (v1.40.0). The App's id and key were first read under consumer-specific names
+(a repository variable and a secret); the generic names are the reusables' `app-client-id` input and
+`app-private-key` secret, and this composite's `client-id` (create-github-app-token deprecated its own
+`app-id` the same way). The old spellings still resolve to the SAME value, and each one used is a
+`::notice` naming its replacement (`deprecations`): never a different decision, never a different
+record line. Removing them is a major version.
 """
 from __future__ import annotations
 
@@ -68,6 +75,7 @@ IDENTITY_SCOPES = frozenset({"update", "train"})
 LOGIN_ENV = "CI_KIT_TOKEN_LOGIN"
 TRUSTED_ENV = "CI_KIT_TRUSTED_LOGINS"
 PREFIX = "pr-token:"
+DEPRECATED_TITLE = "ci-kit deprecated name"
 
 
 @dataclass(frozen=True)
@@ -88,7 +96,8 @@ def decide(mode: str, has_app_id: bool, has_key: bool, has_pat: bool) -> Decisio
     if mode == "app-required":
         if not configured:
             return Decision(False, "none", missing, f"token-source app-required but the App is not configured ({missing}): "
-                            "pass EDGE_BOT_PRIVATE_KEY and set the EDGE_BOT_APP_ID variable; the PAT is never used in this mode")
+                            "pass the App's key as the `app-private-key` secret and its client id as the `app-client-id` input; "
+                            "the PAT is never used in this mode")
         return Decision(True, "app", "configured")
     if mode == "app" and configured:
         return Decision(True, "app", "configured")
@@ -144,6 +153,23 @@ def trusted_logins(acting: str, env: dict[str, str] | None = None) -> frozenset[
     return frozenset(trusted_set(acting, [x.strip() for x in raw.split(",") if x.strip()]))
 
 
+def deprecations(raw: str, app_id_alias: bool = False) -> list[str]:
+    """One `::notice` line per deprecated spelling used. `raw` = whitespace-separated `old>new` pairs
+    the caller resolved a value through; `app_id_alias` = this composite's own `app-id` stood in for
+    `client-id`. Pure. A malformed pair is named as it is, never dropped: a notice that cannot say what
+    to rename is still a notice that something was."""
+    pairs = [p for p in (raw or "").split() if p]
+    if app_id_alias:
+        pairs.append("app-id>client-id")
+    out = []
+    for p in dict.fromkeys(pairs):
+        old, sep, new = p.partition(">")
+        what = f"`{old}` is deprecated: use `{new}`" if sep and old and new else f"a deprecated name was used ({p})"
+        out.append(f"::notice title={DEPRECATED_TITLE}::{what} -- identical behaviour today; the old name is "
+                   "removed in the next major version")
+    return out
+
+
 # ── the composite's two steps ────────────────────────────────────────────────────────────────────
 def _out(**kv: str) -> None:
     path = os.environ.get("GITHUB_OUTPUT")
@@ -188,6 +214,8 @@ def _pat_login() -> str:
 
 
 def cmd_decide() -> int:
+    for n in deprecations(os.environ.get("CI_KIT_DEPRECATED", ""), _flag("APP_ID_ALIAS")):
+        print(n)
     mode = os.environ.get("CI_KIT_TOKEN_MODE", "")
     d = decide(mode, _flag("HAS_APP_ID"), _flag("HAS_KEY"), _flag("HAS_PAT"))
     scope = os.environ.get("CI_KIT_TOKEN_SCOPE", "")

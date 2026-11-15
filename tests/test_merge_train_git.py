@@ -190,7 +190,7 @@ def _stacked(repo: Repo) -> tuple[str, str]:
 
 def _live_run(h: str, main: str, created: str = "2026-11-11T20:00:00Z") -> dict:
     """The review run of #7 AS GITHUB RETURNS IT after a retarget: `pull_requests` carries the PR's
-    CURRENT base (main), not the `feat` the run reviewed (live: trade-data runs 43105767267 and
+    CURRENT base (main), not the `feat` the run reviewed (live: a consumer's runs 43105767267 and
     43090069877 report base/head state from after they ran)."""
     return {"id": 1, "head_sha": h, "event": "pull_request", "status": "completed", "conclusion": "success",
             "created_at": created,

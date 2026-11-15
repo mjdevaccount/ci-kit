@@ -3,13 +3,13 @@
 WHY THIS EXISTS (2026-09-26). Two operator laws collided. PRs open READY with auto-merge ARMED
 AT OPEN (CI is the merge gate, no human, no session), and "dispatch `reviewer` before merging a
 build loop of 3+ commits or any diff adding a GUARD". The second lived only in session memory,
-so the first always won: trade-data#2059 added a ruff ban, auto-merged 30s after opening, and
+so the first always won: a consumer's #2059 added a ruff ban, auto-merged 30s after opening, and
 the reviewer's DO NOT SHIP (the ban had no test) arrived after main already had it. The review
 could only ever be advisory. The reusable `.github/workflows/review-gate.yml` makes it a CI check, so auto-merge
 waits for it the same way it waits for `unit tests`.
 
-The ledger says the check earns its cost: of 134 closed `reviewer` dispatches in trade-data's
-`ops.agent_dispatches` (queried 2026-09-26), 41 closed `miss` -- a blocking finding in 31% of the
+The ledger says the check earns its cost: of 134 closed `reviewer` dispatches in a consumer's
+dispatch ledger (queried 2026-09-26), 41 closed `miss` -- a blocking finding in 31% of the
 diffs it was sent. Anthropic's managed Code Review posts findings but explicitly never blocks a
 merge, so it cannot be this gate; a reviewer returning this schema can (`agent` / `claude`).
 

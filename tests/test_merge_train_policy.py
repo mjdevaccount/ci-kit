@@ -87,7 +87,7 @@ T1 = "2026-11-11T00:00:01Z"
 def wr(i: int, conclusion: str = "success", status: str = "completed", n: int = 7, head: str = H, prs: bool = True,
        base: str = "main") -> dict:
     """A review-gate run AS GITHUB RETURNS IT: `pull_requests[].base`/`.head` are the PR's CURRENT
-    state when asked (live: trade-data run 43105767267 reports a base committed after it ran), so
+    state when asked (live: a consumer's run 43105767267 reports a base committed after it ran), so
     `base` here is always the PR's current base, never what the run reviewed."""
     entry = {"number": n, "head": {"sha": head}, "base": {"ref": base, "sha": B}}
     return {"id": i, "created_at": f"2026-11-11T00:00:{i:02d}Z", "head_sha": head, "event": "pull_request",
@@ -144,8 +144,8 @@ def recorded(name: str) -> dict:
     return json.loads((REC / f"timeline_{name}.json").read_text(encoding="utf-8"))
 
 
-NEVER = ("trade-data_2990_never", "trade-data_2991_never", "ci-kit_69_never")
-RETARGETED = {"home-host_199_retargeted": "2026-11-08T18:40:20Z", "uv_23126_retargeted": "2026-11-09T10:42:27Z"}
+NEVER = ("example-repo_2990_never", "example-repo_2991_never", "ci-kit_69_never")
+RETARGETED = {"example-b_199_retargeted": "2026-11-08T18:40:20Z", "uv_23126_retargeted": "2026-11-09T10:42:27Z"}
 
 
 def test_recorded_timelines_decide_on_the_filtered_count_never_the_total_must_fire() -> None:
@@ -168,11 +168,11 @@ def test_a_timeline_answer_that_does_not_say_is_unreadable_must_fire() -> None:
                 ti[k] = v
         return got
     bad = [None, {"data": None}, {"errors": [{"message": "Resource not accessible by integration"}], "data": None},
-           tl("trade-data_2990_never", filteredCount=None),           # no filtered count: never guess from total
-           tl("home-host_199_retargeted", nodes=[]),                   # counted, not named
-           tl("home-host_199_retargeted", nodes=[{"__typename": "BaseRefChangedEvent"}]),         # no time
-           tl("home-host_199_retargeted", nodes=[{"__typename": "ReferencedEvent", "createdAt": "2026-11-08T18:40:20Z"}]),
-           tl("trade-data_2990_never", nodes=recorded("home-host_199_retargeted")["data"]["repository"]
+           tl("example-repo_2990_never", filteredCount=None),           # no filtered count: never guess from total
+           tl("example-b_199_retargeted", nodes=[]),                   # counted, not named
+           tl("example-b_199_retargeted", nodes=[{"__typename": "BaseRefChangedEvent"}]),         # no time
+           tl("example-b_199_retargeted", nodes=[{"__typename": "ReferencedEvent", "createdAt": "2026-11-08T18:40:20Z"}]),
+           tl("example-repo_2990_never", nodes=recorded("example-b_199_retargeted")["data"]["repository"]
               ["pullRequest"]["timelineItems"]["nodes"])]            # counts none, lists one
     for got in bad:
         with pytest.raises(github.Unreadable):
@@ -180,7 +180,7 @@ def test_a_timeline_answer_that_does_not_say_is_unreadable_must_fire() -> None:
 
 
 def test_retargeted_at_asks_the_filtered_count_and_wraps_a_refusal(monkeypatch) -> None:
-    calls = _timeline(monkeypatch, recorded("trade-data_2990_never"))
+    calls = _timeline(monkeypatch, recorded("example-repo_2990_never"))
     assert github.retargeted_at("o/r", 7) == ""
     q = calls[0][3]
     assert "BASE_REF_CHANGED_EVENT" in q and "filteredCount" in q and "totalCount" not in q and "pr=7" in calls[0]

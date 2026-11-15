@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import pathlib
 
+import _runners
 import yaml
 
 WORKFLOW = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci-green.yml"
-SECURE = "${{ vars.CI_SECURE_RUNNER && fromJSON('[\"self-hosted\",\"home-secure\"]') || 'ubuntu-latest' }}"
+SECURE = _runners.SECURE
 CLAUSES = (
     "github.event_name == 'workflow_run'",
     "github.event.workflow_run.conclusion == 'success'",
@@ -24,7 +25,7 @@ CLAUSES = (
 HEAD = "${{ github.event.workflow_run.head_sha }}"
 EVENTS = ("(github.event.workflow_run.event == 'push' || "
           "github.event.workflow_run.event == 'workflow_dispatch')")
-ENV = "${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}"
+ENV = _runners.SECURE_ENV
 
 
 def faults(job: dict) -> list[str]:

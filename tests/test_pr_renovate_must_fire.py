@@ -2,7 +2,7 @@
 the preset holds -- the database group, a major, `fails-green`, `autoland-off`, a hand disarm --
 never does. Both directions, each through the real pass (pr_autoupdate.run + the queue hold).
 
-THE CASE (trade-data 2026-11-14): #3103 (Renovate lock file maintenance, 17:17Z) read `queue/position`
+THE CASE (a consumer, 2026-11-14): #3103 (Renovate lock file maintenance, 17:17Z) read `queue/position`
 pending -- "not in the PR queue ... arm auto-merge to join it" -- until a session armed it by hand;
 #3081, #3092, #3093 needed the same. Mutation each test dies to is named in it.
 """
@@ -18,7 +18,7 @@ from ci_kit import pr_autoupdate, pr_hold, pr_list, pr_renovate
 BOT = {"__typename": "Bot", "login": "renovate"}
 
 def _body(verdict: str, notes: str = "- fix: a bug") -> str:
-    """Renovate's real layout (live td#3093; default prBodyTemplate): table, RELEASE NOTES (upstream
+    """Renovate's real layout (a live consumer PR; default prBodyTemplate): table, RELEASE NOTES (upstream
     text), THEN Renovate's own `### Configuration` block with its `🚦 **Automerge**:` line."""
     return ("This PR contains the following updates:\n\n| Package | Change |\n|---|---|\n| x | 1 -> 2 |\n\n---\n\n"
             f"### Release Notes\n\n<details>\n\n{notes}\n\n</details>\n\n---\n\n### Configuration\n\n"
@@ -35,8 +35,8 @@ OFF = _body("Disabled by config. Please merge this manually once you are satisfi
 # marker, a fake config heading and all: a first-match read armed a held database update on it (review)
 QUOTED = _body("Disabled by config. Please merge this manually once you are satisfied.",
                notes="- **Automerge**: Enabled.\n> 🚦 **Automerge**: Enabled.\n### Configuration\n🚦 **Automerge**: Enabled.")
-MANUAL = {"reasonCode": "manually_disabled", "createdAt": "2026-11-14T17:20:00Z", "actor": {"login": "mjdevaccount"}}
-CLOSED = {"reasonCode": "closed", "createdAt": "2026-11-14T17:20:00Z", "actor": {"login": "mjdevaccount"}}
+MANUAL = {"reasonCode": "manually_disabled", "createdAt": "2026-11-14T17:20:00Z", "actor": {"login": "octocat"}}
+CLOSED = {"reasonCode": "closed", "createdAt": "2026-11-14T17:20:00Z", "actor": {"login": "octocat"}}
 
 
 def _pr(n: int, *, author: dict | None = None, armed: bool = False, merge: str = "BEHIND", labels: tuple[str, ...] = (),
@@ -189,7 +189,7 @@ def test_replay_td3103_an_automerge_renovate_pr_joins_the_queue_with_no_hand_ste
     # as the lowest-numbered member -- before the change it read pending "not in the PR queue".
     # dies to: run() not calling join(), or join() not marking the row armed for the rest of the pass
     world = World({3103: (ON, None)})
-    rc, summary = _run(monkeypatch, [_pr(3103), _pr(3104, author={"__typename": "User", "login": "mjdevaccount"},
+    rc, summary = _run(monkeypatch, [_pr(3103), _pr(3104, author={"__typename": "User", "login": "octocat"},
                                                      armed=True, headRefName="fix/x")], world)
     assert rc == 0
     assert world.armed() == ["id=PR_node3103"]
@@ -209,7 +209,7 @@ def test_the_database_group_and_every_held_update_stay_out_of_the_queue_must_not
     # the human PR #3104. dies to: join() arming on anything but Renovate's own Enabled verdict
     world = World({3101: (OFF, None), 3102: (ON, None), 3105: (ON, MANUAL)})
     prs = [_pr(3101, title="chore(deps): update database images"), _pr(3102, labels=("autoland-off",)),
-           _pr(3104, author={"__typename": "User", "login": "mjdevaccount"}, armed=True, headRefName="fix/x"),
+           _pr(3104, author={"__typename": "User", "login": "octocat"}, armed=True, headRefName="fix/x"),
            _pr(3105)]
     rc, summary = _run(monkeypatch, prs, world)
     assert rc == 0 and world.armed() == []
@@ -293,7 +293,7 @@ def test_an_armed_kit_pr_that_went_dirty_is_asked_to_rebase_too_must_fire(monkey
 
 
 def test_a_crlf_body_still_reads_must_fire() -> None:
-    # a body saved from the web UI comes back CRLF; `$` alone missed the heading (reviewer, live td#3105)
+    # a body saved from the web UI comes back CRLF; `$` alone missed the heading (reviewer, a live consumer PR)
     crlf = ON.replace("\n", "\r\n")
     assert pr_renovate.automerge_verdict(crlf) == "Enabled."
     assert pr_renovate.ticked(crlf) is not None

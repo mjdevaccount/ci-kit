@@ -28,7 +28,7 @@ class _Done:
 
 def pr(n: int = 7, head: str = H1, **kw) -> dict:
     base = {"number": n, "headRefOid": head, "headRefName": "feat/x", "title": "feat: x", "labels": [],
-            "autoMergeRequest": {"enabledAt": "2026-11-14T00:00:00Z"}, "author": {"login": "mjdevaccount"},
+            "autoMergeRequest": {"enabledAt": "2026-11-14T00:00:00Z"}, "author": {"login": "octocat"},
             "url": f"https://github.com/o/r/pull/{n}"}
     return {**base, **kw}
 
@@ -269,7 +269,7 @@ def test_an_already_ticked_rebase_box_is_recorded_so_it_can_page_must_fire() -> 
     comments = [t for a, t in calls if a[:2] == ("pr", "comment")]
     assert len(comments) == 1 and "mode=rebase" in comments[0] and "already ticked" in comments[0]
     assert not any(a[:2] == ("api", "-X") for a, _ in calls)          # nothing to PATCH
-    # home-host#246: that record is what the stale-minutes page reads, a pass later
+    # a consumer's #246: that record is what the stale-minutes page reads, a pass later
     assert any(h == H1 for h, *_ in pr_ladder.marks(comments, pr_ladder._HEAL))
 
 

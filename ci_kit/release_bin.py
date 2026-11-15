@@ -7,7 +7,7 @@ exit -- so it lives here and each gate states only its `Pin`.
 
 THE PIN. `version` plus one sha256 per platform asset, copied from the release's own checksums
 file. Each gate's version line carries a `# renovate: datasource=github-releases depName=...`
-comment, which edge-ci's renovate preset reads; Renovate moves the VERSION only, so a bump PR
+comment, which this kit's renovate preset reads; Renovate moves the VERSION only, so a bump PR
 fails its own selftest with `sha256 X != pinned Y` (exit 2) until the hashes move in the same
 PR -- a new binary never runs on an unreviewed digest.
 
@@ -15,12 +15,12 @@ THE CACHE. `$CI_KIT_CACHE_DIR` (default `~/.cache/ci-kit`) / `<name>-<version>-<
 so a version bump is a new directory, never an overwrite. `$<ENV>` (e.g. `CI_KIT_OASDIFF`) points
 a gate at a binary you already have and skips the fetch.
 
-SHARED CACHE (2026-11-08). The home CI runners point `$CI_KIT_CACHE_DIR` at one directory every
-runner mounts (home-host ci-runner-supervisor.sh), so two jobs can fetch the same pin at once. The
+SHARED CACHE (2026-11-08). A self-hosted runner pool may point `$CI_KIT_CACHE_DIR` at one directory every
+runner mounts, so two jobs can fetch the same pin at once. The
 binary is written to a temp file beside it and `os.replace`d in: a reader sees no binary or the whole
 one, never a half-written file that `exists()` already calls cached.
 
-RETRY. A cold cache fetches from GitHub releases, which answered 504 twice running on edge-host#589
+RETRY. A cold cache fetches from GitHub releases, which answered 504 twice running on a consumer PR
 (2026-11-08). A 5xx, a timeout or a dropped connection is retried `FETCH_ATTEMPTS` times with
 backoff; a 4xx is not (a wrong URL stays wrong). The two GitHub download paths fail APART -- the
 `releases/download` URL 504'd on three jobs and a curl while the REST asset URL served the same bytes -- so each

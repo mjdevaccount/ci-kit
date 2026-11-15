@@ -7,8 +7,8 @@ also answers "can the gate's token read timelineItems". It skips anywhere withou
 
 The CI token reads only ci-kit and public repos, so the always-on pair is public:
 astral-sh/uv#23126 (merged, retargeted once) and ci-kit#69 (merged, never retargeted; a merged PR's
-base cannot change again). The private pair (home-host#199, trade-data#2990) runs where a token can
-read them: MERGE_TRAIN_LIVE_PRIVATE=1.
+base cannot change again). Private PRs run where a token can read them: MERGE_TRAIN_LIVE_PRIVATE is a comma-separated list of
+`owner/repo#N@<retargeted-at ISO time, or empty>` (unset = skipped), so no private name lives here.
 """
 from __future__ import annotations
 
@@ -23,7 +23,18 @@ pytestmark = pytest.mark.skipif(os.environ.get("MERGE_TRAIN_LIVE") != "1" or not
     reason="live GitHub probe: set MERGE_TRAIN_LIVE=1 with a token (ci-kit CI does)")
 
 PUBLIC = [("astral-sh/uv", 23126, "2026-11-09T10:42:27Z"), ("mjdevaccount/ci-kit", 69, "")]
-PRIVATE = [("mjdevaccount/home-host", 199, "2026-11-08T18:40:20Z"), ("mjdevaccount/trade-data", 2990, "")]
+def _private(spec: str) -> list[tuple[str, int, str]]:
+    """`owner/repo#N@when,...` -> [(repo, N, when)]; '' = none."""
+    out = []
+    for item in filter(None, (x.strip() for x in spec.split(","))):
+        pr, _, when = item.partition("@")
+        repo, _, number = pr.partition("#")
+        if repo and number.isdigit():   # anything else (the old `=1` switch) names no PR
+            out.append((repo, int(number), when))
+    return out
+
+
+PRIVATE = _private(os.environ.get("MERGE_TRAIN_LIVE_PRIVATE", ""))
 
 
 def _raw(repo: str, number: int) -> dict:
@@ -43,7 +54,7 @@ def test_live_timeline_answers_and_the_total_count_trap_is_real(repo: str, numbe
     assert raw["filteredCount"] == (1 if when else 0)
 
 
-@pytest.mark.skipif(os.environ.get("MERGE_TRAIN_LIVE_PRIVATE") != "1", reason="private repos: needs a token that reads them")
+@pytest.mark.skipif(not PRIVATE, reason="private PRs: set MERGE_TRAIN_LIVE_PRIVATE with a token that reads them")
 @pytest.mark.parametrize(("repo", "number", "when"), PRIVATE)
-def test_live_timeline_on_the_estate_prs(repo: str, number: int, when: str) -> None:
+def test_live_timeline_on_private_prs(repo: str, number: int, when: str) -> None:
     assert github.retargeted_at(repo, number) == when

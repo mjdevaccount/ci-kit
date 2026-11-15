@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path.cwd().resolve()
 MAX_OUT = 30_000           # chars of tool output handed back per call
-CMD_TIMEOUT = 900          # s; a full `uv run pytest` is ~3 min on trade-data's CI
+CMD_TIMEOUT = 900          # s; a full `uv run pytest` is ~3 min on a large consumer's CI
 ALLOWED = (("git", "diff"), ("git", "log"), ("git", "show"),
            ("uv", "run", "pytest"), ("uv", "run", "ruff"), ("uv", "run", "lint-imports"))
 # git options that write files or run programs: never reachable from a read-only reviewer

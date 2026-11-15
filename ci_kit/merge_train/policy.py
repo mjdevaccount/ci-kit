@@ -35,7 +35,7 @@ RECOMPOSE_LIMIT times at the same head is HELD out of trains until its head chan
 is red: something keeps a train it rides from finishing. A STALE release is NOT counted (round 2):
 stale only says main moved -- a PR landing on its own (an ejected one, a Renovate bump) -- which
 is no fault of any rider; counting it ejected whole trains on a busy main. A rider recomposed
-forever by stale trains is the OUTSIDE watcher's: mcp train_watch times a rider across trains
+forever by stale trains is the OUTSIDE watcher's: an outside train watcher times a rider across trains
 (`rode` markers). Nothing here is sticky: hold re-admits on a new head. The counts live in the
 rider's own comments (`released` markers), so they survive across runs and trains.
 """

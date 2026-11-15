@@ -1,0 +1,42 @@
+# A caller written the v1.39 way: the App's key under its DEPRECATED secret name, its id from the
+# repository variable, the secure pool by the CI_SECURE_RUNNER switch. actionlint must accept it
+# against the reusables in THIS checkout (ci.yml), and tests/test_generic_names_must_fire.py shows
+# it resolves to the same values as new-names.yml. Never run: a fixture.
+name: old-names
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  update:
+    permissions: { contents: read, pull-requests: read, checks: read, statuses: read }
+    uses: ./.github/workflows/pr-autoupdate.yml
+    secrets:
+      token: ${{ secrets.PR_UPDATE_TOKEN }}
+      EDGE_BOT_PRIVATE_KEY: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}
+  train:
+    uses: ./.github/workflows/merge-train.yml
+    secrets:
+      token: ${{ secrets.PR_UPDATE_TOKEN }}
+      EDGE_BOT_PRIVATE_KEY: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}
+  advance:
+    permissions: { contents: read }
+    uses: ./.github/workflows/ci-green.yml
+    secrets:
+      token: ${{ secrets.PR_UPDATE_TOKEN }}
+      EDGE_BOT_PRIVATE_KEY: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}
+  heal:
+    uses: ./.github/workflows/pr-heal.yml
+    with: { pr: 1, head: "0000000000000000000000000000000000000000", mode: regen }
+    secrets:
+      token: ${{ secrets.PR_UPDATE_TOKEN }}
+      EDGE_BOT_PRIVATE_KEY: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}
+  relock:
+    uses: ./.github/workflows/relock.yml
+    secrets:
+      token: ${{ secrets.PR_UPDATE_TOKEN }}
+      EDGE_BOT_PRIVATE_KEY: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}
+  inherit:
+    uses: ./.github/workflows/merge-train.yml
+    secrets: inherit

@@ -279,7 +279,7 @@ def test_negative_grace_is_exit_2(new_repo, tmp_path: Path) -> None:
 
 
 def test_a_late_low_version_does_not_hide_a_stale_pin(new_repo, tmp_path: Path) -> None:
-    # reviewer 591 F1: version order != date order (llm-ports v1.19.0 is dated AFTER v1.20.0).
+    # reviewer 591 F1: version order != date order (a consumer kit's v1.19.0 is dated AFTER its v1.20.0).
     # Pin v1.2.0 misses v1.3.0 (5 days old) and a backport v1.2.1 (1 hour): stale by DATE.
     rem = _remote(new_repo, "v1.2.0")
     _release(rem, "v1.3.0", age_h=120)

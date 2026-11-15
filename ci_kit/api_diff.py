@@ -1,9 +1,9 @@
 """ci-api-diff -- a committed OpenAPI contract may grow, never break: oasdiff over the PR's diff.
 
-WHY. A repo that commits its OpenAPI document (trade-data `docs/api/openapi.json`) makes every
+WHY. A repo that commits its OpenAPI document (a consumer's `docs/api/openapi.json`) makes every
 wire change a reviewable diff -- but a diff is not a verdict. A removed route, a response field
 dropped, a request parameter made required all look like any other hunk in a 900 KB JSON file,
-and the client generated from it (trade-ui's openapi-typescript types) breaks at runtime, three
+and the client generated from it (a UI's openapi-typescript types) breaks at runtime, three
 components later. This turns the diff into ERR / WARN / INFO and fails the PR on ERR.
 
 THE DIFFER IS oasdiff (github.com/oasdiff/oasdiff), not a hand-rolled walk. It knows OpenAPI 3.0

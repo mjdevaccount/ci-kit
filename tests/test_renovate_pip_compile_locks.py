@@ -1,6 +1,6 @@
 """A compiled, hash-locked requirements file is Renovate pip-compile's, never pip_requirements'.
 
-trade-infra#823 (2026-11-08): pip_requirements edited a `uv pip compile --generate-hashes` output
+A consumer, 2026-11-08: pip_requirements edited a `uv pip compile --generate-hashes` output
 line by line, kept the old hashes, and the image build failed `--require-hashes`. The preset routes
 such locks by NAME (`requirements.lock`): pip-compile matches it, pip_requirements' default pattern
 cannot. Both directions are pinned here, because the guard is the pair -- a pip-compile pattern that
@@ -20,7 +20,7 @@ PRESET = pathlib.Path(__file__).resolve().parent.parent / "renovate" / "default.
 # read 2026-11-08 at 44.222.4). JS `\w` == Python `\w` for these ASCII names.
 PIP_REQUIREMENTS_DEFAULT = r"(^|/)[\w-]*requirements([-._]\w+)?\.(txt|pip)$"
 
-LOCKS = ["requirements.lock", "infra/research-mcp/requirements.lock"]
+LOCKS = ["requirements.lock", "services/app/requirements.lock"]
 HAND_FILES = [
     "requirements.txt",
     "ops-api/requirements.txt",
@@ -79,7 +79,7 @@ def test_no_rule_points_pip_requirements_at_a_lock() -> None:
 
 
 def test_pattern_reader_sees_globs_and_regexes() -> None:
-    assert _hits("**/requirements.lock", "infra/research-mcp/requirements.lock")
+    assert _hits("**/requirements.lock", "services/app/requirements.lock")
     assert _hits("requirements.lock", "requirements.lock")
     assert _hits("/(^|/)requirements\\.lock$/", "infra/x/requirements.lock")
     assert not _hits("**/requirements.lock", "infra/x/requirements.txt")

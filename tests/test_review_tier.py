@@ -215,7 +215,7 @@ def test_an_amended_bot_commit_is_reviewed(pr: Path, monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.parametrize(("author", "email", "head_repo", "hand_commit"), [
-    ("mattj", RENOVATE, "o/r", False),                 # a person opened it: same diff, reviewed
+    ("octocat", RENOVATE, "o/r", False),                 # a person opened it: same diff, reviewed
     ("renovate[bot]", "t@t", "o/r", False),            # the bot's PR, a commit it did not author
     ("renovate[bot]", RENOVATE, "o/r", True),          # a hand commit pushed onto the bot's branch
     ("renovate[bot]", RENOVATE, "evil/r", False),      # a fork head is never the bot's own branch
@@ -295,7 +295,7 @@ ACTIONS = "41898282+github-actions[bot]@users.noreply.github.com"
 
 
 def _relock(pr: Path, files: dict[str, bytes | None], email: str = ACTIONS, allow_empty: bool = False) -> None:
-    """A second commit on the bot's branch, as trade-data's relock.yml makes one: another author."""
+    """A second commit on the bot's branch, as a consumer's relock.yml makes one: another author."""
     for name, data in files.items():
         if data is None:
             _git(pr, "rm", "-q", name)
@@ -328,7 +328,7 @@ def _run_relock(pr: Path, monkeypatch: pytest.MonkeyPatch, before: dict[str, byt
 
 def test_a_foreign_lockfile_only_commit_on_a_bot_bump_skips(pr: Path, monkeypatch: pytest.MonkeyPatch,
                                                            capsys: pytest.CaptureFixture[str]) -> None:
-    # trade-data #3040/#3012: renovate[bot] bumps pyproject, github-actions[bot] relocks uv.lock
+    # a consumer's #3040/#3012: renovate[bot] bumps pyproject, github-actions[bot] relocks uv.lock
     assert _run_relock(pr, monkeypatch, LOCK, {"uv.lock": b"ci-kit 1.27.1" + bytes([10])}) == "false"
     out = capsys.readouterr().out
     assert "Review tier: skipped (version bump only, 1 lines)" in out

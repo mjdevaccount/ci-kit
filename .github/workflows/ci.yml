@@ -193,7 +193,12 @@ jobs:
             [ "$rc" -eq 2 ] || { echo "::error::$tool: expected exit 2 (nothing to look at), got $rc"; exit 1; }
           done
       - name: actionlint
-        run: docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:latest -color
+        run: |
+          docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:latest -color
+          # a caller written with the deprecated names AND one with the generic names both resolve
+          # against THIS checkout's reusables (an undeclared secret or input is an actionlint error)
+          docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:latest -color \
+            tests/fixtures/callers/old-names.yml tests/fixtures/callers/new-names.yml
 
   # ci-kit#70 round 3: the merge train's base-change read asks GitHub's GraphQL timeline, and a
   # hand-written fixture hid that totalCount ignores the itemTypes filter. This asks the REAL API

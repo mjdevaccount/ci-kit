@@ -1,6 +1,6 @@
 """The review gate's first step: is this diff reviewed, why, by which model, on which credential.
 
-EVERY CODE PR IS REVIEWED (trade-data operator law 2026-10-17: structure -- a duplicate of an
+EVERY CODE PR IS REVIEWED (a consumer's operator law 2026-10-17: structure -- a duplicate of an
 existing helper, a library re-implemented, a layer skipped -- is what the ratchets cannot see).
 The caller's own tiers stay as REASONS the reviewer reads, not as whether it runs:
   * a guard path (the caller's paths-filter list: gates, hooks, migrations, the money path);
@@ -9,7 +9,7 @@ The caller's own tiers stay as REASONS the reviewer reads, not as whether it run
     workflow has no `labeled` trigger, because a job-level `if:` cannot filter label events and a
     SKIPPED required check reads as PASSED.
 
-DOCS / LOCKFILE ONLY is the one diff that skips the model call (trade-data CI diet, 2026-09-27):
+DOCS / LOCKFILE ONLY is the one diff that skips the model call (a consumer's CI diet, 2026-09-27):
 every file is prose (`*.md`) or a lockfile, so there is no guard to prove red and no structure.
 It drops ONLY the commit-count reason; a guard path or the label still reviews. The diff is the
 PR's own (merge-base..head) with `--no-renames`: with rename detection `--name-only` prints only
@@ -20,7 +20,7 @@ is NOT docs-only. Paths under a `--not-prose` prefix (default `.claude/` agent c
 VERSION BUMP ONLY is the second (2026-11-10, ci_kit/review/bump.py has the rule), for a PR OPENED
 BY a bump bot (BUMP_BOTS: the event's `pull_request.user.login`, which GitHub sets, not the diff)
 from this repository, whose every non-merge commit that bot authored and every merge is a clean,
-unedited merge (`git merge-tree --write-tree`). One allowance (2026-11-12, trade-data relock.yml):
+unedited merge (`git merge-tree --write-tree`). One allowance (2026-11-12, a consumer's relock.yml):
 a non-merge commit by ANY author whose own diff touches lockfiles only is accepted -- the gate
 passes a lockfile-only diff whoever wrote it, so composing the two adds no trust. That holds
 only under the docs/lockfile tier's own two conditions, so both are kept: a lockfile under a
@@ -36,12 +36,12 @@ file (`pyproject.toml`) changes no guard -- and the label still reviews. The sum
 first 20 bumps, and the log says `Review tier: skipped (version bump only, N lines)`. A diff the
 bump check cannot read is reviewed, never red.
 
-THE CREDENTIAL TOGGLE (trade-data operator, 2026-11-06): the caller repo's VARIABLE
+THE CREDENTIAL TOGGLE (a consumer's operator, 2026-11-06): the caller repo's VARIABLE
 REVIEW_GATE_AUTH = `subscription` (secret CLAUDE_CODE_OAUTH_TOKEN, the `claude` transport) | `api`
 (secret ANTHROPIC_API_KEY, the `agent` transport) | `auto`/unset (subscription first). A mode
 whose secret is missing is UNARMED: red (unconfigured must not look healthy) but no per-PR page.
 A fork head is BLIND: repository secrets never reach it. The log line `Reviewer: mode=...
-credential=<NAME> model=...` is read by mcp/scripts/review_gate_auth.py; a value never prints.
+credential=<NAME> model=...` is read by an outside auth audit; a value never prints.
 
 Exit 0 once the outputs are written; 2 = git could not answer (the step fails, so the job is red).
 """
@@ -60,7 +60,7 @@ from ci_kit.review.bump import LOCKFILES, bump_only
 
 NOT_PROSE = (".claude/", "prompts/")
 BUMP_BOTS = {"renovate[bot]": "29139614+renovate[bot]@users.noreply.github.com"}
-# GitHub's committer for an API commit (Renovate's own, td#2955/#2951 checked 11-11). An amend,
+# GitHub's committer for an API commit (Renovate's own, #2955/#2951 checked 11-11). An amend,
 # rebase or cherry-pick on a workstation keeps the bot as AUTHOR but commits as the person.
 WEB_FLOW = "noreply@github.com"
 MODES = ("subscription", "api", "auto")
@@ -134,7 +134,7 @@ def bump_identity(author: str, head_repo: str, repo: str, mb: str, head: str,
         commit as web-flow, but keeps its older author date;
       * a VERIFIED signature (`signed`, the commits API) -- `git filter-branch` keeps both
         identities and both dates, but drops the signature.
-    THE LOCKFILE ALLOWANCE (2026-11-12): trade-data's relock.yml adds a `github-actions[bot]`
+    THE LOCKFILE ALLOWANCE (2026-11-12): a consumer's relock.yml adds a `github-actions[bot]`
     `uv.lock` commit to a first-party wheel bump. The gate already passes a lockfile-only diff
     whoever wrote it (docs_only), so trusting a lockfile-only commit inside a bot bump adds no
     trust; no author string is trusted for it, and none is PRINTED (the failed lock and the
@@ -320,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         failed = failed or ("" if bumps else "non-bump diff")
     if author in BUMP_BOTS and not bumps:
         # the skip fails SAFE but silent: this line is what a watcher counts (reviewer 11-11 round 6 #3);
-        # its prefix is mcp/scripts/review_gate_auth.py's regex, the failed lock goes AFTER it
+        # its prefix is an outside auth audit's regex, the failed lock goes AFTER it
         print(f"Review tier: bump skip NOT taken for {author} (commit identity/signature or a non-bump diff)"
               f" -- failed lock: {failed}")
     elif foreign:
@@ -346,7 +346,7 @@ def main(argv: list[str] | None = None) -> int:
     tools.emit("unarmed", "true" if t.unarmed else "false")
     line = f"Reviewer: mode={t.mode} credential={t.credential_name} model={t.model}"
     tools.summary(f"{line} ({t.transport})")
-    print(line)   # in the LOG too, which the API serves: mcp/scripts/review_gate_auth.py reads it
+    print(line)   # in the LOG too, which the API serves: an outside auth audit reads it
     return 0
 
 

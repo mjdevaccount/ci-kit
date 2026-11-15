@@ -24,13 +24,13 @@ GRACE (`--grace-hours`, default 48 since v1.35.0, 24 before; 2026-11-09). A pin 
 it is older than the grace; until then it is PENDING: printed, exit 0. Renovate bumps a kit pin
 "at any time" (renovate/default.json5 "first-party kits"), but hosted Renovate runs on its own
 cadence and the bump PR then waits in the CI queue, so a daily cron read the lag the day after
-every kit release (trade-quant pin-drift red 11-08 and 11-09, each a fresh tag Renovate had not
+every kit release (a consumer's pin-drift red 11-08 and 11-09, each a fresh tag Renovate had not
 reached yet) -- red that cleared itself is noise that teaches a reader to skip the red. Moving
 the cron after Renovate cannot fix that: Renovate's run time is not ours. The age is the
 release's (an annotated tag's tagger date, a lightweight tag's commit date), read by a blobless
 depth-1 fetch of just those tags into a throwaway repo. A pin is PENDING only if EVERY release
 newer than it has a date and every one is younger than the grace -- by DATE, not by version: a
-tag made late or re-made (llm-ports v1.19.0 is dated after v1.20.0) must not let a fresh low
+tag made late or re-made (a consumer kit's v1.19.0 is dated after its v1.20.0) must not let a fresh low
 version hide a stale pin. A release date it cannot read, or one in the FUTURE (clock skew), gets
 NO grace: unknown is not "young". A pin naming no release is never graced. The throwaway repo
 holds no credential, so a PRIVATE kit's dates are unreadable and its lag fails closed (strict).
@@ -78,7 +78,7 @@ def pin_re(name: str) -> re.Pattern[str]:
 def index_pin_re(name: str) -> re.Pattern[str]:
     """A PEP 508 exact pin of `name` on a package index: `name==1.1.0` or `name[a,b]==1.1.0`.
     The name is matched PEP 503-normalized (`-`, `_`, `.` runs equal, any case), so
-    `llm_ports==1.0.0` pins `llm-ports`. Only `==` with an EXACT X.Y.Z counts: a range, a
+    `my_kit==1.0.0` pins `my-kit`. Only `==` with an EXACT X.Y.Z counts: a range, a
     pre-release (`==1.0.0rc1`) or a local/post version is not a release pin."""
     parts = [re.escape(p) for p in re.split(r"[-_.]+", name) if p]
     return re.compile(r"(?<![\w.-])" + r"[-_.]+".join(parts) + r"(?:\s*\[[^\]]*\])?\s*==\s*"

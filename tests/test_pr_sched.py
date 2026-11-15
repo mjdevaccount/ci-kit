@@ -14,7 +14,7 @@ import pytest
 from ci_kit import pr_admit, pr_heal, pr_queue, pr_sched, redclass
 
 NOW = 1_800_000_000.0
-SEALED = "home-sealed"
+SEALED = "sealed"
 
 
 def _pr(n: int, *, armed: bool = True, labels: tuple[str, ...] = (), state: str = "BLOCKED", **kw) -> dict:
@@ -387,8 +387,8 @@ def test_a_later_pr_merged_past_an_in_flight_head_pages_must_fire() -> None:
 
 
 def test_an_unarmed_renovate_merge_pages_whatever_its_number_td3072_must_fire() -> None:
-    # td#3072 (Renovate merging ITSELF, never armed) landed past head #3073, 03:53Z 11-14; so does a
-    # CLEAN Renovate PR mcp pr_reconcile lands unarmed. dies to: dropping the unarmed-Renovate clause
+    # #3072 (Renovate merging ITSELF, never armed) landed past head #3073, 03:53Z 11-14; so does a
+    # CLEAN Renovate PR an outside reconciler lands unarmed. dies to: dropping the unarmed-Renovate clause
     assert "#3072" in _oq([3072], ref="renovate/x-")
     assert "#3072" in _oq([3072], login="renovate[bot]")
 
@@ -484,8 +484,8 @@ def test_admission_parks_nothing_while_the_scheduler_is_off_must_not_fire(monkey
 
 def test_capacity_parses_or_refuses() -> None:
     assert pr_sched.capacity_of("") == {}
-    assert pr_sched.capacity_of('{"home-sealed": 1, "home-heavy": 1}') == {"home-sealed": 1, "home-heavy": 1}
-    for bad in ('["home-sealed"]', '{"home-sealed": 0}', '{"home-sealed": "1"}', "nope"):
+    assert pr_sched.capacity_of('{"sealed": 1, "heavy": 1}') == {"sealed": 1, "heavy": 1}
+    for bad in ('["sealed"]', '{"sealed": 0}', '{"sealed": "1"}', "nope"):
         with pytest.raises(ValueError):
             pr_sched.capacity_of(bad)
 
@@ -515,7 +515,7 @@ def test_the_head_waits_for_a_verdict_its_own_red_or_the_switch_must_not_fire(mo
 
 
 def test_replay_td3078_head_behind_with_unit_running_on_the_stale_base_is_updated_now_must_fire(monkeypatch) -> None:
-    # td#3078, 05:26Z 11-14: queue head, review verdict RECORDED, BEHIND main (its author pushed a
+    # #3078, 05:26Z 11-14: queue head, review verdict RECORDED, BEHIND main (its author pushed a
     # fix on a base missing #3077) while `unit tests` ran on that stale head -- a result worthless for
     # merging. The serial queue held it ("checks still running") until unit finished, then updated,
     # then ran unit again; the coordinator queue-jumped it by hand. The head goes first, NOW.

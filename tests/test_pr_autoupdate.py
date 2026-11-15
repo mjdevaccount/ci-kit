@@ -98,7 +98,7 @@ def _creates(calls: list[tuple]) -> list[tuple]:
 
 def test_a_missing_label_is_created_and_the_add_retried_once(monkeypatch: pytest.MonkeyPatch,
                                                               capsys: pytest.CaptureFixture[str]) -> None:
-    # live 2026-10-30: home-host had no `conflict` label -> six red runs, armed PRs behind main
+    # live 2026-10-30: a consumer had no `conflict` label -> six red runs, armed PRs behind main
     calls: list[tuple] = []
     monkeypatch.setattr(upd, "_gh", _fake_gh(calls, edit_rc=[1, 0], label_exists=False))
     pages: list[str] = []

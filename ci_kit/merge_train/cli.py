@@ -34,7 +34,7 @@ own merge of the train PR (requested by this CLI after the land-time re-check), 
 checks (the review gate's train path among them, ci_kit/review/train.py) ran on exactly the tree
 that lands. A rebase merge makes one main commit
 per PR with the PR's own title, body and trailers; the tree of the last one is the train's tested
-tree, so a caller's "tested-tree" reuse (trade-data ci.yml) re-tests nothing on that push.
+tree, so a caller's "tested-tree" reuse (a consumer's ci.yml) re-tests nothing on that push.
 
 THE TOKEN is the caller's fine-grained PAT (`GH_TOKEN`: contents, pull requests, workflows and
 actions RW; actions to cancel a closed train's runs) -- a push or PR made with GITHUB_TOKEN fires
@@ -47,10 +47,10 @@ was skipped and why, and how it ended. Every rider carries machine-readable mark
 comments (`rode`, `released ... why=`, `landed`), which is how a rider's history survives across
 trains. LOUD (exit 1, ::error) rather than logged: a stuck train, a retry on machinery, a
 hold for repeated stuck or machinery releases, a green train GitHub would not merge, a `train/` PR this
-workflow did not compose, a merged train not fully settled. What watches from outside: mcp
+workflow did not compose, a merged train not fully settled. What watches from outside: an
 scripts/train_watch.py via pr_reconcile.py (hourly) names a RIDER in trains at one head for
 hours (across trains, from its `rode` markers), a constituent closed as landed whose commit is
-not on main, and an `in-train` label with no open train, in the brief's PR-LAND line; mcp
+not on main, and an `in-train` label with no open train, in its PR report; an outside
 ci-schedule-audit names the merge-train workflow itself going quiet or red.
 
 Exit 0 = the pass finished; 1 = it finished but something it tried failed (named in the log);

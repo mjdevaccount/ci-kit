@@ -1,7 +1,7 @@
 """Arming auto-merge starts a queue pass -- must fire, both directions (v1.32.0).
 
 pr-autoupdate ran on a push to main or a check workflow finishing. Arming is neither, so a newly
-armed PR sat until something else moved (Scraper#161, home-host#245, trade-infra#888 waited for a
+armed PR sat until something else moved (three consumer PRs waited for a
 hand dispatch, 2026-11-14). ci-kit's own caller now listens for `pull_request_target:
 auto_merge_enabled`. The job's guard is EVALUATED here against each event shape, so the guard is
 proven to admit what it must and to refuse what it must:
