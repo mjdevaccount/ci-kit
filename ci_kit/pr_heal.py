@@ -252,6 +252,12 @@ def comments_of(repo: str, n: int) -> list[str]:
     return read(repo, n)
 
 
+def comments_by(repo: str, n: int) -> list[tuple[str, str]]:
+    """The same reader with each comment's author (merge_train.ops): for a marker that GRANTS an action."""
+    from ci_kit.merge_train.ops import comments_by as read  # lazy, as comments_of
+    return read(repo, n)
+
+
 def write(*args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
     """ci-kit's ONE gh writer (merge_train.github.gh), never raising: act() reads the exit code."""
     from ci_kit.merge_train import github

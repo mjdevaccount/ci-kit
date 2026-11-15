@@ -56,7 +56,7 @@ import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ci_kit import doomed_runs, pr_heal, pr_hold, pr_ladder, pr_list, pr_queue, pr_renovate, pr_sched, train_kick
+from ci_kit import doomed_runs, pr_baseretry, pr_heal, pr_hold, pr_ladder, pr_list, pr_queue, pr_renovate, pr_sched, train_kick
 from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
 from ci_kit.ntfy import page  # noqa: F401 -- re-exported: _update_one pages through this name
 
@@ -87,6 +87,13 @@ class Options:
     # cancel the `pull_request` runs at heads that cannot merge under strict protection (doomed_runs)
     cancel_doomed: bool = False  # main() turns it ON (env CI_KIT_CANCEL_DOOMED, default true)
     ladder: pr_ladder.Config = pr_ladder.Config()  # the heal ladder (pr_ladder): off unless the caller runs pr-heal.yml
+    # consecutive base-driven retries of a red BEHIND PR main has gone green on (pr_baseretry); 0 = off.
+    # main() turns it ON (env CI_KIT_BASE_RETRY_CAP, default pr_baseretry.CAP)
+    base_retry_cap: int = 0
+    # the NO-AUTHOR case (pr_baseretry.bot_reason): exact author logins, empty = off. Shares the cap above.
+    base_retry_bots: tuple[str, ...] = ()
+    base_retry_per_pass: int = pr_baseretry.PER_PASS  # candidates whose main runs are read per pass
+    base_retry_error: str = ""  # an unreadable cap: the feature is refused, the pass goes on, the run is red
 
 
 @dataclass(frozen=True)
@@ -224,7 +231,8 @@ def add_label(repo: str, n: int, label: str, color: str = LABEL_COLOR,
 
 
 def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Options,
-                machinery: frozenset[int] = frozenset(), restarted: frozenset[int] = frozenset()) -> pr_queue.Plan:
+                machinery: frozenset[int] = frozenset(), restarted: frozenset[int] = frozenset(),
+                base_retry: frozenset[int] = frozenset()) -> pr_queue.Plan:
     """pr_queue's plan with the MERGE TRAIN's PRs taken out (ci_kit/merge_train). A train PR is
     never updated (a merge commit from main would break its one-commit-per-PR chain; a stale train
     is recomposed instead), a PR riding one is left alone, and while a train is open nothing else is
@@ -244,7 +252,7 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
     if riding:
         summary.append(f"riding a merge train, not updated: {', '.join('#' + str(n) for n in sorted(riding))}")
     q = pr_queue.plan([p for p in armed if p not in trains and p["number"] not in riding],
-                      opts.max_in_flight, opts.required, machinery, restarted)
+                      opts.max_in_flight, opts.required, machinery, restarted, base_retry)
     why = pr_hold.dead(trains[-1], opts.required, time.time(), opts.train_stale_min * 60) if trains else ""
     if why:  # a dead train (red, main moved, past its bound) holds nothing: pr_hold.dead, ONE rule with the hold
         summary.append(f"merge train #{trains[-1]['number']} open but not live, updates not held "
@@ -304,8 +312,19 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
         errors += pr_hold.hold(repo, prs, _gh_read, pr_heal.write, summary, pr_heal.comments_of, skip,
                                base=base, stale_s=opts.head_stall_min * 120, required=opts.required,
                                train_stale_s=opts.train_stale_min * 60)
+    retry: dict[int, str] = {}
+    if opts.base_retry_error:
+        errors += 1
+        print(f"::error::{opts.base_retry_error}")
+        summary.append(f"base-driven retry OFF this pass: {opts.base_retry_error}")
+    if opts.max_in_flight > 0 and opts.base_retry_cap > 0:  # with no queue every armed PR is updated anyway
+        retry, e = pr_baseretry.assess(repo, armed, opts.required, opts.label, machinery | parked,
+                                       lambda p: str(p.get("baseRefName") or default()), opts.base_retry_cap,
+                                       _gh_read, pr_heal.comments_by, pr_heal.write, summary,
+                                       frozenset(opts.base_retry_bots), opts.base_retry_per_pass)
+        errors += e
     q = _train_plan(prs, armed, summary, opts, machinery | parked,
-                    frozenset(cancel.restarted) if cancel else frozenset())
+                    frozenset(cancel.restarted) if cancel else frozenset(), frozenset(retry))
     head = _head_first(repo, prs, q, opts, summary, skip)
     if opts.max_in_flight > 0:
         summary.append(f"queue: {len(q.in_flight)}/{opts.max_in_flight} in flight "
@@ -313,8 +332,15 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
                        f"{len(q.held)} held")
         summary += [f"#{p['number']}: in flight against current main" for p in q.in_flight]
         summary += [f"#{p['number']}: held, {why}" for p, why in q.held]
-    attempted, updated, conflicts, err = _drive(repo, q, head, opts, relock, summary, cancel)
+    attempted, updated, conflicts, err = _drive(repo, q, head, opts, relock, summary, cancel, retry)
     errors += err + (cancel.errors if cancel else 0)
+    # ONE ACTOR PER HEAD: a PR this pass base-retried has a new head on its way; its old head goes to
+    # neither the ladder (whose dispatch marker would spend a tier-3 slot on a head already gone) nor pr_heal
+    retried = set(retry) & updated
+    if retried:
+        heal = {n: v for n, v in heal.items() if n not in retried}
+        summary.append("base-retried this pass, not offered to the heal ladder or smart auto-merge: "
+                       + ", ".join(f"#{n}" for n in sorted(retried)))
     e, taken = _ladder(repo, heal, conflicts + [p for p in renovate_pool(prs, opts) if _dirty(p)], opts, summary, healing)
     errors += e
     errors += pr_heal.act(repo, heal, updated, opts.rerun_limit, pr_heal.write, summary, frozenset(taken))
@@ -334,9 +360,11 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
 
 
 def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock: list[int], summary: list[str],
-           cancel: doomed_runs.Canceller | None = None) -> tuple[set[int], set[int], list[dict], int]:
+           cancel: doomed_runs.Canceller | None = None,
+           retry: dict[int, str] | None = None) -> tuple[set[int], set[int], list[dict], int]:
     """The update loop: (attempted, updated, conflicts, errors). After each update the head it
-    replaced is a head that can never merge, so its `pull_request` runs are cancelled (doomed_runs)."""
+    replaced is a head that can never merge, so its `pull_request` runs are cancelled (doomed_runs).
+    A base-driven retry (`retry`: PR -> its marker) is RECORDED before its PUT; no record, no update."""
     errors = 0
     tracker = ""
     if opts.tracker:
@@ -355,6 +383,10 @@ def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock:
                 nxt = spare.pop(0)
                 summary.append(f"#{nxt['number']}: takes the slot #{n}'s running review left free")
                 todo.append(nxt)
+            continue
+        if n in (retry or {}) and not pr_baseretry.record(repo, n, (retry or {})[n], pr_heal.write):
+            errors += 1
+            summary.append(f"#{n}: base-driven retry NOT made: its marker comment failed (the record is the budget)")
             continue
         attempted.add(n)
         kind, line = _update_one(repo, p, opts, tracker, relock)
@@ -515,6 +547,33 @@ def unlabel_resolved(repo: str, prs: list[dict], attempted: set[int], opts: Opti
     return errors
 
 
+def base_retry_int(raw: str, name: str, default: int, lo: int, hi: int) -> tuple[int, str]:
+    """(value, error) for a base-retry input. Unreadable or outside [lo, hi] = (0, why): that ONE
+    feature is refused and named, never the whole updater crashed. Pure."""
+    raw = (raw or "").strip()
+    if not raw:
+        return default, ""
+    try:
+        v = int(raw)
+    except ValueError:
+        return 0, f"{name} {raw!r} is not an integer: base-driven retry refused"
+    return (v, "") if lo <= v <= hi else (0, f"{name} {v} is outside {lo}..{hi}: base-driven retry refused")
+
+
+def base_retry_cap(raw: str) -> tuple[int, str]:
+    """(cap, error) from CI_KIT_BASE_RETRY_CAP. A cap above pr_baseretry.CHAIN is refused: the count
+    walks at most CHAIN merges, so a larger cap could never be reached (2nd review of 0df4957)."""
+    return base_retry_int(raw, "base-retry-cap", pr_baseretry.CAP, 0, pr_baseretry.CHAIN)
+
+
+def base_retry_warning(bots: tuple[str, ...], cap: int, max_in_flight: int) -> str:
+    """A non-empty bot list that cannot act (cap 0 or no queue) is named, never silently inert. Pure."""
+    if not bots or (cap > 0 and max_in_flight > 0):
+        return ""
+    off = "base-retry-cap is 0" if cap <= 0 else "max-in-flight is 0 (no queue)"
+    return f"base-retry-bot-authors is set ({', '.join(bots)}) but {off}: the no-author case is OFF"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ci-pr-autoupdate", description=__doc__.split("\n", 1)[0])
     ap.add_argument("--repo", required=True)
@@ -543,6 +602,14 @@ def main(argv: list[str] | None = None) -> int:
         scarce = tuple(sorted(pr_sched.capacity_of(args.scarce_pools).items()))
     except ValueError as e:
         ap.error(str(e))
+    cap, cap_error = base_retry_cap(os.environ.get("CI_KIT_BASE_RETRY_CAP", ""))
+    per_pass, per_error = base_retry_int(os.environ.get("CI_KIT_BASE_RETRY_MAX_PER_PASS", ""),
+                                         "base-retry-max-per-pass", pr_baseretry.PER_PASS, 1, 100)
+    if per_error:
+        cap, cap_error = 0, "; ".join(x for x in (cap_error, per_error) if x)
+    bots = tuple(sorted({s.strip() for s in os.environ.get("CI_KIT_BASE_RETRY_BOT_AUTHORS", "").split(",") if s.strip()}))
+    if warn := base_retry_warning(bots, cap, args.max_in_flight):
+        print(f"::warning::{warn}")
     opts = Options(review_workflow=args.review_workflow, tracker=args.tracker, relock=args.relock,
                    label=args.label, max_in_flight=args.max_in_flight,
                    required=tuple(s.strip() for s in args.required_checks.split(",") if s.strip()),
@@ -557,7 +624,9 @@ def main(argv: list[str] | None = None) -> int:
                    train_min_batch=int(os.environ.get("CI_KIT_TRAIN_MIN_BATCH", "").strip() or train_kick.MIN_BATCH),
                    train_stale_min=float(os.environ.get("CI_KIT_TRAIN_STALE_MIN", "").strip() or 90),
                    cancel_doomed=os.environ.get("CI_KIT_CANCEL_DOOMED", "true").strip().lower() not in ("false", "0", "no"),
-                   ladder=pr_ladder.Config.from_env())
+                   ladder=pr_ladder.Config.from_env(),
+                   base_retry_cap=cap, base_retry_error=cap_error, base_retry_bots=bots,
+                   base_retry_per_pass=per_pass)
     summary: list[str] = []
     relock: list[int] = []
     healing: list[dict] = []

@@ -90,16 +90,21 @@ def close(o: Opts, p: Pass, n: int, delete_branch: bool = False) -> bool:
                  *(["--delete-branch"] if delete_branch else []))
 
 
-def bodies(paged: str) -> list[str]:
-    """`gh api --paginate --jq '[.[].body]'` prints one JSON array PER PAGE, back to back. Pure."""
-    out: list[str] = []
+def items(paged: str) -> list[object]:
+    """`gh api --paginate --jq '[...]'` prints one JSON array PER PAGE, back to back: their items. Pure."""
+    out: list[object] = []
     dec, i, text = json.JSONDecoder(), 0, paged.strip()
     while i < len(text):
         got, i = dec.raw_decode(text, i)
-        out += [str(b) for b in got] if isinstance(got, list) else []
+        out += list(got) if isinstance(got, list) else []
         while i < len(text) and text[i].isspace():
             i += 1
     return out
+
+
+def bodies(paged: str) -> list[str]:
+    """`gh api --paginate --jq '[.[].body]'` prints one JSON array PER PAGE, back to back. Pure."""
+    return [str(b) for b in items(paged)]
 
 
 def cancel_runs(o: Opts, p: Pass, branch: str) -> list[int]:
@@ -248,9 +253,18 @@ def release_lane(o: Opts, p: Pass, prs: list[dict]) -> None:
 
 def comments_of(repo: str, n: int) -> list[str]:
     """EVERY comment body, oldest first. Paginated: the release/rerun markers counted from these
-    are budgets, and a first-page-only read silently reset one past 100 comments."""
-    return bodies(github.gh("api", "--paginate", f"repos/{repo}/issues/{n}/comments?per_page=100",
-                            "--jq", "[.[].body]").stdout or "")
+    are budgets, and a first-page-only read silently reset one past 100 comments. UNAUTHENTICATED:
+    any commenter's marker is read. Fail-safe only where a forged marker can merely SUPPRESS an action
+    (a rerun spent, a judgment already named); a marker that GRANTS an action reads `comments_by`."""
+    return [body for _, body in comments_by(repo, n)]
+
+
+def comments_by(repo: str, n: int) -> list[tuple[str, str]]:
+    """(author login, body) for EVERY comment, oldest first: the one reader, with the author kept, so
+    a caller can trust only its own token's markers (ci_kit/pr_baseretry.py, v1.36.0)."""
+    got = github.gh("api", "--paginate", f"repos/{repo}/issues/{n}/comments?per_page=100",
+                    "--jq", "[.[] | [(.user.login // \"\"), .body]]").stdout or ""
+    return [(str(x[0]), str(x[1])) if isinstance(x, list) and len(x) == 2 else ("", str(x)) for x in items(got)]
 
 
 def fetch(d: Path, *refs: str) -> None:
