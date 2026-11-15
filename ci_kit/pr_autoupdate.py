@@ -92,6 +92,7 @@ class Options:
     base_retry_cap: int = 0
     # the NO-AUTHOR case (pr_baseretry.bot_reason): exact author logins, empty = off. Shares the cap above.
     base_retry_bots: tuple[str, ...] = ()
+    base_retry_per_pass: int = pr_baseretry.PER_PASS  # candidates whose main runs are read per pass
     base_retry_error: str = ""  # an unreadable cap: the feature is refused, the pass goes on, the run is red
 
 
@@ -320,7 +321,7 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
         retry, e = pr_baseretry.assess(repo, armed, opts.required, opts.label, machinery | parked,
                                        lambda p: str(p.get("baseRefName") or default()), opts.base_retry_cap,
                                        _gh_read, pr_heal.comments_by, pr_heal.write, summary,
-                                       frozenset(opts.base_retry_bots))
+                                       frozenset(opts.base_retry_bots), opts.base_retry_per_pass)
         errors += e
     q = _train_plan(prs, armed, summary, opts, machinery | parked,
                     frozenset(cancel.restarted) if cancel else frozenset(), frozenset(retry))
@@ -546,17 +547,31 @@ def unlabel_resolved(repo: str, prs: list[dict], attempted: set[int], opts: Opti
     return errors
 
 
-def base_retry_cap(raw: str) -> tuple[int, str]:
-    """(cap, error) from CI_KIT_BASE_RETRY_CAP. Unreadable or negative = (0, why): that ONE feature is
-    refused and named, never the whole updater crashed (review of 6e69e0d, finding 7). Pure."""
+def base_retry_int(raw: str, name: str, default: int, lo: int, hi: int) -> tuple[int, str]:
+    """(value, error) for a base-retry input. Unreadable or outside [lo, hi] = (0, why): that ONE
+    feature is refused and named, never the whole updater crashed. Pure."""
     raw = (raw or "").strip()
     if not raw:
-        return pr_baseretry.CAP, ""
+        return default, ""
     try:
-        cap = int(raw)
+        v = int(raw)
     except ValueError:
-        return 0, f"base-retry-cap {raw!r} is not an integer: base-driven retry refused"
-    return (cap, "") if cap >= 0 else (0, f"base-retry-cap {cap} is negative: base-driven retry refused")
+        return 0, f"{name} {raw!r} is not an integer: base-driven retry refused"
+    return (v, "") if lo <= v <= hi else (0, f"{name} {v} is outside {lo}..{hi}: base-driven retry refused")
+
+
+def base_retry_cap(raw: str) -> tuple[int, str]:
+    """(cap, error) from CI_KIT_BASE_RETRY_CAP. A cap above pr_baseretry.CHAIN is refused: the count
+    walks at most CHAIN merges, so a larger cap could never be reached (2nd review of 0df4957)."""
+    return base_retry_int(raw, "base-retry-cap", pr_baseretry.CAP, 0, pr_baseretry.CHAIN)
+
+
+def base_retry_warning(bots: tuple[str, ...], cap: int, max_in_flight: int) -> str:
+    """A non-empty bot list that cannot act (cap 0 or no queue) is named, never silently inert. Pure."""
+    if not bots or (cap > 0 and max_in_flight > 0):
+        return ""
+    off = "base-retry-cap is 0" if cap <= 0 else "max-in-flight is 0 (no queue)"
+    return f"base-retry-bot-authors is set ({', '.join(bots)}) but {off}: the no-author case is OFF"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -588,6 +603,13 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         ap.error(str(e))
     cap, cap_error = base_retry_cap(os.environ.get("CI_KIT_BASE_RETRY_CAP", ""))
+    per_pass, per_error = base_retry_int(os.environ.get("CI_KIT_BASE_RETRY_MAX_PER_PASS", ""),
+                                         "base-retry-max-per-pass", pr_baseretry.PER_PASS, 1, 100)
+    if per_error:
+        cap, cap_error = 0, "; ".join(x for x in (cap_error, per_error) if x)
+    bots = tuple(sorted({s.strip() for s in os.environ.get("CI_KIT_BASE_RETRY_BOT_AUTHORS", "").split(",") if s.strip()}))
+    if warn := base_retry_warning(bots, cap, args.max_in_flight):
+        print(f"::warning::{warn}")
     opts = Options(review_workflow=args.review_workflow, tracker=args.tracker, relock=args.relock,
                    label=args.label, max_in_flight=args.max_in_flight,
                    required=tuple(s.strip() for s in args.required_checks.split(",") if s.strip()),
@@ -603,9 +625,8 @@ def main(argv: list[str] | None = None) -> int:
                    train_stale_min=float(os.environ.get("CI_KIT_TRAIN_STALE_MIN", "").strip() or 90),
                    cancel_doomed=os.environ.get("CI_KIT_CANCEL_DOOMED", "true").strip().lower() not in ("false", "0", "no"),
                    ladder=pr_ladder.Config.from_env(),
-                   base_retry_cap=cap, base_retry_error=cap_error,
-                   base_retry_bots=tuple(sorted({s.strip() for s in os.environ.get(
-                       "CI_KIT_BASE_RETRY_BOT_AUTHORS", "").split(",") if s.strip()})))
+                   base_retry_cap=cap, base_retry_error=cap_error, base_retry_bots=bots,
+                   base_retry_per_pass=per_pass)
     summary: list[str] = []
     relock: list[int] = []
     healing: list[dict] = []

@@ -67,7 +67,8 @@ PARKED = "queue:parked"  # ci_kit/pr_sched.PARKED, literal: pr_sched imports pr_
 CAP = 0          # default OFF: one repo turns it on first and is watched
 NEAR = 3         # commits before the merge base read for the RED observation
 LOOKBACK = 10    # main commits the PR lacks read (newest first) for the GREEN one
-CHAIN = 30       # first-parent merge steps walked when counting retries
+CHAIN = 30       # first-parent merge steps walked when counting retries; also the cap's ceiling
+PER_PASS = 3     # candidates whose evidence (main's runs) is read per pass, lowest PR number first
 MARK = "<!-- smart-merge:base-retry head={head} base={base} -->"
 SPENT = "<!-- smart-merge:base-retry-spent head={head} -->"
 _MARK = re.compile(r"<!-- smart-merge:base-retry head=([0-9a-f]{40})\b")
@@ -165,10 +166,13 @@ def bot_reason(p: dict, names: list[str], ev: Evidence, bots: frozenset[str]) ->
     red at its base -- a check red only on the PR's own run (a date-dependent test main's runs predate)
     gets ONE look per base move: main GREEN on every failing check now (so a check main never runs --
     a review gate's verdict on the diff, which merging main does not change -- holds it), and main
-    MOVED after the PR's red run finished. Pure."""
+    MOVED after the PR's red run finished. The author must also BE a bot account (GraphQL
+    `__typename` "Bot"): a human who registered a configured login is held. Pure."""
     who = str((p.get("author") or {}).get("login") or "")
     if who not in bots:
         return f"author `{who}` is not a configured no-author bot"
+    if (p.get("author") or {}).get("__typename") != "Bot":
+        return f"author `{who}` is not a bot account"
     since = [r for r in (green_since(k, ev) for k in ev.failing) if r]
     if since:
         return "; ".join(since)
@@ -182,18 +186,19 @@ def bot_reason(p: dict, names: list[str], ev: Evidence, bots: frozenset[str]) ->
 
 def count(head: str, parents: Callable[[str], list[str]], retried: set[str], cap: int, limit: int = CHAIN) -> int:
     """Retries since the last non-updater commit: walk first parents through 2-parent merges from
-    `head`, counting the (trusted) retried heads met. An author commit or a rebase ends it. Pure
-    given `parents`."""
+    `head`, counting the (trusted) retried heads met. An author commit or a rebase ends it. A walk
+    that RUNS OUT (still on merges after `limit` steps) cannot see the chain's start, so it counts as
+    SPENT (= cap): fail closed, never unbounded. Pure given `parents`."""
     n, h = 0, head
     for _ in range(limit):
         ps = parents(h)
         if len(ps) != 2:
-            break
+            return n
         h = ps[0]
         n += h in retried
         if n >= cap:
-            break
-    return n
+            return n
+    return max(n, cap)
 
 
 def decide(head: str, retried: set[str], spent: set[str], laddered: bool, reason: str, done: int,
@@ -212,11 +217,17 @@ def decide(head: str, retried: set[str], spent: set[str], laddered: bool, reason
     return "retry", f"main went red -> green on its failing check(s): base-driven retry {done + 1} of {cap}"
 
 
-def mark_comment(head: str, base: str, n: int, cap: int, checks: list[str]) -> str:
+FIXED_ON_MAIN = "main was red on it at this PR's base and is green since"
+NO_AUTHOR = ("no-author case: main is green on it now and moved after this PR's red run; "
+             "main was NOT seen red on it at this PR's base")
+
+
+def mark_comment(head: str, base: str, n: int, cap: int, checks: list[str], evidence_said: str) -> str:
+    """The marker + one line stating ONLY the evidence this mode computed (`FIXED_ON_MAIN` | `NO_AUTHOR`)."""
     return "\n".join([
         MARK.format(head=head, base=base),
-        f"**smart auto-merge**: red at `{head[:12]}` on {', '.join(f'`{c}`' for c in checks)}; main was red on it at this "
-        f"PR's base and is green since (`{base[:12]}`). Updating the branch from main: base-driven retry {n} of {cap}."])
+        f"**smart auto-merge**: red at `{head[:12]}` on {', '.join(f'`{c}`' for c in checks)}; {evidence_said} "
+        f"(main at `{base[:12]}`). Updating the branch from main: base-driven retry {n} of {cap}."])
 
 
 def spent_comment(head: str, cap: int, checks: list[str]) -> str:
@@ -299,12 +310,33 @@ def whoami(write: Gh) -> str:
     return (r.stdout or "").strip() if r.returncode == 0 else ""
 
 
+def why_held(p: dict, names: list[str], ev: Evidence, bots: frozenset[str]) -> tuple[str, str]:
+    """(reason it is held | '' = retry, the evidence the marker may state). The red -> green rule
+    first; the no-author case only for a configured bot whose every red check was identified. Pure."""
+    lost = sorted(set(names) - {k[2] for k in ev.failing})  # every red check must be identified
+    if not ev.failing:
+        return "its failing checks have no check run at its head", FIXED_ON_MAIN
+    reason = "; ".join([f"`{c}` not identified at its head" for c in lost]
+                       + [r for r in (transition(k, ev) for k in ev.failing) if r])
+    bot = str((p.get("author") or {}).get("login") or "") in bots
+    if not reason or not bot or lost:
+        return reason, FIXED_ON_MAIN
+    no_author = bot_reason(p, names, ev, bots)  # the second, separately switched reason
+    return (f"{reason}; no-author case: {no_author}", FIXED_ON_MAIN) if no_author else ("", NO_AUTHOR)
+
+
 def assess(repo: str, armed: list[dict], required: tuple[str, ...], conflict_label: str, machinery: frozenset[int],
            base_of: Callable[[dict], str], cap: int, read: Gh, comments: Callable[[str, int], list[tuple[str, str]]],
-           write: Gh, summary: list[str], bots: frozenset[str] = frozenset()) -> tuple[dict[int, str], int]:
-    """({PR: the marker comment to write before its update}, errors). A spent PR is surfaced here."""
+           write: Gh, summary: list[str], bots: frozenset[str] = frozenset(),
+           per_pass: int = PER_PASS) -> tuple[dict[int, str], int]:
+    """({PR: the marker comment to write before its update}, errors). A spent PR is surfaced here.
+    READS ARE BOUNDED: at most `per_pass` candidates (lowest PR number first) get main's runs read
+    this pass; the rest are named as skipped. A candidate the record alone settles (spent, already
+    retried at this head, ladder-taken) reads only its comments and does not use up the bound, so a
+    long-spent low PR cannot starve a higher one."""
     retry: dict[int, str] = {}
     errors = 0
+    read_left, skipped = per_pass, []
     todo = [p for p in sorted(armed, key=lambda x: int(x["number"]))
             if not candidate(p, required, conflict_label, machinery)]
     if cap <= 0 or not todo:
@@ -317,28 +349,25 @@ def assess(repo: str, armed: list[dict], required: tuple[str, ...], conflict_lab
     for p in todo:
         n, head = int(p["number"]), str(p["headRefOid"])
         names = redclass.red_checks(p.get("statusCheckRollup"), required)
-        ev, done, why_ok = Evidence([], [], []), 0, ""
+        ev, done, said = Evidence([], [], []), 0, FIXED_ON_MAIN
         try:
             notes = comments(repo, n)
             retried, spent = trusted(notes, me, _MARK), trusted(notes, me, _SPENT)
             laddered = any(h == head for h, *_ in pr_ladder.marks([b for _, b in notes], pr_ladder._HEAL))
             action, why = decide(head, retried, spent, laddered, "", 0, cap)
+            if action in ("retry", "spent") and read_left <= 0:
+                skipped.append(n)
+                continue
             if action in ("retry", "spent"):  # the record did not settle it: read main
-                bot = str((p.get("author") or {}).get("login") or "") in bots
-                ev = evidence(repo, p, base_of(p), names, read, since=bot)
-                lost = sorted(set(names) - {k[2] for k in ev.failing})  # every red check must be identified
-                reason = "; ".join([f"`{c}` not identified at its head" for c in lost]
-                                   + [r for r in (transition(k, ev) for k in ev.failing) if r]) if ev.failing else \
-                    "its failing checks have no check run at its head"
-                if reason and bot and not lost and ev.failing:  # the second, separately switched reason
-                    no_author = bot_reason(p, names, ev, bots)
-                    reason = "" if not no_author else f"{reason}; no-author case: {no_author}"
-                    why_ok = "" if no_author else (f"NO-AUTHOR CASE (bot `{p['author']['login']}`, no red-at-base "
-                                                   "evidence): main green on its failing check(s) and moved since its red run")
+                read_left -= 1
+                ev = evidence(repo, p, base_of(p), names, read,
+                              since=str((p.get("author") or {}).get("login") or "") in bots)
+                reason, said = why_held(p, names, ev, bots)
                 done = count(head, parents_of(repo, read), retried, cap) if not reason and retried else 0
                 action, why = decide(head, retried, spent, laddered, reason, done, cap)
-                if action == "retry" and why_ok:
-                    why = f"{why_ok}: base-driven retry {done + 1} of {cap}"
+                if action == "retry" and said == NO_AUTHOR:
+                    why = (f"NO-AUTHOR CASE (bot `{p['author']['login']}`, no red-at-base evidence): main green on its "
+                           f"failing check(s) and moved since its red run: base-driven retry {done + 1} of {cap}")
         except (subprocess.CalledProcessError, ValueError, KeyError) as e:
             errors += 1
             print(f"::error::#{n}: base-driven retry could not read its evidence: {e} {(getattr(e, 'stderr', '') or '')[-300:]}")
@@ -346,13 +375,16 @@ def assess(repo: str, armed: list[dict], required: tuple[str, ...], conflict_lab
             continue
         line = f"#{n}: red and behind -> base-driven {action}: {why}"
         if action == "retry":
-            retry[n] = mark_comment(head, ev.base or head, done + 1, cap, names)
+            retry[n] = mark_comment(head, ev.base or head, done + 1, cap, names, said)
         elif action == "spent":
             errors += 1  # loud once per head: the run goes red, the comment is the outside record
             print(f"::error::#{n}: {why}")
             r = write("pr", "comment", str(n), "-R", repo, "--body-file", "-", input_text=spent_comment(head, cap, names))
             line += "" if r.returncode == 0 else "; its comment FAILED"
         summary.append(line)
+    if skipped:
+        summary.append(f"base-driven retry: {len(skipped)} candidate(s) NOT assessed this pass (read bound "
+                       f"{per_pass} per pass, lowest PR number first): " + ", ".join(f"#{x}" for x in skipped))
     return retry, errors
 
 

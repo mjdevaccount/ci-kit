@@ -351,6 +351,15 @@ def test_a_red_check_main_cannot_speak_for_holds_the_whole_pr(monkeypatch: pytes
     assert w.puts() == [] and any("`review` not identified at its head" in s for s in summary), summary
 
 
+def test_a_red_pr_with_no_check_run_at_its_head_is_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    review = {"__typename": "StatusContext", "context": "review", "state": "FAILURE"}
+    for bots in ((), ("renovate",)):
+        w = World(monkeypatch, [_pr(7, review, **BOT)])
+        rc, summary = _bot_run(w, bots=bots)
+        assert w.puts() == [] and w.comments == []
+        assert any("its failing checks have no check run at its head" in s for s in summary), summary
+
+
 def test_the_cap_reaches_the_options_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[upd.Options] = []
     monkeypatch.setattr(upd, "run", lambda repo, s, r, opts, h=None: seen.append(opts) or 0)
@@ -401,6 +410,7 @@ def test_the_same_pr_by_a_human_is_held_as_today(monkeypatch: pytest.MonkeyPatch
     rc, summary = _bot_run(w)
     assert rc == 0 and w.puts() == [] and w.comments == []
     assert any("never red on main at its base" in s for s in summary)
+    assert not any("no-author case" in s for s in summary)  # the second reason is not even consulted
     assert not any(L2 in x for r in w.reads for x in r)  # a human PR reads nothing past the base
 
 
@@ -461,3 +471,71 @@ def test_bot_reason_matches_the_author_exactly() -> None:
     assert br.bot_reason(_pr(649, **BOT), ["test"], ev, bots) == ""
     for login in ("someone", "renovate[bot]", "app/renovate", "Renovate"):
         assert "not a configured no-author bot" in br.bot_reason(_pr(649, author={"login": login}), ["test"], ev, bots)
+
+
+# ── 2nd review of 0df4957: bounded cap, honest marker text, Bot accounts only, bounded reads ─────
+def test_a_cap_above_the_walk_is_refused_and_a_walk_that_runs_out_is_spent(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert upd.base_retry_cap(str(br.CHAIN)) == (br.CHAIN, "")
+    cap, err = upd.base_retry_cap(str(br.CHAIN + 1))
+    assert cap == 0 and "outside 0..30" in err
+    loop = lambda s: [s, MB]  # noqa: E731  -- merges forever: the chain's start is never seen
+    assert br.count(H, loop, {X}, 2) == 2 and br.count(H, loop, set(), 5, limit=3) == 5
+    assert br.count(H2, lambda s: {H2: [H, L1]}.get(s, []), {X}, 5) == 0  # a walk that ENDS is counted, not spent
+    # through run(): H2 = merge of H, H merges forever, one trusted marker elsewhere -> spent, never retried
+    w = World(monkeypatch, [_pr(7, headRefOid=H2)], parents={H2: [H, L1], H: [H, MB]}, notes={7: [_mark(H0)]})
+    rc, summary = _run(w)
+    assert rc == 1 and w.puts() == [] and br.SPENT.format(head=H2) in w.comments[0][1]
+
+
+def test_the_marker_states_only_the_evidence_its_mode_computed(monkeypatch: pytest.MonkeyPatch) -> None:
+    w = World(monkeypatch, [_pr(7)])
+    _run(w)
+    assert br.FIXED_ON_MAIN in w.comments[0][1] and br.NO_AUTHOR not in w.comments[0][1]
+    bot = World(monkeypatch, [_pr(649, **BOT)], main=ALWAYS_GREEN)
+    _bot_run(bot)
+    assert br.NO_AUTHOR in bot.comments[0][1] and br.FIXED_ON_MAIN not in bot.comments[0][1]
+    assert "NOT seen red" in bot.comments[0][1]
+
+
+@pytest.mark.parametrize("author", [{"__typename": "User", "login": "renovate"}, {"login": "renovate"}])
+def test_a_user_who_took_a_bots_login_is_held(monkeypatch: pytest.MonkeyPatch, author: dict) -> None:
+    w = World(monkeypatch, [_pr(649, author=author)], main=ALWAYS_GREEN)
+    rc, summary = _bot_run(w)
+    assert rc == 0 and w.puts() == [] and w.comments == []
+    assert any("is not a bot account" in s for s in summary), summary
+
+
+def test_reads_are_bounded_per_pass_lowest_number_first_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+    w = World(monkeypatch, [_pr(n) for n in (5, 1, 4, 2, 3)])
+    rc, summary = _run(w, slots=5, base_retry_per_pass=2)
+    assert sum("/compare/" in x for r in w.reads for x in r) == 2
+    assert sorted(w.puts()) == [1, 2]
+    assert any("3 candidate(s) NOT assessed" in s and "#3, #4, #5" in s for s in summary), summary
+    # a low PR the record settles (spent at its head) reads no evidence and does not use up the bound
+    spent = (ME, br.SPENT.format(head=H2))
+    w2 = World(monkeypatch, [_pr(1, headRefOid=H2), _pr(2), _pr(3)], notes={1: [spent]})
+    rc, summary = _run(w2, slots=3, base_retry_per_pass=1)
+    assert w2.puts() == [2] and any("#1: red and behind -> base-driven quiet" in s for s in summary)
+    assert any("1 candidate(s) NOT assessed" in s and "#3" in s for s in summary), summary
+
+
+def test_bot_authors_that_cannot_act_warn_and_a_bad_bound_refuses(monkeypatch: pytest.MonkeyPatch,
+                                                                   capsys: pytest.CaptureFixture[str]) -> None:
+    seen: list[upd.Options] = []
+    monkeypatch.setattr(upd, "run", lambda repo, s, r, opts, h=None: seen.append(opts) or 0)
+    for var in ("GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "CI_KIT_BASE_RETRY_CAP", "CI_KIT_BASE_RETRY_MAX_PER_PASS"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("CI_KIT_BASE_RETRY_BOT_AUTHORS", "renovate")
+    upd.main(["--repo", "o/r", "--max-in-flight", "1"])
+    assert "::warning::base-retry-bot-authors is set (renovate) but base-retry-cap is 0" in capsys.readouterr().out
+    monkeypatch.setenv("CI_KIT_BASE_RETRY_CAP", "1")
+    upd.main(["--repo", "o/r"])
+    assert "::warning::" in capsys.readouterr().out and "max-in-flight is 0" in upd.base_retry_warning(("renovate",), 1, 0)
+    upd.main(["--repo", "o/r", "--max-in-flight", "1"])
+    assert "::warning::" not in capsys.readouterr().out and seen[-1].base_retry_per_pass == br.PER_PASS
+    monkeypatch.setenv("CI_KIT_BASE_RETRY_MAX_PER_PASS", "0")
+    upd.main(["--repo", "o/r", "--max-in-flight", "1"])
+    assert seen[-1].base_retry_cap == 0 and "base-retry-max-per-pass" in seen[-1].base_retry_error
+    monkeypatch.setenv("CI_KIT_BASE_RETRY_MAX_PER_PASS", "7")
+    upd.main(["--repo", "o/r", "--max-in-flight", "1"])
+    assert seen[-1].base_retry_per_pass == 7 and seen[-1].base_retry_cap == 1
