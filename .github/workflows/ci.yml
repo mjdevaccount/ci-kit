@@ -74,6 +74,18 @@ jobs:
         uses: ./
         with:
           tool: ci-hidden-unicode
+      - name: declared-literal selftest (through the action; planted literals fire, comments and the declared file pass, no rule is 2)
+        uses: ./
+        with:
+          tool: ci-declared-literal
+          args: --selftest
+      - name: declared-literal blind direction (no rule given -> exit 2, never a clean 0)
+        run: |
+          set +e
+          uvx --quiet --from . ci-declared-literal
+          rc=$?
+          set -e
+          [ "$rc" -eq 2 ] || { echo "::error::expected exit 2 (no policy), got $rc"; exit 1; }
       - name: env-reads selftest (through the action)
         uses: ./
         with:
