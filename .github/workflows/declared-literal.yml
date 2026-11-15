@@ -7,7 +7,8 @@
 #       with:
 #         args: "@ci/literals.args"
 #
-#   # ci/literals.args -- one argument per line; blank and `#` lines are notes
+#   # ci/literals.args -- one argument per line; blank and `#` lines are notes, never directly
+#   # after a flag that takes a value (exit 2); the file resolves against the checkout root
 #   --rule
 #   docs-net
 #   --pattern=\b192\.0\.2\.\d{1,3}\b
@@ -48,23 +49,22 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
-      # `args: --selftest` would make BOTH steps prove the kit and neither look at the tree
-      - name: the policy is a policy, not the selftest
-        env:
-          ARGS: ${{ inputs.args }}
-        run: |
-          set -f
-          for a in $ARGS; do
-            if [ "$a" = "--selftest" ]; then
-              echo "::error::args carries --selftest: the gate step would never scan the tree"; exit 2
-            fi
-          done
-      # the gate first: a selftest-only run would be green while never looking at the tree
+      # the gate first, and it must leave a RECEIPT: an exit 0 that never scanned (a flag that
+      # short-circuits, a policy that only runs the kit's own proof) writes none
       - name: no declared literal outside its declared source
         uses: mjdevaccount/ci-kit@v1
+        env:
+          CI_KIT_DECLARED_LITERAL_RECEIPT: ${{ runner.temp }}/declared-literal.receipt
         with:
           tool: ci-declared-literal
           args: ${{ inputs.args }}
+      - name: the gate step scanned the tree
+        env:
+          RECEIPT: ${{ runner.temp }}/declared-literal.receipt
+        run: |
+          cat "$RECEIPT" 2>/dev/null || true
+          grep -Eq '^read=[1-9][0-9]* rules=[1-9]' "$RECEIPT" 2>/dev/null \
+            || { echo "::error::the gate step left no scan receipt: it exited without reading the tree"; exit 2; }
       - name: declared-literal selftest
         uses: mjdevaccount/ci-kit@v1
         with:

@@ -102,10 +102,13 @@ def test_utf16_powershell_is_decoded_by_bom(new_repo) -> None:
     assert res.returncode == 1 and _hits(res.stdout) == {"u.ps1:2"}, res.stdout
 
 
-def test_nul_bytes_under_a_text_suffix_without_bom_exit_2(new_repo) -> None:
-    r = _repo(new_repo, {"u.ps1": f"$gw = '{NET}1'".encode("utf-16-le"), "a.sh": "x=1" + NL})
+@pytest.mark.parametrize("rel", ["u.ps1", ".env", "Caddyfile", "Dockerfile", "x.tmpl", "cjk.sh"])
+@pytest.mark.parametrize("enc", ["utf-16-le", "utf-16-be"])
+def test_utf16_without_a_bom_is_read_whatever_the_name(new_repo, rel: str, enc: str) -> None:
+    body = "# 设置网关" + NL + f"GW={NET}1" + NL
+    r = _repo(new_repo, {rel: body.encode(enc), "a.sh": "x=1" + NL})
     res = _run(r, *RULE)
-    assert res.returncode == 2 and "u.ps1" in res.stderr, res.stdout + res.stderr
+    assert res.returncode == 1 and _hits(res.stdout) == {f"{rel}:2"}, res.stdout + res.stderr
 
 
 def test_a_nul_separator_in_utf8_text_is_read(new_repo) -> None:
@@ -311,11 +314,102 @@ def test_predicate_units() -> None:
     assert dl.findings_in(f"x={NET}1\n", "a.yml", rules) == [(1, "n", f"x={NET}1")]
     assert dl.findings_in(f"x={NET}1\n", "d.env", rules) == []
     assert dl.findings_in(f"  # x={NET}1\n", "a.yml", rules) == []
-    assert dl.strip_ps("a <# b #> c <# d", "") == ("a  c ", "<#")
-    assert dl.strip_ps("'<#' x", "") == ("'<#' x", "")
-    assert dl.strip_ps("x # <# y", "") == ("x ", "")
+    floor = dl._PsFloor()
+    assert floor.live("a <# b #> c <# d") == "a  c " and floor.block
+    strict = dl._PsStrict()
+    assert strict.live("'<#' x") == "'<#' x" and not strict.block
+    assert strict.live("x # <# y") == "x " and not strict.block
+    assert strict.live("gw#y") == "gw#y"
 
 
 def test_selftest_passes(tmp_path: Path) -> None:
     res = run_tool("declared_literal", tmp_path, "--selftest")
     assert res.returncode == 0, res.stdout + res.stderr
+
+
+# ---------------------------------------------------------------- never looser, never a silent 0
+def test_powershell_hash_shapes_that_are_code_stay_live(new_repo) -> None:
+    """`#` mid-word, in a URL, backtick-escaped, or inside a string carried across lines is code."""
+    r = _repo(new_repo, {"r.ps1": f"ping gw#{NET}1" + NL + f"Start-Process http://h/#/{NET}1" + NL
+                         + f"echo `#{NET}1" + NL + '$m = "first' + NL + f'second # {NET}1"' + NL})
+    res = _run(r, *RULE)
+    assert _hits(res.stdout) == {"r.ps1:1", "r.ps1:2", "r.ps1:3", "r.ps1:5"}, res.stdout
+
+
+def test_here_string_terminator_closes_only_at_column_0(new_repo) -> None:
+    r = _repo(new_repo, {"s.ps1": '$s = @"' + NL + '  "@"' + NL + "<# still text" + NL
+                         + f"$v = '{NET}1'" + NL + '"@' + NL})
+    res = _run(r, *RULE)
+    assert _hits(res.stdout) == {"s.ps1:4"}, res.stdout
+
+
+@pytest.mark.parametrize("args", [["-h"], ["--help"], ["--version"], ["--help", *RULE], [*RULE, "-h"],
+                                  ["--selftest", "--help"], ["--selftest", "-h"]])
+def test_no_flag_short_circuits_to_0(new_repo, args: list[str]) -> None:
+    r = _repo(new_repo, {"a.sh": "x=1" + NL})
+    res = _run(r, *args)
+    assert res.returncode == 2 and "CANNOT CHECK" in res.stderr, (args, res.stdout + res.stderr)
+
+
+def test_help_inside_an_args_file_exits_2(new_repo) -> None:
+    r = _repo(new_repo, {"a.sh": "x=1" + NL})
+    res = _run(r, f"@{_policy(new_repo, ('--help' + NL).encode())}")
+    assert res.returncode == 2, res.stdout + res.stderr
+
+
+def test_receipt_written_only_by_a_scan(new_repo, monkeypatch) -> None:
+    r = _repo(new_repo, {"a.sh": f"GW={NET}1" + NL, "b.sh": "x=1" + NL})
+    receipt = r.parent / "receipt.txt"
+    monkeypatch.setenv(dl.RECEIPT_ENV, str(receipt))
+    assert _run(r, *RULE).returncode == 1
+    assert receipt.read_text(encoding="utf-8") == "read=2 rules=1 findings=1" + NL
+    receipt.unlink()
+    for args in (["--selftest"], ["--help"], ["--pattern", "(bad", "--example", "x"]):
+        _run(r, *args)
+        assert not receipt.exists(), args
+
+
+def test_overflowing_pattern_is_cannot_check(new_repo) -> None:
+    res = _run(_repo(new_repo, {"a.sh": "x=1" + NL}), "--pattern=a{99999999999999999999}", "--example=a")
+    assert res.returncode == 2 and "CANNOT CHECK" in res.stderr and "Traceback" not in res.stderr, res.stderr
+
+
+def test_unexpected_error_is_cannot_check(new_repo, monkeypatch) -> None:
+    def boom(*_a, **_k):
+        raise RuntimeError("kaboom")
+    root = _repo(new_repo, {"a.sh": "x=1" + NL})
+    monkeypatch.setattr(dl, "scan", boom)
+    assert dl.main([*RULE, "--root", str(root)]) == 2
+
+
+def test_exempt_suffix_file_declared_by_one_rule_stays_exempt_for_the_others(new_repo) -> None:
+    r = _repo(new_repo, {"values.md": f"A={NET}1" + NL + f"B={NET2}1" + NL, "a.sh": "x=1" + NL})
+    res = _run(r, "--exempt-suffix", ".md", "--rule", "one", "--pattern", RX, "--example", EX,
+               "--declared", "values.md", "--rule", "two", "--pattern", r"\b198\.51\.100\.\d+",
+               "--example", f"h={NET2}1")
+    assert res.returncode == 0, res.stdout + res.stderr
+    res = _run(r, "--exempt-suffix", ".md", "--pattern", r"\b203\.0\.113\.\d+", "--example", "h=203.0.113.1",
+               "--declared", "values.md")
+    assert res.returncode == 2 and "values.md is present but holds no match" in res.stderr, res.stderr
+
+
+def test_comment_prefix_cannot_touch_powershell(new_repo) -> None:
+    r = _repo(new_repo, {"x.ps1": f"REM {NET}1" + NL, "x.bat": f"REM {NET}1" + NL})
+    assert _run(r, *RULE, "--comment-prefix", ".ps1=REM").returncode == 2
+    res = _run(r, *RULE, "--comment-prefix", "*=REM")
+    assert res.returncode == 1 and _hits(res.stdout) == {"x.ps1:1"}, res.stdout
+
+
+@pytest.mark.parametrize("gap", ["# a note", "", "   "])
+def test_a_note_after_a_value_flag_exits_2(new_repo, gap: str) -> None:
+    r = _repo(new_repo, {"a.sh": f"GW={NET}1" + NL})
+    body = "--pattern" + NL + gap + NL + RX + NL + f"--example={EX}" + NL
+    res = _run(r, f"@{_policy(new_repo, body.encode())}")
+    assert res.returncode == 2 and "right after --pattern" in res.stderr, res.stderr
+
+
+def test_a_hash_value_travels_in_the_equals_form(new_repo) -> None:
+    r = _repo(new_repo, {"a.sh": f"GW={NET}1" + NL})
+    body = f"--pattern={RX}" + NL + f"--example={EX}" + NL + "--message=#1 use the env file" + NL
+    res = _run(r, f"@{_policy(new_repo, body.encode())}")
+    assert res.returncode == 1 and "#1 use the env file" in res.stdout, res.stdout + res.stderr
