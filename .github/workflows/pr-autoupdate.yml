@@ -209,6 +209,10 @@ on:
         description: a dispatch with no heal record after this long is paged by the next pass (default = every pr-heal job timeout, 95, plus 40 for the sealed-runner wait; ci_kit/pr_ladder.py STALE_MIN)
         type: number
         default: 135
+      base-retry-cap:
+        description: consecutive base-driven retries of an armed PR held red + BEHIND whose failing checks main has since turned green (ci_kit/pr_baseretry.py; once per head, after every green PR; at the cap a marker comment + a red pass; 0 = off)
+        type: number
+        default: 2
     secrets:
       token:
         description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs --, with train-workflow, which dispatches, and with cancel-doomed-runs), administration read (cancel-doomed-runs reads whether the base is strict), commit statuses RW with queue-hold, on the caller repo
@@ -279,6 +283,8 @@ jobs:
       CI_KIT_HEAL_CLAUDE_PER_PR: ${{ inputs.heal-claude-per-pr }}
       CI_KIT_HEAL_PER_PR: ${{ inputs.heal-per-pr }}
       CI_KIT_HEAL_STALE_MIN: ${{ inputs.heal-stale-minutes }}
+      # an env var, never a flag (the older-@v1-tool reason above)
+      CI_KIT_BASE_RETRY_CAP: ${{ inputs.base-retry-cap }}
       CI_KIT_EVENT: ${{ github.event_name }}
       CI_KIT_BEFORE: ${{ github.event.before }}
       CI_KIT_SHA: ${{ github.sha }}

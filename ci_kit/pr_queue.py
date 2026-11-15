@@ -19,7 +19,9 @@ The rules, per armed PR, from `gh pr list --json mergeStateStatus,statusCheckRol
 - BEHIND or UNKNOWN with a FAILING check on its head: held. It cannot merge however current it
   is; the author's fix pushes a new head, and that push runs its checks. UNLESS every failing
   check failed as MACHINERY (`machinery`, from pr_heal): then it is eligible, and the update is
-  its fresh run.
+  its fresh run. Or UNLESS main has since gone green on every failing check (`base_retry`, from
+  ci_kit/pr_baseretry.py: the fix landed on the BASE, so no author push is coming): then it is
+  eligible AFTER every green one, bounded once per head and a consecutive cap there.
 - BEHIND or UNKNOWN with a check still RUNNING: held, not updated. An update would cancel that
   run. The caller re-runs the updater when a check workflow completes (`workflow_run`).
 - BEHIND or UNKNOWN with every present check green: eligible. The free slots go to the lowest
@@ -82,7 +84,8 @@ def landing_order(p: dict) -> int:
 
 
 def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = (),
-         machinery: frozenset[int] = frozenset(), restarted: frozenset[int] = frozenset()) -> Plan:
+         machinery: frozenset[int] = frozenset(), restarted: frozenset[int] = frozenset(),
+         base_retry: frozenset[int] = frozenset()) -> Plan:
     """Split the armed PRs into update / in flight / held. Pure: the policy the tests pin.
 
     `machinery` = PRs whose every failing check is MACHINERY (ci_kit/redclass.py, read by
@@ -92,12 +95,17 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = (),
 
     `restarted` = BEHIND PRs whose running checks this pass just CANCELLED (ci_kit/doomed_runs:
     they could never merge). "Checks still running" no longer holds them -- nothing is running
-    and no completion is coming to wake the next pass -- so they are eligible now, in order."""
+    and no completion is coming to wake the next pass -- so they are eligible now, in order.
+
+    `base_retry` = red BEHIND PRs whose failing checks main has turned green since their merge base
+    (ci_kit/pr_baseretry.py decides, and bounds, which). Eligible, but queued AFTER every green
+    eligible PR: a red PR's retry never takes a slot a green ready PR could use."""
     out = Plan()
     if max_in_flight <= 0:
         out.update = list(armed)
         return out
     eligible: list[dict] = []
+    retry: list[dict] = []  # base-driven retries: after every green eligible PR
     for p in sorted(armed, key=landing_order):
         merge = (p.get("mergeStateStatus") or "UNKNOWN").upper()
         checks = check_state(p.get("statusCheckRollup"), required)
@@ -108,12 +116,15 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = (),
                 out.in_flight.append(p)
             else:
                 out.held.append((p, f"current with main, checks {checks}"))
+        elif checks == "failing" and p.get("number") in base_retry and p.get("number") not in machinery:
+            retry.append(p)
         elif checks == "failing" and p.get("number") not in machinery:
             out.held.append((p, "behind, a check is failing on its head (the author's fix re-queues it)"))
         elif checks == "running" and p.get("number") not in restarted:
             out.held.append((p, "behind, checks still running (an update would cancel them)"))
         else:
             eligible.append(p)
+    eligible += retry
     slots = max(0, max_in_flight - len(out.in_flight))
     out.update += eligible[:slots]
     out.spare = eligible[slots:]
