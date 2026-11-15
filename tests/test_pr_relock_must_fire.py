@@ -191,6 +191,28 @@ def test_a_moved_head_is_never_pushed_over_must_fire(repo, tmp_path, monkeypatch
     assert result == "moved", why
 
 
+def test_a_bad_artifact_is_refused_by_the_push_itself_must_fire(repo, tmp_path, monkeypatch) -> None:
+    """THROUGH relock_push, not artifact_faults: an extra file, then a symlinked lockfile, is refused
+    and the remote branch never moves (apply alone would ignore the one and follow the other)."""
+    bare, _, base, head = repo
+    art = tmp_path / "art"
+    _lock(_clone(bare, tmp_path, "lock", head), base, art, STAND_IN)
+    (art / "files" / "extra.txt").write_text("x\n")
+    result, why, _ = _push(bare, tmp_path, "push1", art, head, base, monkeypatch)
+    assert result == "refused" and "extra.txt" in why, why
+    assert g(bare, "rev-parse", REF) == head
+    (art / "files" / "extra.txt").unlink()
+    (tmp_path / "planted").write_text("version = 9.9.9\n")
+    (art / "files" / "uv.lock").unlink()
+    try:
+        os.symlink(tmp_path / "planted", art / "files" / "uv.lock")
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform will not create a symlink for an unprivileged user (Linux CI runs it)")
+    result, why, _ = _push(bare, tmp_path, "push2", art, head, base, monkeypatch)
+    assert result == "refused" and "symlink" in why, why
+    assert g(bare, "rev-parse", REF) == head
+
+
 def test_an_untracked_lockfile_is_never_written_must_fire(repo, tmp_path) -> None:
     bare, _, base, head = repo
     art = _art(tmp_path, {"sub/uv.lock": "write"}, base=base, head=head)    # an artifact that IS clean for the path

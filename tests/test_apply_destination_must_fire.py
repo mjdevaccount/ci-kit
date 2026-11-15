@@ -102,3 +102,72 @@ def test_the_relock_push_refuses_a_linked_destination_red_must_fire(linked, tmp_
     result, why, sha = pr_relock.relock_push(d, art, paths=["uv.lock"], head=head, base=base, ref="renovate/x", repo="o/r")
     assert result == "refused" and "destination symlink" in why and not sha, why
     assert (d / ".git" / "config").read_text() == before
+
+
+def test_deleting_a_tracked_symlink_is_not_a_write_through_it_must_not_fire(linked, tmp_path) -> None:
+    """`git rm` removes the link itself and never follows it: the heal tier's delete of one goes through."""
+    d, base, head = linked
+    before = (d / ".git" / "config").read_text()
+    art = _artifact(tmp_path, "uv.lock", base, head)
+    m = json.loads((art / "manifest.json").read_text())
+    (art / "manifest.json").write_text(json.dumps({**m, "files": {"uv.lock": "delete"}}))
+    result, why = pr_apply.apply(d, art, head=head, base=base, ref="renovate/x", regen_globs=[], max_lines=300)
+    assert result == "ready", why
+    assert "delete mode 120000 uv.lock" in g(d, "show", "--summary", "--format=", "HEAD")
+    assert (d / ".git" / "config").read_text() == before
+
+
+def test_a_delete_through_a_linked_parent_is_still_refused_must_fire(linked, tmp_path, monkeypatch) -> None:
+    d, base, head = linked
+    art = _artifact(tmp_path, "sub/uv.lock", base, head)
+    m = json.loads((art / "manifest.json").read_text())
+    (art / "manifest.json").write_text(json.dumps({**m, "files": {"sub/uv.lock": "delete"}}))
+    result, why = pr_apply.apply(d, art, head=head, base=base, ref="renovate/x", regen_globs=[], max_lines=300)
+    assert result == "refused" and "sub is a symlink" in why and "refusing to delete through it" in why, why
+    assert g(d, "rev-parse", "HEAD") == head
+    os.symlink(".git", d / "gitlink")
+    monkeypatch.setattr(pr_apply.os.path, "islink", lambda _p: False)    # the resolved-location layer alone
+    assert "resolves outside" in pr_apply.unsafe_destination(d, "out/uv.lock", delete=True)
+    assert "resolves inside .git/" in pr_apply.unsafe_destination(d, "gitlink/config", delete=True)
+    assert pr_apply.unsafe_destination(d, "uv.lock", delete=True) == ""     # the link itself may go
+
+
+@pytest.fixture
+def plain(tmp_path: Path) -> tuple[Path, str, str]:
+    if not _can_link(tmp_path) or os.name == "nt":
+        pytest.skip("O_NOFOLLOW and unprivileged symlinks are POSIX (Linux CI runs it)")
+    d = tmp_path / "plain"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(d)], check=True)
+    base = commit(d, {"pyproject.toml": "x\n", "uv.lock": "old\n"}, "init")
+    g(d, "checkout", "-qb", "renovate/x")
+    head = commit(d, {"pyproject.toml": "y\n"}, "bump")
+    return d, base, head
+
+
+def test_a_link_planted_after_the_check_fails_the_write_never_follows_must_fire(plain, tmp_path, monkeypatch) -> None:
+    """The race: the destination check passes, then a link appears at the final component before the
+    write. O_NOFOLLOW makes the open fail (red), so the planted target is never written."""
+    d, base, head = plain
+    target = tmp_path / "victim"
+    target.write_text("untouched\n")
+    real_check = pr_apply.unsafe_destination
+
+    def check_then_plant(root, path, delete=False):
+        why = real_check(root, path, delete)
+        (d / "uv.lock").unlink()
+        os.symlink(target, d / "uv.lock")
+        return why
+
+    monkeypatch.setattr(pr_apply, "unsafe_destination", check_then_plant)
+    art = _artifact(tmp_path, "uv.lock", base, head)
+    with pytest.raises(OSError):
+        pr_apply.apply(d, art, head=head, base=base, ref="renovate/x", regen_globs=[], max_lines=300)
+    assert target.read_text() == "untouched\n"
+
+
+def test_a_posix_platform_without_o_nofollow_refuses_the_write_must_fire(plain, monkeypatch) -> None:
+    d, _, _ = plain
+    monkeypatch.delattr(pr_apply.os, "O_NOFOLLOW")
+    with pytest.raises(RuntimeError, match="O_NOFOLLOW is missing"):
+        pr_apply.write_nofollow(d / "uv.lock", b"x\n")
+    assert (d / "uv.lock").read_text() == "old\n"
