@@ -74,6 +74,36 @@ jobs:
         uses: ./
         with:
           tool: ci-hidden-unicode
+      - name: declared-literal selftest (through the action; planted literals fire, comments and the declared file pass, no rule is 2)
+        uses: ./
+        with:
+          tool: ci-declared-literal
+          args: --selftest
+      - name: declared-literal blind direction (no rule given -> exit 2, never a clean 0)
+        run: |
+          set +e
+          out=$(uvx --quiet --from . ci-declared-literal 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          [ "$rc" -eq 2 ] || { echo "::error::expected exit 2 (no policy), got $rc"; exit 1; }
+          # any exit 2 is not enough (uvx's own failure is 2 too): the TOOL must have refused
+          grep -q 'CANNOT CHECK' <<<"$out" || { echo "::error::exit 2 without the tool's CANNOT CHECK line"; exit 1; }
+      - name: declared-literal policy file for the receipt check (value assembled at run time)
+        run: |
+          v="ZQ$((6 + 1))XJ"
+          printf -- '--pattern=%s\n--example=x=%s\n' "$v" "$v" > "$RUNNER_TEMP/dl.args"
+      - name: declared-literal gate through the action leaves a scan receipt
+        uses: ./
+        env:
+          CI_KIT_DECLARED_LITERAL_RECEIPT: ${{ runner.temp }}/dl.receipt
+        with:
+          tool: ci-declared-literal
+          args: "@${{ runner.temp }}/dl.args"
+      - name: declared-literal receipt says it read files
+        run: |
+          cat "$RUNNER_TEMP/dl.receipt"
+          grep -Eq '^read=[1-9][0-9]* rules=1 findings=0$' "$RUNNER_TEMP/dl.receipt"
       - name: env-reads selftest (through the action)
         uses: ./
         with:
