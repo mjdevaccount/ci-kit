@@ -47,8 +47,9 @@ Each file is read as UTF-8 with replacement (so a value inside a binary is seen)
 when it has one (UTF-8/16/32), plus as UTF-16-LE and UTF-16-BE when it holds a NUL byte: a match
 in any reading is a finding. No suffix table and no threshold decide what is text.
 
-Exit 0 ONLY after a scan that read at least one file under at least one live rule and found
-nothing; 1 = findings; everything else is 2 (`CANNOT CHECK` / `DID NOT FINISH LOOKING`): no rule,
+A GATE run exits 0 ONLY after a scan that read at least one file under at least one live rule and
+found nothing (`--selftest` alone is the only other 0, and writes no receipt); 1 = findings;
+everything else is 2 (`CANNOT CHECK` / `DID NOT FINISH LOOKING`): no rule,
 any policy fault above, `--selftest` mixed with a policy, git failing, nothing read, a tracked path
 missing on disk, any unexpected error. There is no `--help`. With `CI_KIT_DECLARED_LITERAL_RECEIPT`
 set, a completed scan writes `read=N rules=R findings=F` there, so a workflow can assert the gate
@@ -251,7 +252,7 @@ def _comment_prefix(value: str) -> tuple[str, str]:
     if not sep or not key or not prefix.strip():
         raise argparse.ArgumentTypeError(f"{value!r} is not KEY=PREFIX (KEY = .ext, a basename, or *)")
     key = key.lower() if key.startswith(".") else key
-    if key in POWERSHELL_SUFFIXES:
+    if key.lower() in POWERSHELL_SUFFIXES or pathlib.PurePosixPath(key).suffix.lower() in POWERSHELL_SUFFIXES:
         raise argparse.ArgumentTypeError(f"{key}: PowerShell comments are parsed, not prefix-matched; "
                                          f"--comment-prefix cannot change them")
     return key, prefix.strip()
@@ -423,14 +424,16 @@ def scan(root: pathlib.Path, rules: Sequence[Rule], exempt_suffixes: frozenset[s
     blind: list[str] = []
     for rel in tracked_all(root):
         path = root / rel
-        if path.is_symlink() or path.is_dir():
+        # read THROUGH a link to a regular file, under the LINK's path; skip what holds no text of
+        # its own: a directory (a gitlink, a link to a directory) or a dangling link
+        if path.is_dir() or (path.is_symlink() and not path.is_file()):
             out.skipped += 1
             continue
         if not path.is_file():
             blind.append(f"{rel} is tracked but not on disk (deleted or sparse in this checkout)")
             continue
         declared_by = [r for r in rules if rel in r.declared]
-        exempt = pathlib.PurePosixPath(rel).suffix.lower() in exempt_suffixes
+        exempt = pathlib.PurePosixPath(rel).suffix in exempt_suffixes   # as written: `.MD` is not `.md`
         if exempt and not declared_by:
             out.exempt += 1
             continue
@@ -464,7 +467,7 @@ def _summary(seen: Scan, rules: Sequence[Rule], root: pathlib.Path) -> str:
     present = sum(1 for r in rules for d in r.declared if (root / d).is_file())
     declared = sum(len(r.declared) for r in rules)
     return (f"{seen.read} tracked file(s) read ({seen.exempt} exempt by suffix, {seen.declared_only} "
-            f"declared-only, {seen.skipped} symlink/gitlink skipped); {len(rules)} rule(s) loaded: "
+            f"declared-only, {seen.skipped} directory/gitlink/dangling link skipped); {len(rules)} rule(s) loaded: "
             f"{', '.join(r.label for r in rules)}; {present}/{declared} declared file(s) present")
 
 
@@ -591,8 +594,8 @@ def selftest() -> list[str]:
 
 # ---------------------------------------------------------------- CLI
 def _suffix(value: str) -> str:
-    s = value.strip().lower()
-    if not re.fullmatch(r"\.[a-z0-9_.+-]+", s):
+    s = value.strip()   # case kept: an exempt suffix matches exactly, never more files than asked
+    if not re.fullmatch(r"\.[A-Za-z0-9_.+-]+", s):
         raise argparse.ArgumentTypeError(f"{value!r} is not a suffix like .md")
     return s
 
@@ -628,8 +631,9 @@ def _selftest_mode() -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Exit 0 is returned from ONE place: after a scan that read >= 1 file under a live rule and
-    found nothing. Every other path -- a usage error, any exception -- is 1 (findings) or 2."""
+    """Exit 0 from a GATE run comes from exactly one place: after a scan that read >= 1 file under
+    a live rule and found nothing. `--selftest` alone is the only other 0, and writes no receipt.
+    Every other path -- a usage error, any exception, any SystemExit -- is 1 (findings) or 2."""
     argv = list(sys.argv[1:] if argv is None else argv)
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -650,9 +654,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ConfigError(f"read 0 files under a live rule ({seen.exempt} exempt, {seen.declared_only} "
                               f"declared-only): a gate that read nothing has verified nothing")
         _report(seen, rules, root)
-    except SystemExit as exc:   # discover / scan say "could not look" this way; never let it be 0
-        code = exc.code if isinstance(exc.code, int) and exc.code else 2
-        return 2 if code == 0 else code
+    except SystemExit:   # discover / scan say "could not look" this way; whatever its code, never 0 or 1
+        return 2
     except ConfigError as exc:
         print(f"{GATE}: CANNOT CHECK (exit 2) -- {exc}", file=sys.stderr)
         return 2

@@ -5,6 +5,7 @@ REAL git repos run the way a caller runs the tool."""
 from __future__ import annotations
 
 import codecs
+import os
 from pathlib import Path
 
 import pytest
@@ -413,3 +414,43 @@ def test_a_hash_value_travels_in_the_equals_form(new_repo) -> None:
     body = f"--pattern={RX}" + NL + f"--example={EX}" + NL + "--message=#1 use the env file" + NL
     res = _run(r, f"@{_policy(new_repo, body.encode())}")
     assert res.returncode == 1 and "#1 use the env file" in res.stdout, res.stdout + res.stderr
+
+
+# ---------------------------------------------------------------- the file level: never fewer files read
+@pytest.mark.skipif(os.name == "nt", reason="a tracked symlink needs a POSIX checkout")
+def test_a_symlink_is_read_through_under_its_own_path(new_repo) -> None:
+    r = new_repo()
+    write(r / ".env.example", f"GW={NET}1" + NL)
+    write(r / "notes.md", f"GW={NET}1" + NL)
+    os.symlink(".env.example", r / "link.conf")    # the declared file, seen through a link
+    os.symlink("notes.md", r / "notes.txt")        # an exempt suffix, seen through a link
+    os.symlink("missing.txt", r / "dangling.txt")
+    os.symlink(".", r / "here")
+    git(r, "add", "-A")
+    git(r, "commit", "-qm", "c")
+    res = _run(r, *RULE, "--exempt-suffix", ".md")
+    assert res.returncode == 1 and _hits(res.stdout) == {"link.conf:1", "notes.txt:1"}, res.stdout + res.stderr
+    assert "2 directory/gitlink/dangling link skipped" in res.stdout, res.stdout
+
+
+def test_exempt_suffix_matches_as_written(new_repo) -> None:
+    r = _repo(new_repo, {"NOTES.MD": f"GW={NET}1" + NL, "a.md": f"GW={NET}1" + NL})
+    res = _run(r, *RULE, "--exempt-suffix", ".md")
+    assert res.returncode == 1 and _hits(res.stdout) == {"NOTES.MD:1"}, res.stdout
+    res = _run(r, *RULE, "--exempt-suffix", ".MD")
+    assert res.returncode == 1 and _hits(res.stdout) == {"a.md:1"}, res.stdout
+
+
+@pytest.mark.parametrize("key", [".ps1", ".PSM1", "r2.ps1", "deploy.PS1", "x.psd1"])
+def test_comment_prefix_refuses_any_powershell_key(new_repo, key: str) -> None:
+    res = _run(_repo(new_repo, {"a.sh": "x=1" + NL}), *RULE, "--comment-prefix", f"{key}=ping")
+    assert res.returncode == 2 and "PowerShell" in res.stderr, res.stderr
+
+
+@pytest.mark.parametrize("code", [0, 1, 3, None, "text"])
+def test_a_helpers_system_exit_is_2(new_repo, monkeypatch, code) -> None:
+    def leave(*_a, **_k):
+        raise SystemExit(code)
+    root = _repo(new_repo, {"a.sh": "x=1" + NL})
+    monkeypatch.setattr(dl, "scan", leave)
+    assert dl.main([*RULE, "--root", str(root)]) == 2

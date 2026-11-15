@@ -286,15 +286,15 @@ pre-commit:
   the policy is an args file, UTF-8, one argument per line (blank and `#` lines are notes):
   `--rule` / `nets` / `--pattern=\b192\.0\.2\.\d{1,3}\b` / `--example=GW=192.0.2.1` /
   `--declared` / `.env.example` / `--message` / `<your remediation>`, then `--exempt-suffix` /
-  `.md` if prose may name the value. Several `--rule` blocks may share one file, each with its own
+  `.md` if prose may name the value (matched as written: `.md` does not exempt `NOTES.MD`). Several `--rule` blocks may share one file, each with its own
   declared set. Every rule must PROVE it can fire: each `--example` must be flagged and each
   `--pattern` must match an example, and a declared file that is present must hold a match --
   otherwise exit 2. Comment openers depend on the file kind, each a subset of the predecessor's
   six; `--comment-prefix .j2={#` adds one (`*` = every file but PowerShell, whose comments are
   parsed; a PowerShell key is exit 2). A note line right after a value-taking flag is exit 2, so a
   value starting `#` uses `--message=#...`. `@file` resolves against the working directory (the
-  checkout root in the workflow), not `--root`. There is no `--help`: exit 0 comes only from a scan
-  that read files, and the workflow asserts the scan receipt (`CI_KIT_DECLARED_LITERAL_RECEIPT`).
+  checkout root in the workflow), not `--root`. There is no `--help`: exit 0 from a gate run comes only
+  from a scan that read files (`--selftest` alone writes no receipt), and the workflow asserts the scan receipt (`CI_KIT_DECLARED_LITERAL_RECEIPT`).
   A file with NUL bytes is also read as UTF-16-LE and -BE, whatever its name.
 - `ci-guard-selfproof` reads `scripts/` for `lint_*` by default; `--scripts`, `--prefix`,
   `--baseline` and `--js` (prove `.mjs`/`.js` guards through `node <guard> --selftest`, which

@@ -51,6 +51,10 @@ jobs:
       - uses: actions/checkout@v7
       # the gate first, and it must leave a RECEIPT: an exit 0 that never scanned (a flag that
       # short-circuits, a policy that only runs the kit's own proof) writes none
+      - name: no stale receipt
+        env:
+          RECEIPT: ${{ runner.temp }}/declared-literal.receipt
+        run: rm -f "$RECEIPT"
       - name: no declared literal outside its declared source
         uses: mjdevaccount/ci-kit@v1
         env:

@@ -7,8 +7,11 @@ seeded fuzz over the characters that move either model asserts, for PowerShell a
 kind, {lines the tool flags} >= {lines the oracle flags}. Stricter is allowed; looser is a bug."""
 from __future__ import annotations
 
+import os
+import pathlib
 import random
 import re
+import subprocess
 
 import pytest
 
@@ -17,26 +20,33 @@ from ci_kit import declared_literal as dl
 VALUE = "192.0." + "2.7"   # RFC 5737
 RX = re.escape(VALUE)
 ORACLE_OPENERS = ("#", "//", "<!--", ";", "*", "--")
-_TOKEN = re.compile(r"<#|#>|.", re.S)
+_OPEN_OR_QUOTE = re.compile(r"<#|['\"]")
 
 
 def _oracle_ps_code(line: str, in_block: bool) -> tuple[str, bool]:
-    """The code of one line outside `<# #>`, tokenised (so not the tool's scanner shape)."""
-    kept: list[str] = []
-    quote = None
-    for tok in _TOKEN.findall(line):
+    """The code of one line outside `<# #>`. Inside a block the RAW line is searched for `#>`
+    (so `<#>` closes a block, as the predecessor's `find` does); outside one, the next `<#` or
+    quote is located by regex and a quote is skipped to its same-line partner."""
+    kept, pos = [], 0
+    while pos < len(line):
         if in_block:
-            in_block = tok != "#>"
-        elif quote is not None:
-            kept.append(tok)
-            quote = None if tok == quote else quote
-        elif tok in ("'", '"'):
-            quote = tok
-            kept.append(tok)
-        elif tok == "<#":
-            in_block = True
-        else:
-            kept.append(tok)
+            close = line.find("#>", pos)
+            if close == -1:
+                return "".join(kept), True
+            pos, in_block = close + 2, False
+            continue
+        m = _OPEN_OR_QUOTE.search(line, pos)
+        if m is None:
+            kept.append(line[pos:])
+            break
+        kept.append(line[pos:m.start()])
+        if m.group() == "<#":
+            pos, in_block = m.end(), True
+            continue
+        end = line.find(m.group(), m.end())
+        stop = len(line) if end == -1 else end + 1
+        kept.append(line[m.start():stop])
+        pos = stop
     return "".join(kept), in_block
 
 
@@ -53,7 +63,7 @@ def oracle(text: str, rel: str) -> set[int]:
 
 
 NL = chr(10)
-_PIECES = ["<#", "#>", "#", "'", '"', "`", '@"', '"@', "@'", "'@", " ", "  ", chr(9), "x", "=", "//",
+_PIECES = ["<#", "#>", "<#>", "<", ">", "#", "'", '"', "`", '@"', '"@', "@'", "'@", " ", "  ", chr(9), "x", "=", "//",
            "--", ";", "*", "<!--", "-->", "{", "}", "/", VALUE, VALUE]
 KINDS = ["a.ps1", "a.psm1", "a.sh", "a.c", "a.css", "a.sql", "a.ini", "a.md", "a.json", "a.tf",
          "Dockerfile", "a.unknown", "a.vue", "a.yml"]
@@ -100,3 +110,56 @@ def test_the_oracle_is_not_vacuous() -> None:
     assert oracle(f"# {VALUE}" + NL + f"x={VALUE}" + NL, "a.sh") == {2}
     assert oracle("<#" + NL + VALUE + NL + f"#> {VALUE}" + NL, "a.ps1") == {3}
     assert oracle(f"'<#' {VALUE}" + NL, "a.ps1") == {1}
+    assert oracle(f"<# <#> {VALUE}" + NL, "a.ps1") == {1}
+
+
+# ---------------------------------------------------------------- the FILE level: which files are read
+SYMLINKS = os.name != "nt"   # a Windows checkout without the privilege writes links as plain files
+DECLARED = "decl.env"
+NAMES = ["a.md", "b.MD", "c.Md", "d.txt", "e.ps1", "f.PS1", "g.sh", "h.conf", "i.MD.txt", "j"]
+
+
+def oracle_tree(root: pathlib.Path, rels: list[str], declared: set[str], exempt: set[str]) -> set[tuple[str, int]]:
+    """The predecessor's file walk: a declared path or an exempt suffix (as written) is skipped,
+    everything else is read THROUGH links; what cannot be read is skipped."""
+    hits = set()
+    for rel in rels:
+        path = root / rel
+        if rel in declared or path.suffix in exempt:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        hits |= {(rel, n) for n in oracle(text, rel)}
+    return hits
+
+
+def _tree(root: pathlib.Path, rng: random.Random) -> None:
+    root.mkdir()
+    (root / DECLARED).write_bytes(f"GW={VALUE}".encode() + NL.encode())
+    (root / "sub").mkdir()
+    for name in rng.sample(NAMES, rng.randint(2, len(NAMES))):
+        (root / name).write_bytes(_doc(rng).encode())
+    if SYMLINKS:
+        regular = [p.name for p in root.iterdir() if p.is_file()]
+        for i in range(rng.randint(0, 4)):
+            target = rng.choice([*regular, "missing.txt", "sub"])
+            os.symlink(target, root / rng.choice([f"l{i}.conf", f"l{i}.md", f"l{i}.MD", f"l{i}.ps1"]))
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
+
+
+@pytest.mark.parametrize("exempt", [set(), {".md"}, {".MD"}, {".md", ".MD"}],
+                         ids=lambda e: ",".join(sorted(e)) or "none")
+def test_never_reads_fewer_files_than_the_predecessor(tmp_path: pathlib.Path, exempt: set[str]) -> None:
+    rule = dl.compile_rules([dl.Rule(label="v", patterns=[RX], examples=[f"h={VALUE}"], declared=[DECLARED])])
+    rng = random.Random(f"declared-literal-tree:{sorted(exempt)}")
+    for n in range(40):
+        root = tmp_path / f"t{n}"
+        _tree(root, rng)
+        rels = dl.tracked_all(root)
+        seen = dl.scan(root, rule, frozenset(exempt), dl.COMMENT_FAMILIES)
+        new = {(rel, ln) for rel, ln, _label, _line in seen.findings}
+        missed = oracle_tree(root, rels, {DECLARED}, exempt) - new
+        assert not missed, (sorted(exempt), sorted(missed), rels)
