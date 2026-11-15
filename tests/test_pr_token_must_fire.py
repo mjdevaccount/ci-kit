@@ -29,6 +29,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 ACTION = ROOT / ".github" / "actions" / "pr-token" / "action.yml"
 WF = ROOT / ".github" / "workflows"
 PAT_USER, BOT = "mjdevaccount", "mjdev-edge-bot[bot]"
+BASH = shutil.which("bash")
 
 
 # ── the policy ───────────────────────────────────────────────────────────────────────────────────
@@ -349,13 +350,118 @@ def test_the_identity_reaches_every_tool_that_trusts_markers() -> None:
         assert s["env"]["CI_KIT_TRUSTED_LOGINS"] == "${{ steps.token.outputs.trusted }}"
 
 
+def _all_workflows() -> dict[str, dict]:
+    return {p.name: _yaml(p) for p in sorted(WF.glob("*.yml"))}
+
+
+def pr_token_jobs(workflows: dict[str, dict]) -> dict[str, list[str]]:
+    """Every job, in every workflow, with a step that `uses:` the pr-token composite -- discovered,
+    never a hand list."""
+    out: dict[str, list[str]] = {}
+    for name, wf in workflows.items():
+        for j, job in (wf.get("jobs") or {}).items():
+            if any("/actions/pr-token" in str(s.get("uses", "")) for s in job.get("steps") or []):
+                out.setdefault(name, []).append(j)
+    return out
+
+
+def identity_faults(workflows: dict[str, dict]) -> list[str]:
+    """A job whose pr-token scope is in IDENTITY_SCOPES must pass the identity to its tools, and
+    one outside must not -- the identity counted at workflow, job AND step level ([] = clean)."""
+    out = []
+    for name, jobs in pr_token_jobs(workflows).items():
+        wf = workflows[name]
+        for j in jobs:
+            job = wf["jobs"][j]
+            steps = job.get("steps") or []
+            scopes = {(s.get("with") or {}).get("scope") for s in steps if "/actions/pr-token" in str(s.get("uses", ""))}
+            envs = [wf.get("env") or {}, job.get("env") or {}, *((s.get("env") or {}) for s in steps)]
+            reads = any(k in e for e in envs for k in (pt.LOGIN_ENV, pt.TRUSTED_ENV))
+            for sc in scopes:
+                if (sc in pt.IDENTITY_SCOPES) != reads:
+                    out.append(f"{name}:{j}: scope {sc} {'passes' if reads else 'does not pass'} the identity")
+    return out
+
+
 def test_identity_scopes_are_exactly_the_jobs_that_hand_the_identity_to_a_tool() -> None:
-    for name, jobs in TOKEN_JOBS.items():
-        for job in jobs:
-            steps = _yaml(WF / name)["jobs"][job]["steps"]
-            scopes = {s["with"]["scope"] for s in steps if "pr-token" in str(s.get("uses", ""))}
-            reads = any(pt.LOGIN_ENV in (s.get("env") or {}) for s in steps)
-            assert scopes and all((sc in pt.IDENTITY_SCOPES) == reads for sc in scopes), (name, job, scopes, reads)
+    wfs = _all_workflows()
+    assert pr_token_jobs(wfs) == TOKEN_JOBS  # the hand list elsewhere in this file cannot drift either
+    assert identity_faults(wfs) == []
+
+
+def _with_job(wfs: dict[str, dict], name: str, scope: str, where: str) -> dict[str, dict]:
+    wfs = {**wfs, name: {"on": {"workflow_call": {}}, "jobs": {"j": {"runs-on": "x", "steps": [
+        {"id": "token", "uses": "mjdevaccount/ci-kit/.github/actions/pr-token@v1", "with": {"scope": scope}},
+        {"run": "tool", "env": {}}]}}}}
+    env = {pt.LOGIN_ENV: "${{ steps.token.outputs.login }}"}
+    target = {"workflow": wfs[name], "job": wfs[name]["jobs"]["j"], "step": wfs[name]["jobs"]["j"]["steps"][1]}[where]
+    target["env"] = env
+    return wfs
+
+
+@pytest.mark.parametrize("where", ["workflow", "job", "step"])
+@pytest.mark.parametrize("scope", ["push", "comment"])
+def test_a_new_workflow_passing_the_identity_under_a_non_identity_scope_is_caught_must_fire(
+        where: str, scope: str) -> None:
+    wfs = _with_job(_all_workflows(), "new-tool.yml", scope, where)
+    assert pr_token_jobs(wfs)["new-tool.yml"] == ["j"]
+    assert identity_faults(wfs) == [f"new-tool.yml:j: scope {scope} passes the identity"]
+
+
+def test_identity_mutations_in_todays_workflows_are_caught_must_fire() -> None:
+    wfs = _all_workflows()
+    wfs["ci-green.yml"]["env"] = {pt.TRUSTED_ENV: "${{ steps.token.outputs.trusted }}"}      # workflow level
+    assert "ci-green.yml:advance: scope push passes the identity" in identity_faults(wfs)
+    wfs = _all_workflows()
+    wfs["pr-heal.yml"]["jobs"]["claim"]["env"] = {pt.LOGIN_ENV: "x"}                           # job level
+    assert "pr-heal.yml:claim: scope comment passes the identity" in identity_faults(wfs)
+    wfs = _all_workflows()
+    for s in wfs["pr-autoupdate.yml"]["jobs"]["update"]["steps"]:                               # identity dropped
+        for k in (pt.LOGIN_ENV, pt.TRUSTED_ENV):
+            (s.get("env") or {}).pop(k, None)
+    assert "pr-autoupdate.yml:update: scope update does not pass the identity" in identity_faults(wfs)
+
+
+# ── the record line is ONE line of key=value tokens, whatever a field holds ───────────────────────
+KEYS = ["source", "mode", "reason", "app", "repo", "workflow", "job", "login"]
+HOSTILE = ["a b=c", "x\ny", "app now", "a=b", " \t", "k=v login=evil", "line1\r\nline2", ""]
+
+
+def _tokens(rec: str) -> list[tuple[str, str]]:
+    assert "\n" not in rec and "\r" not in rec
+    head, *rest = rec.split(" ")
+    assert head == pt.PREFIX
+    pairs = [tuple(t.split("=", 1)) for t in rest]
+    assert all(len(p) == 2 and p[1] and "=" not in p[1] for p in pairs), rest
+    return pairs
+
+
+@pytest.mark.parametrize("mode", ["a b=c", "app\nnow", "APP"])
+def test_a_hostile_mode_stays_one_parseable_line_must_fire(mode: str) -> None:
+    d = pt.decide(mode, True, True, True)
+    rec = pt.line(d, mode, "absent", "o/r", "w.yml", "j", "")
+    assert [k for k, _ in _tokens(rec)] == KEYS
+    assert dict(_tokens(rec))["mode"] == "".join("_" if c.isspace() or c == "=" else c for c in mode.strip().lower())
+
+
+@pytest.mark.parametrize("field", ["mode", "repo", "workflow", "job", "login", "app", "reason", "source"])
+@pytest.mark.parametrize("bad", HOSTILE)
+def test_every_field_survives_hostile_input_must_fire(field: str, bad: str) -> None:
+    args = {"mode": "pat", "app": "absent", "repo": "o/r", "workflow": "w.yml", "job": "j", "login": PAT_USER}
+    d = pt.Decision(False, "pat", "mode-pat")
+    if field in ("reason", "source"):
+        d = pt.Decision(False, bad if field == "source" else "pat", bad if field == "reason" else "mode-pat")
+    else:
+        args[field] = bad
+    assert [k for k, _ in _tokens(pt.line(d, **args))] == KEYS
+
+
+@pytest.mark.skipif(BASH is None, reason="no bash on this host")
+@pytest.mark.parametrize("mode", [" App Now ", "a b=c", "APP-REQUIRED", ""])
+def test_the_shell_fallback_spells_mode_as_line_does(tmp_path: pathlib.Path, mode: str) -> None:
+    _, said, _ = _run_decide_shell(tmp_path, "exit 1", mode=mode)
+    shell = dict(_tokens(said.split("::error title=pr-token::", 1)[1].strip()))["mode"]
+    assert shell == dict(_tokens(pt.line(pt.Decision(False, "none", "decide-crashed"), mode, "", "", "", "", "")))["mode"]
 
 
 # ── the REAL GET /user read (_pat_login), through a fake `gh` on PATH ─────────────────────────────
@@ -450,10 +556,9 @@ def test_every_reason_the_code_emits_is_listed_and_parseable_must_fire() -> None
 
 
 # ── the decide step's shell: a decide that cannot run still writes its record ─────────────────────
-BASH = shutil.which("bash")
 
 
-def _run_decide_shell(tmp_path: pathlib.Path, fake_python: str) -> tuple[int, str, str]:
+def _run_decide_shell(tmp_path: pathlib.Path, fake_python: str, mode: str = "app") -> tuple[int, str, str]:
     bin_dir = tmp_path / "pybin"
     bin_dir.mkdir()
     py = bin_dir / "python3"
@@ -465,7 +570,7 @@ def _run_decide_shell(tmp_path: pathlib.Path, fake_python: str) -> tuple[int, st
     out, summ = tmp_path / "out", tmp_path / "summary"
     out.write_text("", encoding="utf-8")
     env = {**os.environ, "GITHUB_OUTPUT": out.as_posix(), "GITHUB_STEP_SUMMARY": summ.as_posix(),
-           "GITHUB_REPOSITORY": "o/r", "GITHUB_JOB": "update", "CI_KIT_TOKEN_MODE": "app",
+           "GITHUB_REPOSITORY": "o/r", "GITHUB_JOB": "update", "CI_KIT_TOKEN_MODE": mode,
            "GITHUB_WORKFLOW_REF": "o/r/.github/workflows/pr-autoupdate.yml@refs/heads/main",
            "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")}  # bash converts a Windows PATH
     r = subprocess.run([BASH, "--noprofile", "--norc", "-eo", "pipefail", "-c", f'. "{script.as_posix()}"'],

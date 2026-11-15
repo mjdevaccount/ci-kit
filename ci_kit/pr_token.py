@@ -114,10 +114,19 @@ def trusted_set(acting: str, others: list[str]) -> list[str]:
     return out
 
 
+def _field(value: str, empty: str) -> str:
+    """One record value: every whitespace character (newlines included) and `=` -> `_`, so the line
+    stays ONE line of space-separated key=value tokens whatever the caller passed. The decide step's
+    shell fallback spells `mode` the same way (lowercase, `[[:space:]=]` -> `_`)."""
+    return "".join("_" if c.isspace() or c == "=" else c for c in (value or "").strip()) or empty
+
+
 def line(d: Decision, mode: str, app: str, repo: str, workflow: str, job: str, login: str) -> str:
     """The record, one fixed greppable shape. Pure."""
-    return (f"{PREFIX} source={d.source} mode={(mode or 'pat').strip().lower()} reason={d.reason} app={app} "
-            f"repo={repo or '?'} workflow={workflow or '?'} job={job or '?'} login={login or 'unknown'}")
+    fields = {"source": _field(d.source, "none"), "mode": _field((mode or "").lower(), "pat"),
+              "reason": _field(d.reason, "?"), "app": _field(app, "absent"), "repo": _field(repo, "?"),
+              "workflow": _field(workflow, "?"), "job": _field(job, "?"), "login": _field(login, "unknown")}
+    return " ".join([PREFIX, *(f"{k}={v}" for k, v in fields.items())])
 
 
 # ── what the tools read (pr_baseretry, merge_train) ─────────────────────────────────────────────

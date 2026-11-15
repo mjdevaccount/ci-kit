@@ -81,8 +81,11 @@ runs:
       run: |
         python3 -m ci_kit.pr_token decide && exit 0 || rc=$?
         grep -q '^source=' "$GITHUB_OUTPUT" 2>/dev/null && exit "$rc"
-        wf=${GITHUB_WORKFLOW_REF%%@*}; wf=${wf##*/}; mode=${CI_KIT_TOKEN_MODE:-pat}
-        rec="pr-token: source=none mode=${mode//[ =]/_} reason=decide-crashed app=absent repo=${GITHUB_REPOSITORY:-?} workflow=${wf:-?} job=${GITHUB_JOB:-?} login=unknown"
+        wf=${GITHUB_WORKFLOW_REF%%@*}; wf=${wf##*/}
+        # mode spelled as pr_token._field spells it: trimmed, lowercase, [[:space:]=] -> _
+        mode=${CI_KIT_TOKEN_MODE,,}; mode=${mode#"${mode%%[![:space:]]*}"}; mode=${mode%"${mode##*[![:space:]]}"}
+        mode=${mode//[[:space:]=]/_}
+        rec="pr-token: source=none mode=${mode:-pat} reason=decide-crashed app=absent repo=${GITHUB_REPOSITORY:-?} workflow=${wf:-?} job=${GITHUB_JOB:-?} login=unknown"
         echo "::error title=pr-token::$rec"
         printf '`%s`\n\n' "$rec" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
         exit "$rc"
