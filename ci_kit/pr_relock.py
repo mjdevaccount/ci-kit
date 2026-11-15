@@ -29,7 +29,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ci_kit.pr_apply import apply, push, pushed_over, safe_path
+from ci_kit.pr_apply import apply, push, pushed_over, safe_path, unsafe_destination
 from ci_kit.pr_regen import BOT, LOCKFILES, RED, Prepared, collect, commands, git, lockfile_entry, output, snapshot
 
 SUBJECT = "chore(lock): relock"
@@ -57,11 +57,12 @@ def refusal(event: str, head_repo: str, repo: str, head_ref: str, prefix: str) -
     """Why this run may not relock ('' = it may). Pure: the gate both jobs apply."""
     if event != "pull_request":
         return f"relock needs a pull_request caller (got '{event}'): only that event names the PR branch to relock"
-    if not prefix.strip():
-        return "branch-prefix is empty: every branch, a person's too, would be relocked"
+    if not prefix.strip() or any(c.isspace() for c in prefix):
+        return f"branch-prefix {prefix!r} is empty or holds whitespace (no branch name can): fix the caller"
     if head_repo != repo:
         return f"the PR comes from {head_repo or 'a deleted fork'}, not {repo}: a fork is never pushed to"
-    if not head_ref.startswith(prefix):
+    # case-INSENSITIVE, as the lock job's `startsWith()` is: the two gates must agree
+    if not head_ref.lower().startswith(prefix.lower()):
         return f"{head_ref} is not a dependency-bot branch (prefix {prefix}): its author relocks it"
     return ""
 
@@ -118,9 +119,9 @@ def artifact_faults(art: Path, allowed: list[str]) -> list[str]:
     return out
 
 
-def own_relock(root: Path) -> bool:
-    """HEAD is a relock commit this workflow made (author and subject)."""
-    email, _, subject = git(root, "log", "-1", "--format=%ae%x00%s").stdout.strip().partition("\x00")
+def own_relock(root: Path, rev: str = "HEAD") -> bool:
+    """`rev` is a relock commit this workflow made (author and subject)."""
+    email, _, subject = git(root, "log", "-1", "--format=%ae%x00%s", rev).stdout.strip().partition("\x00")
     return email == BOT[1] and subject.startswith(SUBJECT)
 
 
@@ -139,6 +140,9 @@ def relock_push(root: Path, art: Path, *, paths: list[str], head: str, base: str
     if own_relock(root):
         return "refused", ("a relock is needed on top of our own relock commit: the lock tool is not deterministic "
                            "here -- refusing to loop"), ""
+    linked = [w for w in (unsafe_destination(root, x) for x in paths) if w]
+    if linked:
+        return "refused", "destination symlink: " + "; ".join(linked), ""
     names = sorted(json.loads((art / "manifest.json").read_text(encoding="utf-8"))["files"])
     msg = f"{SUBJECT} {', '.join(names)}\n\nThe dependency bot moved the manifest on {ref} without its lockfile."
     result, why = apply(root, art, head=head, base=base, ref=ref, regen_globs=[], max_lines=0, message=msg)
@@ -172,8 +176,11 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     root = Path.cwd()
     if args.cmd == "collect":
-        st = collect(root, Prepared(**json.loads(Path(args.state_file).read_text(encoding="utf-8"))), Path(args.out),
-                     args.failed)
+        prep = Prepared(**json.loads(Path(args.state_file).read_text(encoding="utf-8")))
+        st = collect(root, prep, Path(args.out), args.failed)
+        if st == "regen" and own_relock(root, prep.head):
+            # the early copy of push's no-loop check: no token is minted for a run push would refuse
+            st, args.failed = "loop", "a relock is needed on top of our own relock commit: the lock tool is not deterministic here"
         output(state=st)
         if st == "nothing":
             print("::notice title=relock::the lockfile(s) already match the manifest -- nothing to push")

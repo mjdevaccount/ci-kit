@@ -20,9 +20,11 @@ WF = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / 
 GATE = (
     "github.event_name == 'pull_request'",
     "inputs.branch-prefix != ''",
+    "!contains(inputs.branch-prefix, ' ')",
     "github.event.pull_request.head.repo.full_name == github.repository",
     "startsWith(github.event.pull_request.head.ref, inputs.branch-prefix)",
 )
+SAME_REPO = GATE[3]
 PR_CODE = ("setup-uv", "setup-node", "setup-dotnet", "heal-install", "pr_regen run", "inputs.install")
 
 
@@ -59,7 +61,7 @@ def faults(wf: dict) -> list[str]:
     if "needs.lock.outputs" in steps or "needs.lock.outputs" in json.dumps(push.get("env", {})):
         out.append("push: reads a lock output past its `if` -- code in lock can write any output")
     pguard = " ".join(str(push.get("if", "")).split())
-    for c in ("needs.lock.outputs.state == 'regen'", GATE[0], GATE[2]):
+    for c in ("needs.lock.outputs.state == 'regen'", GATE[0], SAME_REPO):
         if c not in pguard:
             out.append(f"push: if lacks: {c}")
     apply = next((s for s in push.get("steps", []) if s.get("id") == "apply"), {})
@@ -69,13 +71,17 @@ def faults(wf: dict) -> list[str]:
     kit = next((s for s in push.get("steps", []) if s.get("id") == "kit"), {})
     if (kit.get("with") or {}).get("ref") != "${{ inputs.kit-ref }}":
         out.append("push: ci-kit is not fetched at its own kit-ref")
+    if (kit.get("with") or {}).get("base"):
+        out.append("push: fetches the base after a credential-less checkout (fails on a private caller)")
     tok = next((s for s in push.get("steps", []) if s.get("id") == "token"), {})
     if (tok.get("with") or {}).get("scope") != "push":
         out.append("push: no pr-token step with scope push")
     # trigger: any other caller event, or an empty prefix, is red
     tif = " ".join(str(trig.get("if", "")).split())
+    ws = ("contains(inputs.branch-prefix, ' ')", "contains(inputs.branch-prefix, fromJSON('\"\\t\"'))",
+          "contains(inputs.branch-prefix, fromJSON('\"\\n\"'))")
     if "github.event_name != 'pull_request'" not in tif or "inputs.branch-prefix == ''" not in tif \
-            or "exit 1" not in json.dumps(trig.get("steps", [])):
+            or any(w not in tif for w in ws) or "exit 1" not in json.dumps(trig.get("steps", [])):
         out.append("trigger: a non-pull_request caller or an empty prefix would skip green")
     text = WF.read_text(encoding="utf-8").split("\nname: relock", 1)[1]
     for bad in ("--force", "rebase", "curl ", "raw.githubusercontent", "pull_request_target:"):
@@ -133,8 +139,17 @@ def test_a_wrong_event_or_empty_prefix_is_red_not_a_skip_must_fire() -> None:
     assert any(f.startswith("triggers") for f in faults(wf))
 
 
+def test_a_whitespace_prefix_is_red_and_push_fetches_no_base_must_fire() -> None:
+    wf = _wf()
+    wf["jobs"]["trigger"]["if"] = wf["jobs"]["trigger"]["if"].replace("|| contains(inputs.branch-prefix, ' ')", "")
+    assert "trigger: a non-pull_request caller or an empty prefix would skip green" in faults(wf)
+    wf = _wf()
+    next(s for s in wf["jobs"]["push"]["steps"] if s.get("id") == "kit")["with"]["base"] = "x"
+    assert any("fetches the base" in f for f in faults(wf))
+
+
 def test_the_push_gate_rechecks_the_event_must_fire() -> None:
     wf = _wf()
     wf["jobs"]["push"]["if"] = "needs.lock.outputs.state == 'regen'"
     got = faults(wf)
-    assert f"push: if lacks: {GATE[0]}" in got and f"push: if lacks: {GATE[2]}" in got
+    assert f"push: if lacks: {GATE[0]}" in got and f"push: if lacks: {SAME_REPO}" in got

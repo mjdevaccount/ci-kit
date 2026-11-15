@@ -38,6 +38,8 @@ def test_the_gate_admits_only_a_same_repo_bot_branch_on_pull_request() -> None:
     assert "fork" in _gate(head_repo="evil/r") and "fork" in _gate(head_repo="")
     assert "dependency-bot branch" in _gate(head_ref="feature/x")
     assert "empty" in _gate(prefix="") and "empty" in _gate(prefix="  ")
+    assert "whitespace" in _gate(prefix=" renovate/") and "whitespace" in _gate(prefix="renovate/\t")
+    assert _gate(head_ref="Renovate/p-0.2") == ""            # case-insensitive, as the job's startsWith()
 
 
 def test_the_lockfiles_input_is_plain_lockfile_paths_or_red() -> None:
@@ -179,7 +181,7 @@ def test_a_lock_tool_that_writes_more_is_strayed_and_a_failure_is_failed_must_fi
     assert _lock(_clone(bare, tmp_path, "b", head), base, tmp_path / "b-art", "exit 3") == "failed"
 
 
-def test_a_moved_head_or_an_untracked_lockfile_is_never_pushed_must_fire(repo, tmp_path, monkeypatch) -> None:
+def test_a_moved_head_is_never_pushed_over_must_fire(repo, tmp_path, monkeypatch) -> None:
     bare, work, base, head = repo
     art = tmp_path / "art"
     _lock(_clone(bare, tmp_path, "lock", head), base, art, STAND_IN)
@@ -187,24 +189,73 @@ def test_a_moved_head_or_an_untracked_lockfile_is_never_pushed_must_fire(repo, t
     g(work, "push", "-q", "origin", REF)
     result, why, _ = _push(bare, tmp_path, "push", art, head, base, monkeypatch)
     assert result == "moved", why
-    d = _clone(bare, tmp_path, "push2", REF)
-    got = pr_relock.relock_push(d, art, paths=["sub/uv.lock"], head=head, base=base, ref=REF, repo="o/r")
-    assert got[0] == "refused"
+
+
+def test_an_untracked_lockfile_is_never_written_must_fire(repo, tmp_path) -> None:
+    bare, _, base, head = repo
+    art = _art(tmp_path, {"sub/uv.lock": "write"}, base=base, head=head)    # an artifact that IS clean for the path
+    assert pr_relock.artifact_faults(art, ["sub/uv.lock"]) == []
+    got = pr_relock.relock_push(_clone(bare, tmp_path, "push", REF), art, paths=["sub/uv.lock"], head=head, base=base,
+                                ref=REF, repo="o/r")
+    assert got[0] == "refused" and "not tracked at the head" in got[1], got
+
+
+def test_a_relock_commit_touching_more_than_the_lockfile_is_refused_must_fire(repo, tmp_path, monkeypatch) -> None:
+    bare, _, base, head = repo
+    art = tmp_path / "art"
+    _lock(_clone(bare, tmp_path, "lock", head), base, art, STAND_IN)
+    real = pr_relock.apply
+
+    def widened(root, *a, **kw):             # an applier that (wrongly) commits a second file
+        out = real(root, *a, **kw)
+        (root / "extra.txt").write_text("x")
+        g(root, "add", "extra.txt")
+        g(root, "commit", "-q", "--amend", "--no-edit")
+        return out
+    monkeypatch.setattr(pr_relock, "apply", widened)
+    result, why, _ = _push(bare, tmp_path, "push", art, head, base, monkeypatch)
+    assert result == "refused" and "touches" in why, why
+    assert g(bare, "rev-parse", REF) == head
+
+
+def test_a_loop_is_caught_in_the_lock_job_before_any_token_must_fire(repo, tmp_path, monkeypatch, capsys) -> None:
+    bare, _, base, head = repo
+    _lock(_clone(bare, tmp_path, "lock", head), base, tmp_path / "art", STAND_IN)
+    sha = _push(bare, tmp_path, "push", tmp_path / "art", head, base, monkeypatch)[2]
+    d = _clone(bare, tmp_path, "lock2", sha)
+    p = pr_relock.prepare(d, ["uv.lock"], base)
+    pr_regen.run(d, [{**c, "run": "date +%N >> uv.lock"} for c in p.commands])
+    state = tmp_path / "s.json"
+    state.write_text(json.dumps(p.__dict__))
+    monkeypatch.chdir(d)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    capsys.readouterr()
+    assert pr_relock.main(["collect", "--state-file", str(state), "--out", str(tmp_path / "art2")]) == 1
+    out = capsys.readouterr().out
+    assert "state=loop" in out and "not deterministic" in out
 
 
 def test_the_cli_refuses_a_wrong_event_and_a_typo_is_red_must_fire(repo, tmp_path, monkeypatch, capsys) -> None:
     bare, _, base, head = repo
-    d = _clone(bare, tmp_path, "cli", head)
+    art = tmp_path / "art"
+    _lock(_clone(bare, tmp_path, "lock", head), base, art, STAND_IN)          # a VALID artifact
+    d = _clone(bare, tmp_path, "cli", REF)
     monkeypatch.chdir(d)
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.setenv("CI_KIT_PUSH_URL", str(bare))
+    monkeypatch.setenv("CI_KIT_PUSH_TOKEN", "unused-for-a-local-remote")
     common = ["--head-repo", "o/r", "--repo", "o/r", "--ref", REF, "--branch-prefix", "renovate/"]
     state = str(tmp_path / "s.json")
-    assert pr_relock.main(["prepare", "--event", "pull_request", *common, "--lockfiles", "sub/uv.lock",
-                           "--base", base, "--state-file", state]) == 2             # untracked: red
-    assert pr_relock.main(["prepare", "--event", "push", *common, "--lockfiles", "uv.lock",
-                           "--base", base, "--state-file", state]) == 2              # wrong event: red
+    capsys.readouterr()
     assert pr_relock.main(["push", "--event", "pull_request_target", *common, "--lockfiles", "uv.lock",
-                           "--artifact", str(tmp_path), "--head", head, "--base", base]) == 1
+                           "--artifact", str(art), "--head", head, "--base", base]) == 1
+    assert "relock push refused: relock needs a pull_request caller" in capsys.readouterr().out
+    assert g(bare, "rev-parse", REF) == head                                  # nothing pushed
+    assert pr_relock.main(["prepare", "--event", "pull_request", *common, "--lockfiles", "sub/uv.lock",
+                           "--base", base, "--state-file", state]) == 2
+    assert "not tracked at the head: sub/uv.lock" in capsys.readouterr().out
+    assert pr_relock.main(["prepare", "--event", "push", *common, "--lockfiles", "uv.lock",
+                           "--base", base, "--state-file", state]) == 2
     assert "pull_request caller" in capsys.readouterr().out
     assert pr_relock.main(["prepare", "--event", "pull_request", *common, "--lockfiles", "uv.lock",
                            "--base", base, "--state-file", state]) == 0

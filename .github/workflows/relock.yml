@@ -78,7 +78,9 @@ on:
         type: string
         default: uv.lock
       branch-prefix:
-        description: the dependency bot's branch prefix; only a same-repo PR whose head ref starts with it is relocked ('' = red)
+        description: >-
+          the dependency bot's branch prefix; only a same-repo PR whose head ref starts with it is relocked,
+          matched case-INSENSITIVELY (GitHub's startsWith; ci_kit/pr_relock.refusal agrees). '' or any whitespace = red
         type: string
         default: renovate/
       python-version:
@@ -132,7 +134,11 @@ env:
 jobs:
   trigger:
     name: caller trigger is pull_request
-    if: github.event_name != 'pull_request' || inputs.branch-prefix == ''
+    # GitHub expressions have no trim(): a prefix holding a space, tab or newline (no branch name can)
+    # is red here too, never every job skipping green
+    if: >-
+      github.event_name != 'pull_request' || inputs.branch-prefix == '' || contains(inputs.branch-prefix, ' ')
+      || contains(inputs.branch-prefix, fromJSON('"\t"')) || contains(inputs.branch-prefix, fromJSON('"\n"'))
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -143,7 +149,7 @@ jobs:
           if [ "$EVENT" != pull_request ]; then
             echo "::error::relock needs a pull_request caller (got '$EVENT'): only that event names the PR branch to relock"
           else
-            echo "::error::relock's branch-prefix is empty: every branch, a person's too, would be relocked"
+            echo "::error::relock's branch-prefix '$PREFIX' is empty or holds whitespace: fix the caller (no branch name can)"
           fi
           exit 1
 
@@ -152,6 +158,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request'
       && inputs.branch-prefix != ''
+      && !contains(inputs.branch-prefix, ' ')
       && github.event.pull_request.head.repo.full_name == github.repository
       && startsWith(github.event.pull_request.head.ref, inputs.branch-prefix)
     runs-on: ubuntu-latest
@@ -238,7 +245,10 @@ jobs:
       - name: Check out the PR branch, fetch the base and ci-kit at kit-ref
         id: kit
         uses: mjdevaccount/ci-kit/.github/actions/heal-kit@v1
-        with: {checkout: "${{ github.event.pull_request.head.ref }}", ref: "${{ inputs.kit-ref }}", base: "${{ github.event.pull_request.base.sha }}"}
+        # no `base:` fetch: the depth-0 checkout already holds every branch's history (base.sha is
+        # an ancestor of the default branch), and an extra fetch after persist-credentials: false
+        # has no credential on a private caller
+        with: {checkout: "${{ github.event.pull_request.head.ref }}", ref: "${{ inputs.kit-ref }}"}
       - uses: actions/download-artifact@v8
         with:
           name: relock-${{ github.event.pull_request.number }}

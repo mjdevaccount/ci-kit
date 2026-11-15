@@ -53,6 +53,37 @@ def safe_path(path: str) -> bool:
     return bool(path) and not path.startswith("/") and ".." not in parts and ":" not in parts[0]
 
 
+def unsafe_destination(root: Path, path: str) -> str:
+    """Why writing `path` in the checkout could land somewhere else ('' = it cannot). A symlink is
+    data the PR controls: a tracked link at the path (index mode 120000), a link at the path or at
+    any parent directory, or a path whose real location leaves the repository or enters `.git/`
+    would make the write (and the `git add` after it) act on a file the tier never named."""
+    if not safe_path(path):
+        return f"{path}: not a plain repository path"
+    staged = git(root, "ls-files", "-s", "--", path, check=False).stdout.split()
+    if staged[:1] == ["120000"]:
+        return f"{path}: tracked as a symlink at the destination -- refusing to write through it"
+    top = Path(os.path.realpath(root))
+    cur = Path(root)
+    for part in path.replace("\\", "/").split("/"):
+        cur = cur / part
+        if os.path.islink(cur):
+            return f"{path}: {cur.relative_to(root).as_posix()} is a symlink in the checkout -- refusing to write through it"
+    real = Path(os.path.realpath(root / path))
+    if real != top and top not in real.parents:
+        return f"{path}: resolves outside the repository ({real})"
+    if real == top / ".git" or (top / ".git") in real.parents:
+        return f"{path}: resolves inside .git/"
+    return ""
+
+
+def write_nofollow(dst: Path, data: bytes) -> None:
+    """Write without following a symlink at the final component, where the platform can say so."""
+    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0), 0o644)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+
+
 def scope(tier: str, files: dict[str, str], conflicted: list[str], pr_files: list[str], regen_globs: list[str],
           changed_lines: int, max_lines: int, test_globs: tuple[str, ...] = TEST_GLOBS,
           hash_only: frozenset[str] = frozenset()) -> list[str]:
@@ -129,6 +160,10 @@ def apply(root: Path, art: Path, *, head: str, base: str, ref: str, regen_globs:
     bad = scope(tier, files, conflicted, mine, regen_globs, changed, max_lines, test_globs, frozenset(hashes))
     if bad:
         return "refused", "; ".join(bad)
+    # after the merge (which can add a link), before ANY write: a planted link refuses the whole change
+    linked = [w for w in (unsafe_destination(root, p) for p in sorted(files)) if w]
+    if linked:
+        return "refused", "destination symlink: " + "; ".join(linked)
     for path, how in files.items():
         dst = root / path
         if how == "delete":
@@ -138,7 +173,7 @@ def apply(root: Path, art: Path, *, head: str, base: str, ref: str, regen_globs:
         if MARKER.search(text.decode("utf-8", errors="replace")):
             return "refused", f"{path}: still holds a conflict marker"
         dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes(text)
+        write_nofollow(dst, text)
         git(root, "add", "--", path)
     left = unmerged(root)
     if left:
