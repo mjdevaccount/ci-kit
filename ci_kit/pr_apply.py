@@ -90,10 +90,11 @@ def count_lines(old: str, new: str) -> int:
 
 
 def apply(root: Path, art: Path, *, head: str, base: str, ref: str, regen_globs: list[str], max_lines: int,
-          test_globs: tuple[str, ...] = TEST_GLOBS) -> tuple[str, str]:
+          test_globs: tuple[str, ...] = TEST_GLOBS, message: str = "") -> tuple[str, str]:
     """Redo the merge, check scope, write, commit. (result, why); result 'ready' = committed, push next.
     `base` is the PLAN's sha (a job without PR code): the artifact's own base and merge flag are only
-    checked against it, never trusted -- a manifest written beside PR code could name any commit."""
+    checked against it, never trusted -- a manifest written beside PR code could name any commit.
+    `message` (ci_kit/pr_relock.py) replaces the heal commit message; '' = the heal's own."""
     m = json.loads((art / "manifest.json").read_text(encoding="utf-8"))
     tier = str(m.get("tier") or "")
     files: dict[str, str] = {str(k): str(v) for k, v in (m.get("files") or {}).items()}
@@ -146,7 +147,7 @@ def apply(root: Path, art: Path, *, head: str, base: str, ref: str, regen_globs:
         return "nothing", "the tier's change is already on the head"
     what = ", ".join(sorted(files)[:6]) + ("..." if len(files) > 6 else "")
     msg = (f"Merge {base[:12]} into {ref} (heal: {tier})" if merged else f"heal({tier}): {m.get('summary') or 'regenerate'}")
-    body = f"{msg}\n\nheal ladder tier {tier}: {what or 'merge only'}\n{m.get('summary') or ''}".strip()
+    body = message or f"{msg}\n\nheal ladder tier {tier}: {what or 'merge only'}\n{m.get('summary') or ''}".strip()
     git(root, "commit", "-q", "--no-verify", "-m", body)
     return "ready", what
 
