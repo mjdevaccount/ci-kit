@@ -82,10 +82,13 @@ jobs:
       - name: declared-literal blind direction (no rule given -> exit 2, never a clean 0)
         run: |
           set +e
-          uvx --quiet --from . ci-declared-literal
+          out=$(uvx --quiet --from . ci-declared-literal 2>&1)
           rc=$?
           set -e
+          echo "$out"
           [ "$rc" -eq 2 ] || { echo "::error::expected exit 2 (no policy), got $rc"; exit 1; }
+          # any exit 2 is not enough (uvx's own failure is 2 too): the TOOL must have refused
+          grep -q 'CANNOT CHECK' <<<"$out" || { echo "::error::exit 2 without the tool's CANNOT CHECK line"; exit 1; }
       - name: env-reads selftest (through the action)
         uses: ./
         with:

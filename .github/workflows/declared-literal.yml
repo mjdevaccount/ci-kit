@@ -11,6 +11,7 @@
 #   --rule
 #   docs-net
 #   --pattern=\b192\.0\.2\.\d{1,3}\b
+#   --example=GATEWAY=192.0.2.1
 #   --declared
 #   .env.example
 #   --message
@@ -20,7 +21,8 @@
 #
 # Reports as "<caller job> / lint". A regex cannot ride in `args` itself (the action word-splits
 # it and forbids quotes), so the policy is a committed file -- CI and a workstation run read the
-# same rules. With no rule the gate is exit 2, never a pass over nothing.
+# same rules. With no rule the gate is exit 2, never a pass over nothing; every rule carries an
+# --example it must flag, so a pattern that cannot fire is exit 2 too.
 name: declared-literal
 
 on:
@@ -46,6 +48,17 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
+      # `args: --selftest` would make BOTH steps prove the kit and neither look at the tree
+      - name: the policy is a policy, not the selftest
+        env:
+          ARGS: ${{ inputs.args }}
+        run: |
+          set -f
+          for a in $ARGS; do
+            if [ "$a" = "--selftest" ]; then
+              echo "::error::args carries --selftest: the gate step would never scan the tree"; exit 2
+            fi
+          done
       # the gate first: a selftest-only run would be green while never looking at the tree
       - name: no declared literal outside its declared source
         uses: mjdevaccount/ci-kit@v1
