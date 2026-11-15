@@ -25,6 +25,7 @@
 #         required-checks: "lint + doc checks,unit tests,review gate,image-pr-build"
 #       secrets:
 #         token: ${{ secrets.PR_UPDATE_TOKEN }}   # the same PAT pr-autoupdate holds
+#         EDGE_BOT_PRIVATE_KEY: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}   # v1.37.0, optional: the App (token-source)
 #
 # WOKEN BY THE QUEUE (v1.34.0). A cron every 20 min found work on 3 of 52 passes (trade-data
 # 2026-11-14), each a secure-pool job. pr-autoupdate already reads every PR with its checks, so
@@ -99,10 +100,17 @@ on:
         description: decide and report, push and change nothing
         type: boolean
         default: false
+      token-source:
+        description: pat | app | app-required ('' = the caller repo's PR_TOKEN_SOURCE variable, else pat) -- ci_kit/pr_token.py (v1.37.0)
+        type: string
+        default: ""
     secrets:
       token:
-        description: fine-grained PAT with contents, pull requests, workflows and actions RW, on the caller repo
-        required: true
+        description: fine-grained PAT with contents, pull requests, workflows and actions RW, on the caller repo (not required since v1.37.0; empty while the PAT acts is still red)
+        required: false
+      EDGE_BOT_PRIVATE_KEY:
+        description: the GitHub App's private key (v1.37.0, with the EDGE_BOT_APP_ID variable); token-source decides who acts
+        required: false
 
 permissions:
   contents: read
@@ -121,21 +129,25 @@ jobs:
     environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
     timeout-minutes: 15
     env:
-      GH_TOKEN: ${{ secrets.token }}
       CI_KIT_READ_TOKEN: ${{ github.token }}
       # check names carry spaces ("unit tests"), and the action word-splits `args`: an env var
       CI_KIT_REQUIRED_CHECKS: ${{ inputs.required-checks }}
       # an env var, not a flag: '' (no pre-check) cannot be passed through the word-split args
       CI_KIT_REVIEW_WORKFLOW: ${{ inputs.review-workflow }}
     steps:
-      - name: Refuse to run unconfigured
-        run: |
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::secret 'token' is empty for $GITHUB_REPOSITORY: no merge train runs. Map a fine-grained token (contents, pull requests, workflows, actions: read+write) onto 'token'."
-            exit 1
-          fi
+      # the App or the PAT (v1.37.0, ci_kit/pr_token.py); an empty token is still RED, and the
+      # acting identity is the train's committer, its PRs' author and the `by=` of its record
+      - name: Push token (App or PAT)
+        id: token
+        uses: mjdevaccount/ci-kit/.github/actions/pr-token@v1
+        with: {scope: train, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", app-id: "${{ vars.EDGE_BOT_APP_ID }}",
+               private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}", pat: "${{ secrets.token }}"}
       - name: One pass
         uses: mjdevaccount/ci-kit@v1
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          CI_KIT_TOKEN_LOGIN: ${{ steps.token.outputs.login }}
+          CI_KIT_TRUSTED_LOGINS: ${{ steps.token.outputs.trusted }}
         with:
           tool: ci-merge-train
           args: >-

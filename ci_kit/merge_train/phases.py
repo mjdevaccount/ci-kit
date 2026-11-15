@@ -69,12 +69,15 @@ def eject(o: Opts, p: Pass, n: int, head: str, why: str) -> None:
     label(o, p, n, add=policy.EJECTED, remove=RIDING)
 
 
-def authority(o: Opts, train: dict, me: str) -> str:
-    """'' when open train PR `train` is one this workflow composed with this token, else why not."""
+def authority(o: Opts, train: dict, me: str | frozenset[str]) -> str:
+    """'' when open train PR `train` is one this workflow composed with a TRUSTED token identity
+    (`me`: one login, or ops.trusted -- the acting identity plus the other configured one, so a
+    train opened before a PAT <-> App flip is finished by the next pass), else why not."""
+    ok = frozenset([me] if isinstance(me, str) else me) - {""}
     pr = github.pull(o.repo, int(train["number"]))
     why = github.composed(o.repo, pr, o.train_workflow)
-    if not why and str((pr.get("user") or {}).get("login") or "") != me:
-        why = f"opened by {(pr.get('user') or {}).get('login')}, not this workflow's token user {me}"
+    if not why and str((pr.get("user") or {}).get("login") or "") not in ok:
+        why = f"opened by {(pr.get('user') or {}).get('login')}, not this workflow's token user {' / '.join(sorted(ok)) or '(unknown)'}"
     return why
 
 

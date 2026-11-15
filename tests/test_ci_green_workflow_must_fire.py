@@ -45,8 +45,9 @@ def faults(job: dict) -> list[str]:
     co = next((s for s in steps if str(s.get("uses", "")).startswith("actions/checkout")), None)
     if co is None or co.get("with", {}).get("ref") != HEAD or co.get("with", {}).get("fetch-depth") != 0:
         out.append("checkout is not the run's head_sha at full depth")
-    elif co["with"].get("token") != "${{ secrets.token }}":
-        out.append("checkout does not carry the PAT: a GITHUB_TOKEN push over a workflow file is refused")
+    elif co["with"].get("token") != "${{ steps.token.outputs.token }}":
+        # the App or the PAT (v1.37.0, .github/actions/pr-token), never GITHUB_TOKEN
+        out.append("checkout does not carry the push token: a GITHUB_TOKEN push over a workflow file is refused")
     tool = next((s for s in steps if s.get("with", {}).get("tool") == "ci-green"), None)
     if tool is None or f"--sha {HEAD}" not in " ".join(str(tool["with"].get("args", "")).split()):
         out.append("ci-green does not get --sha head_sha")
@@ -111,4 +112,4 @@ def test_missing_environment_fires() -> None:
 def test_github_token_checkout_fires() -> None:
     job = _job()
     del _checkout(job)["with"]["token"]
-    assert any("PAT" in f for f in faults(job))
+    assert any("push token" in f for f in faults(job))
