@@ -6,7 +6,7 @@ MUST FIRE: on + a scheduled / dispatched pass updates a held BEHIND, cleanly mer
 the queue's own free slots, `autoland-off` included (that label opts out of LANDING, not of being
 kept current). MUST NOT FIRE: off (the default) changes nothing; a push / workflow_run / arming pass
 never touches a held PR; an armed PR that needed an update this pass outranks every held one; a
-draft, fork, conflicting, Renovate or merge-train PR is never touched -- each skip is named.
+draft, fork, conflicting, bot (Renovate included) or merge-train PR is never touched -- each skip is named.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ class _Done:
 def _pr(n: int, armed: bool = False, **k) -> dict:
     return {"number": n, "title": "t", "url": "u", "headRefOid": "a" * 40, "headRefName": f"b{n}", "labels": [],
             "isCrossRepository": False, "isDraft": False, "mergeStateStatus": "BEHIND", "mergeable": "MERGEABLE",
-            "author": {"login": "someone"},
+            "author": {"login": "someone"}, "headCommittedDate": "2026-11-01T00:00:00Z",
             "autoMergeRequest": {"enabledAt": "2026-11-15T00:00:00Z"} if armed else None,
             "statusCheckRollup": [], **k}
 
@@ -69,7 +69,7 @@ def test_on_and_scheduled_updates_a_held_behind_pr_must_fire(monkeypatch: pytest
     puts, summary = _run(monkeypatch, [_pr(2)], update_held=True, event="schedule")
     assert puts == [2]
     assert "#2: updated" in summary
-    assert "update-held: 1 held PR(s) updated of 1 eligible, 0 skipped" in summary
+    assert "update-held: 1 held PR(s) updated of 1 eligible, 0 skipped, 0 error(s)" in summary
 
 
 def test_on_and_dispatched_updates_too_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -110,10 +110,10 @@ def test_held_prs_use_the_queues_free_slots_never_a_second_budget(monkeypatch: p
     puts, summary = _run(monkeypatch, [_pr(1, armed=True, mergeStateStatus="BLOCKED", statusCheckRollup=running),
                                        _pr(2)], update_held=True, event="schedule", max_in_flight=1)
     assert puts == []                                                   # #1 holds the one slot
-    assert "#2: held, not updated: no free queue slot (in flight: 1/1)" in summary
+    assert "#2: held, not updated: no free queue slot (in flight: 1 armed + 0 held of 1)" in summary
     puts, summary = _run(monkeypatch, [_pr(2), _pr(3)], update_held=True, event="schedule", max_in_flight=1)
     assert puts == [2]                                                  # one slot, lowest number first
-    assert "#3: held, not updated: no free queue slot (in flight: 0/1)" in summary
+    assert "#3: held, not updated: no free queue slot (in flight: 0 armed + 0 held of 1)" in summary
 
 
 def test_draft_fork_conflict_renovate_and_train_prs_are_untouched_and_named(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -126,10 +126,10 @@ def test_draft_fork_conflict_renovate_and_train_prs_are_untouched_and_named(monk
     held = {s.split(":", 1)[0]: s for s in summary if ": held, not updated: " in s}
     assert set(held) == {"#2", "#3", "#4", "#5", "#6", "#7", "#8", "#9"}  # #10 is current: nothing to do
     assert "a draft" in held["#2"] and "a fork" in held["#3"] and "conflicts" in held["#4"] and "conflicts" in held["#5"]
-    assert "Renovate" in held["#6"] and "merge train" in held["#7"] and "not computed" in held["#8"]
+    assert "a bot's PR (renovate)" in held["#6"] and "merge train" in held["#7"] and "not computed" in held["#8"]
     assert "running" in held["#9"]
     assert not any(a for a in summary if "label" in a)                  # conflict reporting untouched
-    assert "update-held: 0 held PR(s) updated of 0 eligible, 8 skipped" in summary
+    assert "update-held: 0 held PR(s) updated of 0 eligible, 8 skipped, 0 error(s)" in summary
 
 
 def test_an_open_merge_train_holds_the_held_pass_too() -> None:

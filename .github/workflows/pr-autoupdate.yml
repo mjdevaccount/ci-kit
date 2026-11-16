@@ -102,9 +102,10 @@
 #
 # HELD PRs (`update-held`, default off; ci_kit/pr_held.py): a PR held for review (open, not armed,
 # e.g. `autoland-off`) is also kept current with the base -- but only on a `schedule` or
-# `workflow_dispatch` pass (add `schedule: [{cron: ...}]` to the caller's `on:`), only when no armed
-# PR needed an update that pass, and only in the queue's free `max-in-flight` slots. Drafts, forks,
-# conflicts, Renovate and train branches are never touched; every skip is named in the summary.
+# `workflow_dispatch` pass (add `schedule: [{cron: ...}]` to the caller's `on:`), last, only when every
+# armed PR is current, and only in the queue's free `max-in-flight` slots. Drafts, forks, conflicts,
+# bots' PRs, young heads, any running/failing check and train branches are never touched; every skip
+# is named in the summary; a held PR is never labelled or paged, and the held pass never turns the run red.
 #
 # UNCONFIGURED IS RED: with no `token` the job fails naming it. GITHUB_TOKEN is NOT a fallback --
 # a push made with it fires no workflow, so every updated PR would wait on checks that never
@@ -245,7 +246,7 @@ on:
         type: string
         default: ''
       update-held:
-        description: also merge the base into HELD PRs (open, not armed, BEHIND, mergeable) on schedule / workflow_dispatch passes only, after armed PRs, in the queue's free slots (ci_kit/pr_held.py)
+        description: also merge the base into HELD PRs (open, not armed, BEHIND, mergeable, no check running or failing, not a bot's) on schedule / workflow_dispatch passes only, last, once every armed PR is current, in the queue's free slots (ci_kit/pr_held.py)
         type: boolean
         default: false
     secrets:

@@ -29,7 +29,8 @@ verdict is automerge (ci_kit/pr_renovate.py, v1.32.0): Renovate never arms or me
 repo. A PR the queue picked but skipped for a running review hands its slot to the next eligible PR
 (`Plan.spare`), so one long review does not idle the queue. `update_held` (env CI_KIT_UPDATE_HELD,
 default off) also updates HELD PRs -- open, not armed -- on a scheduled or dispatched pass only,
-after every armed PR and inside the queue's free slots (ci_kit/pr_held.py).
+LAST, once every armed PR is current, inside the queue's free slots; it never labels, pages or
+relocks one, and nothing it raises changes this run's exit code (ci_kit/pr_held.py).
 
 CONFLICT = TRANSITION-ONLY PAGE. The conflict label is the dedup state: a PR that conflicts and
 is not labelled gets the label AND one ntfy push (env `NTFY_URL`; unset = no push) naming the PR
@@ -338,7 +339,6 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
         summary += [f"#{p['number']}: in flight against current main" for p in q.in_flight]
         summary += [f"#{p['number']}: held, {why}" for p, why in q.held]
     attempted, updated, conflicts, err = _drive(repo, q, head, opts, relock, summary, cancel, retry)
-    attempted, updated, err = _held_pass(repo, prs, q, opts, relock, summary, (attempted, updated, err))
     errors += err + (cancel.errors if cancel else 0)
     # ONE ACTOR PER HEAD: a PR this pass base-retried has a new head on its way; its old head goes to
     # neither the ladder (whose dispatch marker would spend a tier-3 slot on a head already gone) nor pr_heal
@@ -362,6 +362,7 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
         # default branch is read HERE only, so a caller without hold/scarce sees exactly the old plan.
         errors += train_kick.kick(repo, opts.train_workflow, [p for p in prs if p["number"] not in updated],
                                   opts.required, default(), _gh, summary, opts.train_min_batch)
+    _held_boundary(repo, prs, q, opts, summary)  # LAST, contained: it never reaches `errors` (pr_held.py)
     return 1 if errors else 0
 
 
@@ -406,26 +407,56 @@ def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock:
     return attempted, updated, conflicts, errors
 
 
-def _held_pass(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, relock: list[int],
-               summary: list[str], armed: tuple[set[int], set[int], int]) -> tuple[set[int], set[int], int]:
-    """The opt-in held-PR pass (ci_kit/pr_held.py), AFTER the armed one: the armed pass's
-    (attempted, updated, errors) with its own added; off = `armed` unchanged. Through `_drive` like
-    an armed PR (review-gate skip, a conflict race, an error), but never offered to doomed_runs (it
-    never cancels an unarmed PR's runs) nor to the heal ladder."""
+def _held_boundary(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, summary: list[str]) -> None:
+    """The opt-in held-PR pass, run after EVERYTHING the armed pass does. Never raises and never
+    touches the run's exit code: a failure is one `update-held: FAILED` line and one WARNING
+    annotation, counted in the closing line's errors -- not silent, and not red on every tick.
+    Off (the default) = returns at once: not one call, not one line."""
     if not opts.update_held:
-        return armed
+        return
     if opts.event not in pr_held.EVENTS:
         summary.append(f"update-held: not this pass ({opts.event or 'unknown event'}; held PRs are updated "
                        f"on {' / '.join(pr_held.EVENTS)} only)")
-        return armed
-    eligible, skipped = pr_held.select(prs, opts.required)
+        return
+    tally = {"updated": 0, "eligible": 0, "skipped": 0, "errors": 0}
+    try:
+        _held_pass(repo, prs, q, opts, summary, tally)
+    except Exception as e:  # noqa: BLE001 -- the boundary: whatever it was, the armed result stands
+        tally["errors"] += 1
+        msg = f"update-held: FAILED {type(e).__name__}: {e}"
+        summary.append(msg)
+        print(f"::warning::{msg}")
+    summary.append(f"update-held: {tally['updated']} held PR(s) updated of {tally['eligible']} eligible, "
+                   f"{tally['skipped']} skipped, {tally['errors']} error(s)")
+
+
+def _held_pass(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, summary: list[str],
+               tally: dict[str, int]) -> None:
+    """Select, admit, update. A held PR is never labelled, paged, put in `relock`, offered to
+    doomed_runs or to the heal ladder: each outcome is ONE summary line (`_held_update`)."""
+    eligible, skipped = pr_held.select(prs, time.time())
     todo, waiting = pr_held.admit(eligible, prs, q, opts.max_in_flight)
     skipped += waiting
+    tally["eligible"], tally["skipped"] = len(eligible), len(skipped)
     summary += [f"#{p['number']}: held, not updated: {why}" for p, why in skipped]
-    attempted, updated, _, errors = _drive(repo, pr_queue.Plan(update=todo), None, opts, relock, summary)
-    summary.append(f"update-held: {len(updated)} held PR(s) updated of {len(eligible)} eligible, "
-                   f"{len(skipped)} skipped")
-    return armed[0] | attempted, armed[1] | updated, armed[2] + errors
+    for p in todo:
+        if reviewing(repo, p["headRefName"], opts.review_workflow):
+            summary.append(f"#{p['number']}: held, not updated: review gate running")
+            continue
+        kind, line = _held_update(repo, p)
+        tally["updated"] += kind == "updated"
+        tally["errors"] += kind == "error"
+        summary.append(line)
+
+
+def _held_update(repo: str, p: dict) -> tuple[str, str]:
+    """One held PR's update: the shared PUT (`_put`), then a line and nothing else, whatever it said."""
+    o, gone = _put(repo, p)
+    if gone:
+        return "gone", f"#{p['number']}: held, not updated: {gone} during the update"
+    if o.kind in ("updated", "current"):
+        return o.kind, _line(p["number"], o)
+    return o.kind, f"#{p['number']}: held, not updated: " + _line(p["number"], o).split(": ", 1)[1]
 
 
 def _lazy_default(repo: str, base: str | None) -> Callable[[], str]:
@@ -512,10 +543,10 @@ def _head_first(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, sum
     return int(h["number"])
 
 
-def _update_one(repo: str, p: dict, opts: Options, tracker: str, relock: list[int]) -> tuple[str, str]:
-    """PUT update-branch for one PR and act on the answer: (outcome kind | 'gone', summary line)."""
+def _put(repo: str, p: dict) -> tuple[Outcome, str]:
+    """PUT update-branch for one PR: (what it answered, the PR's new state if it is no longer open
+    -- '' while open). Shared by the armed path (`_update_one`) and the held one (`_held_update`)."""
     n = p["number"]
-    labelled = any(lb.get("name") == opts.label for lb in p.get("labels") or [])
     r = _gh("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
             "-f", f"expected_head_sha={p['headRefOid']}", check=False)
     o = classify(r.returncode, r.stdout or r.stderr)
@@ -524,11 +555,25 @@ def _update_one(repo: str, p: dict, opts: Options, tracker: str, relock: list[in
         # answered "merge conflict" for a PR that no longer existed as open
         state = _gh("pr", "view", str(n), "-R", repo, "--json", "state", "-q", ".state", check=False)
         if state.returncode == 0 and state.stdout.strip() not in ("", "OPEN"):
-            return "gone", f"#{n}: {state.stdout.strip().lower()} during the update, skipped"
+            return o, state.stdout.strip().lower()
+    return o, ""
+
+
+def _line(n: int, o: Outcome) -> str:
+    return f"#{n}: {o.kind}" + (f" ({o.detail})" if o.detail else "")
+
+
+def _update_one(repo: str, p: dict, opts: Options, tracker: str, relock: list[int]) -> tuple[str, str]:
+    """PUT update-branch for one ARMED PR and act on the answer: (outcome kind | 'gone', summary line)."""
+    n = p["number"]
+    labelled = any(lb.get("name") == opts.label for lb in p.get("labels") or [])
+    o, gone = _put(repo, p)
+    if gone:
+        return "gone", f"#{n}: {gone} during the update, skipped"
     add, do_page, remove = actions_for(o, labelled)
     if do_page and opts.ladder.on and not pr_ladder.blocked(p):
         do_page = False  # the heal ladder takes the conflict; its tier 4 is the page
-    line = f"#{n}: {o.kind}" + (f" ({o.detail})" if o.detail else "")
+    line = _line(n, o)
     if add:
         added, created = add_label(repo, n, opts.label)
         if created:

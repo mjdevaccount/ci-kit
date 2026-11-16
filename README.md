@@ -126,14 +126,23 @@ update re-runs the PR's CI:
 
 - only on a `schedule` or `workflow_dispatch` pass -- never on push, `workflow_run` or arming --
   so add a cron to the caller's `on:` (e.g. `schedule: [{cron: "17 * * * *"}]`);
-- only when no armed PR needed an update in that pass, and no merge train is open;
-- only in the free `max-in-flight` slots (lowest PR number first); with no queue, every eligible one.
+- LAST in that pass, after everything the armed pass does, and only when EVERY armed PR is
+  already current with the base (none BEHIND or not yet computed, wherever the queue holds it)
+  and no merge train is open;
+- only in the free `max-in-flight` slots -- a held PR whose own checks are running holds one too,
+  so armed plus held never exceed it; armed PRs never wait on held ones -- lowest PR number
+  first; with no queue, every eligible one.
 
-Eligible: same-repo, not a draft, BEHIND, cleanly mergeable, no check running or failing on its
-head. Never touched: forks, drafts, conflicting PRs (left for you; no label, no page), Renovate's
-branches (Renovate rebases them) and merge-train branches. `autoland-off` opts a PR out of
-auto-LANDING only; it is still kept current. The summary names every held PR it skipped and why,
-and ends `update-held: N held PR(s) updated of M eligible, K skipped`.
+Eligible: same-repo, not a draft, BEHIND, cleanly mergeable, a head commit at least 10 minutes
+old (younger, or of unreadable age: someone may still be pushing), and no check of ANY name
+running or failing on its head (`required-checks` narrows the armed queue, not this). Never
+touched: forks, drafts, conflicting PRs, any bot's PR (a Bot account or a `[bot]` login,
+Renovate included: a bot rebases its own branch) and merge-train branches. A held PR is never
+labelled, paged or relocked -- a conflict or an error on its update is one summary line,
+`#N: held, not updated: <why>`. `autoland-off` opts a PR out of auto-LANDING only; it is still
+kept current. A failure of the held pass never turns the run red: it is one
+`update-held: FAILED` line and a warning annotation. The summary names every held PR it skipped
+and why, and ends `update-held: N held PR(s) updated of M eligible, K skipped, E error(s)`.
 
 ### The push token: GitHub App or PAT (v1.37.0)
 

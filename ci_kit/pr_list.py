@@ -4,7 +4,8 @@
 without `actions: read` is refused -- and GitHub refuses a fine-grained PAT the check runs at all
 ("Resource not accessible by personal access token", live 2026-10-24 on every caller with an
 open PR). This query asks a check run for its name/status/conclusion and a commit status for its
-context/state/description (the description: the queue hold's lane handoff, v1.35.0), nothing more,
+context/state/description (the description: the queue hold's lane handoff, v1.35.0), and the head
+commit its `committedDate` (pr_held's young-head guard), nothing more,
 and returns rows shaped like `gh pr list --json` so pr_queue,
 pr_autoupdate and the merge train (ci_kit/merge_train) read them unchanged.
 """
@@ -21,7 +22,7 @@ query($owner: String!, $name: String!) {
         autoMergeRequest { enabledAt }
         body
         labels(first: 30) { nodes { name } }
-        commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+        commits(last: 1) { nodes { commit { committedDate statusCheckRollup { contexts(first: 100) { nodes {
           __typename
           ... on CheckRun { name status conclusion startedAt completedAt }
           ... on StatusContext { context state description createdAt }
@@ -47,6 +48,7 @@ def rows(answer: dict) -> list[dict]:
     for n in answer["data"]["repository"]["pullRequests"]["nodes"]:
         commits = (n.get("commits") or {}).get("nodes") or []
         rollup = (commits[0]["commit"].get("statusCheckRollup") or {}) if commits else {}
+        committed = commits[0]["commit"].get("committedDate") if commits else None
         out.append({
             **{k: n.get(k) for k in ("id", "number", "title", "url", "isCrossRepository", "headRefOid",
                                      "headRefName", "mergeStateStatus", "autoMergeRequest",
@@ -58,5 +60,7 @@ def rows(answer: dict) -> list[dict]:
             # match: changelogs come first). Only the flag travels: bodies stay out of the rows.
             "renovateAutomerge": automerge_enabled(n.get("body") or ""),
             "statusCheckRollup": ((rollup.get("contexts") or {}).get("nodes")) or [],
+            # the head commit's date: pr_held skips a head too young to be finished (someone pushing)
+            "headCommittedDate": committed,
         })
     return out
