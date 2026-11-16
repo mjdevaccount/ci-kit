@@ -11,9 +11,13 @@
 #     with:
 #       scope: update                                               # the job's permission set (below)
 #       mode: ${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}    # '' = pat
-#       app-id: ${{ vars.EDGE_BOT_APP_ID }}
+#       client-id: ${{ vars.EDGE_BOT_APP_ID }}                      # the App's client id (or app id)
 #       private-key: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}
 #       pat: ${{ secrets.token }}
+#
+# `app-id` is the DEPRECATED spelling of `client-id` (v1.40.0): identical value, decision and record,
+# plus one ::notice. `deprecated-client-id` / `deprecated-private-key` are read only when the generic
+# input is empty, each use a ::notice -- the alias logic lives HERE, never in the callers.
 #   - env: { GH_TOKEN: "${{ steps.token.outputs.token }}", CI_KIT_TOKEN_LOGIN: "${{ steps.token.outputs.login }}",
 #            CI_KIT_TRUSTED_LOGINS: "${{ steps.token.outputs.trusted }}" }
 #
@@ -37,12 +41,28 @@ inputs:
     description: pat | app | app-required ('' = pat). See ci_kit/pr_token.py
     required: false
     default: ""
+  client-id:
+    description: the GitHub App's client id (or app id) -- create-github-app-token's `client-id` (v1.40.0)
+    required: false
+    default: ""
   app-id:
-    description: the GitHub App's id (or client id) -- the caller's EDGE_BOT_APP_ID variable
+    description: DEPRECATED alias of client-id (identical behaviour, a ::notice when used; removed in v2) -- create-github-app-token deprecated its own `app-id` the same way
     required: false
     default: ""
   private-key:
-    description: the GitHub App's private key -- the caller's EDGE_BOT_PRIVATE_KEY secret
+    description: the GitHub App's private key
+    required: false
+    default: ""
+  deprecated-client-id:
+    description: >-
+      a ci-kit reusable's DEPRECATED `EDGE_BOT_APP_ID` variable: the client id when client-id and app-id
+      are both empty (identical behaviour, a ::notice naming `app-client-id`; removed in v2)
+    required: false
+    default: ""
+  deprecated-private-key:
+    description: >-
+      a ci-kit reusable's DEPRECATED `EDGE_BOT_PRIVATE_KEY` secret: the key when private-key is empty
+      (identical behaviour, a ::notice naming `app-private-key`; removed in v2)
     required: false
     default: ""
   pat:
@@ -73,8 +93,13 @@ runs:
         PYTHONSAFEPATH: "1"
         CI_KIT_TOKEN_MODE: ${{ inputs.mode }}
         CI_KIT_TOKEN_SCOPE: ${{ inputs.scope }}
-        HAS_APP_ID: ${{ inputs.app-id != '' }}
-        HAS_KEY: ${{ inputs.private-key != '' }}
+        HAS_APP_ID: ${{ (inputs.client-id || inputs.app-id || inputs.deprecated-client-id) != '' }}
+        HAS_KEY: ${{ (inputs.private-key || inputs.deprecated-private-key) != '' }}
+        # the deprecated spellings (v1.40.0) that supplied a value: notices only, never a different
+        # decision or record. Each is true exactly when the mint's `||` chain below falls through to it.
+        APP_ID_ALIAS: ${{ inputs.client-id == '' && inputs.app-id != '' }}
+        DEPRECATED_CLIENT_ID: ${{ inputs.client-id == '' && inputs.app-id == '' && inputs.deprecated-client-id != '' }}
+        DEPRECATED_PRIVATE_KEY: ${{ inputs.private-key == '' && inputs.deprecated-private-key != '' }}
         HAS_PAT: ${{ inputs.pat != '' }}
       # A decide that could not RUN (no python3, an import error) wrote no outputs and no record:
       # write the record's crash shape here, so the failure is still one greppable line.
@@ -98,8 +123,8 @@ runs:
       continue-on-error: ${{ steps.decide.outputs.source == 'pat' }}
       uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
       with:
-        client-id: ${{ inputs.app-id }}
-        private-key: ${{ inputs.private-key }}
+        client-id: ${{ inputs.client-id || inputs.app-id || inputs.deprecated-client-id }}
+        private-key: ${{ inputs.private-key || inputs.deprecated-private-key }}
         owner: ${{ github.repository_owner }}
         repositories: ${{ github.repository }}
         # The job's set ONLY when the App acts; the pat-mode canary asks for metadata:read and nothing

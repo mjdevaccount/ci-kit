@@ -116,7 +116,7 @@ def _cli(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, step: str, pat
          **env: str) -> tuple[int, dict[str, str], str]:
     out, summ = tmp_path / "out", tmp_path / "summary"
     for k in ("CI_KIT_TOKEN_MODE", "CI_KIT_TOKEN_SCOPE", "HAS_APP_ID", "HAS_KEY", "HAS_PAT", "MINT", "SOURCE", "REASON",
-              "MINT_OUTCOME", "APP_SLUG"):
+              "MINT_OUTCOME", "APP_SLUG", *pt.DEPRECATED):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summ))
@@ -219,6 +219,7 @@ def test_the_composite_pins_the_mint_by_sha_and_never_shells_the_token() -> None
     for s in steps.values():  # no shell ever holds the key or the App token (the PAT only for GET /user)
         env = list((s.get("env") or {}).values())
         assert "${{ inputs.private-key }}" not in env and not any("mint.outputs.token" in v for v in env)
+        assert "${{ inputs.deprecated-private-key }}" not in env
 
 
 # The expression subset the composite's `with:`/`outputs:` use, evaluated (no GitHub expression
