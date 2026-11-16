@@ -429,7 +429,8 @@ def test_a_head_red_only_by_cancelled_runs_was_never_in_flight_must_not_fire() -
 
 # ── the review gate's admission CLI ───────────────────────────────────────────────────────────
 def _admit(monkeypatch: pytest.MonkeyPatch, tmp_path, prs: list[dict], *, edit_rc: int = 0, demand: bool = True,
-           argv: tuple[str, ...] = (), label: str | None = "PR queue: parked") -> dict[str, str]:
+           argv: tuple[str, ...] = (), label: str | None = "PR queue: parked", pool: str = SEALED,
+           seen: list[str] | None = None) -> dict[str, str]:
     out = tmp_path / "out"
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))
 
@@ -447,14 +448,33 @@ def _admit(monkeypatch: pytest.MonkeyPatch, tmp_path, prs: list[dict], *, edit_r
             return subprocess.CompletedProcess(cmd, 0, json.dumps(got), "")
         raise subprocess.CalledProcessError(1, cmd)
     monkeypatch.setattr(pr_admit.subprocess, "run", run)
-    monkeypatch.setattr(pr_admit, "head_demand", lambda *a: demand)
-    pr_admit.admit_main(["--repo", "o/r", "--pr", "3080", "--pool", SEALED, *argv])
+    monkeypatch.setattr(pr_admit, "head_demand", lambda _r, _h, p, *_: (seen is not None and seen.append(p), demand)[1])
+    pr_admit.admit_main(["--repo", "o/r", "--pr", "3080", "--pool", pool, *argv])
     return dict(line.split("=", 1) for line in out.read_text(encoding="utf-8").splitlines())
 
 
 def test_admission_parks_a_later_pr_and_labels_it_must_fire(monkeypatch, tmp_path) -> None:
     got = _admit(monkeypatch, tmp_path, [_pr(3073), _pr(3080)])
     assert got["defer"] == "true" and got["head"] == "3073"
+
+
+def test_admission_reads_a_json_label_list_pool_by_its_last_label_must_fire(monkeypatch, tmp_path) -> None:
+    # a runs-on list (v1.40.0): the scheduler's pool is its LAST label, never the raw JSON text
+    for pool in ('["self-hosted","home-sealed"]', SEALED):
+        seen: list[str] = []
+        got = _admit(monkeypatch, tmp_path, [_pr(3073), _pr(3080)], pool=pool, seen=seen)
+        assert seen == [SEALED] and got["defer"] == "true", (pool, seen)
+    seen = []
+    assert _admit(monkeypatch, tmp_path, [_pr(3073), _pr(3080)], pool="[not json", seen=seen)["defer"] == "false"
+    assert seen == []                                   # unparseable = not scarce: admitted, nothing read
+
+
+@pytest.mark.parametrize(("raw", "want"), [
+    ("", ""), ("home-sealed", "home-sealed"), ('["self-hosted","home-sealed"]', "home-sealed"),
+    ('["sealed"]', "sealed"), ("[]", ""), ("[not json", ""), (" sealed ", "sealed"), ('{"a": 1}', '{"a": 1}'),
+])
+def test_pool_label(raw: str, want: str) -> None:
+    assert pr_admit.pool_label(raw) == want
 
 
 def test_admission_skips_a_conflicting_or_stacked_lowest_pr_like_the_hold_must_fire(monkeypatch, tmp_path) -> None:

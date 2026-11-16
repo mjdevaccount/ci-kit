@@ -1,6 +1,6 @@
 """The review gate's ADMISSION: may this PR's full model review take the sealed runner now?
 
-`python -m ci_kit.pr_admit --repo R --pr N --pool LABEL [--pending] [--attempt K]`, run twice by
+`python -m ci_kit.pr_admit --repo R --pr N --pool POOL [--pending] [--attempt K]`, run twice by
 .github/workflows/review-gate.yml (`queue-priority`): in `decide` (with --pending: a head whose
 review is still deciding counts as demand) and as the first step of `model review`, before the PR
 is checked out (GitHub hands a freed runner to any queued job, often not the oldest). Writes
@@ -13,6 +13,10 @@ It ADDS the label, never creates it: pr_sched creates it only after proving its 
 what is parked (`can_act`), so a repo whose token cannot parks nothing here either. A label made
 while the grant held carries pr_sched's OFF description once it is lost: that parks nothing too.
 Token: the job's GITHUB_TOKEN (pull-requests: write for the label, actions: read for the jobs).
+
+POOL is a label, or a runs-on value as a JSON label list (v1.40.0): the scheduler's pool is that
+list's LAST label (`pool_label`), so a workflow can hand over what its runs-on reads and never
+re-derive it in shell. A bare label is read exactly as before.
 """
 from __future__ import annotations
 
@@ -43,14 +47,30 @@ def head_demand(repo: str, h: dict, pool: str, read: Gh, pending: bool) -> bool:
     return False
 
 
+def pool_label(raw: str) -> str:
+    """The scarce pool a runs-on value names: a bare label as it is, a JSON label list's LAST label,
+    '' for '' or an empty list. Pure. A list that does not parse is '' (not scarce: ADMIT, never park
+    blind) -- the job's own fromJSON would refuse it before any runner was taken."""
+    raw = (raw or "").strip()
+    if not raw.startswith("["):
+        return raw
+    try:
+        labels = json.loads(raw)
+    except ValueError:
+        return ""
+    return str(labels[-1]) if isinstance(labels, list) and labels else ""
+
+
 def admit_main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m ci_kit.pr_admit", description="park a non-head PR's job on a scarce pool")
     ap.add_argument("--repo", required=True)
     ap.add_argument("--pr", type=int, required=True)
-    ap.add_argument("--pool", required=True, help="the scarce pool label this job would take ('' = not scarce: admit)")
+    ap.add_argument("--pool", required=True, help="the scarce pool this job would take: a label or a JSON label list, whose LAST label "
+                    "is the pool ('' = not scarce: admit)")
     ap.add_argument("--pending", action="store_true", help="a head still deciding counts as demand (the pre job)")
     ap.add_argument("--attempt", type=int, default=1, help="this run's attempt: from MAX_ATTEMPT on it is never parked")
     args = ap.parse_args(argv)
+    args.pool = pool_label(args.pool)
 
     def read(*a: str) -> subprocess.CompletedProcess:
         return subprocess.run(["gh", *a], check=True, capture_output=True, text=True)

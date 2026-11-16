@@ -35,6 +35,14 @@ annotations API) and in the step summary, in ONE fixed shape -- a CONTRACT, a de
             workflow=<file> job=<id> login=<login|unknown>          (one line; wrapped here)
 Every value is free of `=` and spaces. The decide step's shell writes `reason=decide-crashed`
 itself when this module cannot run at all.
+
+DEPRECATED NAMES (v1.40.0). The composite's App id input is `client-id` (create-github-app-token's
+own name; it deprecated `app-id` the same way); `app-id` stays an alias. `deprecated-client-id` /
+`deprecated-private-key` carry a caller's older consumer-specific spellings (the `EDGE_BOT_APP_ID`
+variable, the `EDGE_BOT_PRIVATE_KEY` secret) and are read only when the generic input is empty. An
+old spelling resolves to the SAME value, and each one used is a `::notice` naming its replacement
+(`deprecations`): never a different decision, never a different record line. Removing them is a
+major version. The precedence (generic first) and the notice live in the composite, once.
 """
 from __future__ import annotations
 
@@ -68,6 +76,15 @@ IDENTITY_SCOPES = frozenset({"update", "train"})
 LOGIN_ENV = "CI_KIT_TOKEN_LOGIN"
 TRUSTED_ENV = "CI_KIT_TRUSTED_LOGINS"
 PREFIX = "pr-token:"
+# NOT the record's title (`pr-token`): a detector grepping the record must never match a notice
+DEPRECATED_TITLE = "ci-kit deprecated name"
+#: the composite's env flag -> the deprecated spelling it stood in for, and its replacement. Each flag
+#: is true exactly when the mint's `||` chain fell through to that spelling (action.yml, decide step).
+DEPRECATED = {
+    "APP_ID_ALIAS": ("app-id", "client-id"),                            # the composite's own input
+    "DEPRECATED_CLIENT_ID": ("EDGE_BOT_APP_ID", "app-client-id"),       # a reusable's repo variable
+    "DEPRECATED_PRIVATE_KEY": ("EDGE_BOT_PRIVATE_KEY", "app-private-key"),  # a reusable's secret
+}
 
 
 @dataclass(frozen=True)
@@ -144,6 +161,17 @@ def trusted_logins(acting: str, env: dict[str, str] | None = None) -> frozenset[
     return frozenset(trusted_set(acting, [x.strip() for x in raw.split(",") if x.strip()]))
 
 
+def deprecations(used: list[str]) -> list[str]:
+    """One `::notice` line per deprecated spelling that supplied a value (`used` = keys of
+    DEPRECATED, in order; an unknown key is named as it is, never dropped). Pure."""
+    out = []
+    for flag in dict.fromkeys(used):
+        old, new = DEPRECATED.get(flag, (flag, ""))
+        what = f"`{old}` is deprecated: use `{new}`" if new else f"a deprecated name was used ({old})"
+        out.append(f"::notice title={DEPRECATED_TITLE}::{what} -- identical behaviour today; the old name is "
+                   "removed in the next major version")
+    return out
+
 # ── the composite's two steps ────────────────────────────────────────────────────────────────────
 def _out(**kv: str) -> None:
     path = os.environ.get("GITHUB_OUTPUT")
@@ -188,6 +216,8 @@ def _pat_login() -> str:
 
 
 def cmd_decide() -> int:
+    for n in deprecations([f for f in DEPRECATED if _flag(f)]):
+        print(n)
     mode = os.environ.get("CI_KIT_TOKEN_MODE", "")
     d = decide(mode, _flag("HAS_APP_ID"), _flag("HAS_KEY"), _flag("HAS_PAT"))
     scope = os.environ.get("CI_KIT_TOKEN_SCOPE", "")
