@@ -1,4 +1,4 @@
-# A caller written the v1.40 way: every consumer-specific value arrives as the caller's own config
+# A caller written the v1.41 way: every consumer-specific value arrives as the caller's own config
 # -- the App's client id as an input, its key under the generic secret name, the secure and sealed
 # pools as JSON label lists. actionlint must accept it against the reusables in THIS checkout
 # (ci.yml). The names on the RIGHT of each mapping are the consumer's own. Never run: a fixture.

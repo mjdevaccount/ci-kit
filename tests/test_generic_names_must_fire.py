@@ -1,4 +1,4 @@
-"""The generic names (v1.40.0) resolve to EXACTLY what the deprecated ones did -- must fire, both ways.
+"""The generic names (v1.41.0) resolve to EXACTLY what the deprecated ones did -- must fire, both ways.
 
 `v1` floats: every consumer picks this up unasked. A caller that passes only the OLD names
 (`EDGE_BOT_APP_ID` variable, `EDGE_BOT_PRIVATE_KEY` secret, the CI_SECURE_RUNNER / CI_SEALED_RUNNER
@@ -11,41 +11,15 @@ The fixture callers (tests/fixtures/callers/) are what actionlint checks against
 from __future__ import annotations
 
 import json
-import pathlib
-import re
 
 import _runners
 import pytest
-import yaml
+from test_pr_token_aliases_must_fire import ID, KEY, gh
+from test_pr_token_aliases_must_fire import _s as _gh_str
+from test_pr_token_must_fire import ACTION, TOKEN_JOBS, WF, _yaml
 
 from ci_kit import pr_admit
 from ci_kit import pr_token as pt
-
-ROOT = pathlib.Path(__file__).resolve().parent.parent
-ACTION = ROOT / ".github" / "actions" / "pr-token" / "action.yml"
-WF = ROOT / ".github" / "workflows"
-TOKEN_JOBS = {"pr-autoupdate.yml": ["update"], "merge-train.yml": ["train"], "ci-green.yml": ["advance"],
-              "pr-heal.yml": ["claim", "push", "report"], "relock.yml": ["push"]}
-ID, KEY = "Iv1.example", "-----KEY-----"
-
-
-def gh(expr: str, ctx: dict[str, str]) -> object:
-    """The expression subset these files use, evaluated: `&&`/`||` return an OPERAND (Python's
-    and/or), '' is falsy, `!` is not, a context name absent from `ctx` is ''."""
-    body = expr.strip().removeprefix("${{").removesuffix("}}")
-    body = re.sub(r"\b((?:inputs|vars|secrets)\.[\w-]+)", lambda m: f"_c({m.group(1)!r})", body)
-    body = body.replace("fromJSON(", "_j(").replace("&&", " and ").replace("||", " or ")
-    body = re.sub(r"!(?!=)", " not ", body)
-    return eval(body, {"__builtins__": {}}, {"_c": lambda k: ctx.get(k, ""), "_j": json.loads})  # noqa: S307
-
-
-def _yaml(path: pathlib.Path) -> dict:
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
-
-
-def _gh_str(v: object) -> str:
-    """How GitHub hands an expression's value to an input or env var."""
-    return str(v).lower() if isinstance(v, bool) else str(v)
 
 
 def composite(inputs: dict[str, str], action: dict | None = None) -> dict[str, object]:
@@ -117,17 +91,6 @@ def test_the_composite_own_app_id_alias_still_resolves_must_fire() -> None:
     assert len(old["notices"]) == 1 and "`app-id` is deprecated: use `client-id`" in old["notices"][0]
 
 
-def test_a_broken_precedence_is_caught_must_fire() -> None:
-    # the deprecated spelling placed FIRST in the mint: with both set the old one wins -- the
-    # evaluation above would see it (and the notice flag, unchanged, would no longer match)
-    action = _yaml(ACTION)
-    mint = next(s for s in action["runs"]["steps"] if s.get("id") == "mint")
-    assert mint["with"]["private-key"] == "${{ inputs.private-key || inputs.deprecated-private-key }}"
-    mint["with"]["private-key"] = "${{ inputs.deprecated-private-key || inputs.private-key }}"
-    assert composite({"private-key": KEY, "deprecated-private-key": "old-key"}, action)["private-key"] == "old-key"
-    assert composite({"private-key": KEY, "deprecated-private-key": "old-key"})["private-key"] == KEY
-
-
 # ── the pools: no input = the v1.39 expression's value, exactly; an input wins ─────────────────────
 @pytest.mark.parametrize(("new", "old", "inp", "var"), [
     (_runners.SECURE, _runners.OLD_SECURE, "inputs.secure-runner", "vars.CI_SECURE_RUNNER"),
@@ -155,11 +118,3 @@ def test_review_gate_hands_the_scheduler_the_same_pool() -> None:
         got = gh(pool, {"inputs.sealed-runner": '["self-hosted","sealed"]', "vars.CI_SEALED_RUNNER": "1"})
         assert pr_admit.pool_label(str(got)) == "sealed"
         assert pr_admit.pool_label(str(gh(pool, {"vars.CI_SEALED_RUNNER": "1"}))) == "home-sealed"
-
-
-@pytest.mark.parametrize(("raw", "want"), [
-    ("", ""), ("home-sealed", "home-sealed"), ('["self-hosted","home-sealed"]', "home-sealed"),
-    ('["sealed"]', "sealed"), ("[]", ""), ("[not json", ""), (" sealed ", "sealed"),
-])
-def test_pool_label(raw: str, want: str) -> None:
-    assert pr_admit.pool_label(raw) == want

@@ -177,7 +177,20 @@ Read it from outside with `gh run view <run> --log | grep 'pr-token: '` or the j
 annotations (`gh api repos/<owner>/<repo>/check-runs/<job id>/annotations`); the step summary is
 for humans (no REST endpoint serves it).
 
-### Generic names (v1.40.0)
+### The pr-token composite's input names (v1.40.0)
+
+The composite (`.github/actions/pr-token`) takes the App's id as `client-id` (its client id, or app
+id -- `actions/create-github-app-token`'s own name). `app-id` is a DEPRECATED alias: a caller that
+passes `app-id` + `private-key` exactly as before gets the same App id and key, the same decision and
+the same `pr-token:` record line, plus one `::notice` titled `ci-kit deprecated name` (never the
+record's `pr-token` title). Two more optional inputs, `deprecated-client-id` and
+`deprecated-private-key`, are read only when `client-id`/`app-id` resp. `private-key` are empty,
+each use a notice; generic first. The aliases are removed in v2.
+`ci_kit.pr_admit --pool` also accepts a runs-on JSON label list, read as its LAST label, or a JSON
+string; a value that names no label (malformed JSON, `[]`, a non-string item, quoted text) is refused
+with an `::error` and exit 2, and the review then runs (v1.41.0).
+
+### Generic names in the reusables (v1.41.0)
 
 The token reusables (pr-autoupdate, merge-train, ci-green, pr-heal, relock) take the App as the
 `app-client-id` INPUT (its client id, or app id) and the `app-private-key` SECRET -- the caller

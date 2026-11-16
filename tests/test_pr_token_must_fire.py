@@ -116,7 +116,7 @@ def _cli(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, step: str, pat
          **env: str) -> tuple[int, dict[str, str], str]:
     out, summ = tmp_path / "out", tmp_path / "summary"
     for k in ("CI_KIT_TOKEN_MODE", "CI_KIT_TOKEN_SCOPE", "HAS_APP_ID", "HAS_KEY", "HAS_PAT", "MINT", "SOURCE", "REASON",
-              "MINT_OUTCOME", "APP_SLUG"):
+              "MINT_OUTCOME", "APP_SLUG", *pt.DEPRECATED):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summ))
@@ -216,10 +216,50 @@ def test_the_composite_pins_the_mint_by_sha_and_never_shells_the_token() -> None
     assert mint["with"]["repositories"] == "${{ github.repository }}"                  # this repo only
     assert mint["continue-on-error"] == "${{ steps.decide.outputs.source == 'pat' }}"  # app modes: a failed mint is red
     assert steps["report"]["if"].startswith("always()")                                # the record survives a failed mint
-    for s in steps.values():  # no shell ever holds the key or the App token (the PAT only for GET /user)
-        env = list((s.get("env") or {}).values())
-        assert "${{ inputs.private-key }}" not in env and not any("mint.outputs.token" in v for v in env)
-        assert "${{ inputs.deprecated-private-key }}" not in env
+    for s in steps.values():  # no shell ever holds the App token (the PAT only for GET /user)
+        assert not any("mint.outputs.token" in str(v) for v in (s.get("env") or {}).values())
+    assert key_exposures(_yaml(ACTION)) == []                                          # nor the key
+
+
+# ANY expression naming either key input, in any step's env or run text: the key reaching a shell.
+# The one allowed shape is a comparison with '' (HAS_KEY / the alias flags): a boolean, never the value.
+_KEY = re.compile(r"inputs\.(?:deprecated-)?private-key\b")
+_KEY_TEST = re.compile(r"\(?\s*inputs\.(?:deprecated-)?private-key(?:\s*\|\|\s*inputs\.(?:deprecated-)?private-key)*"
+                       r"\s*\)?\s*[!=]=\s*''")
+
+
+def key_exposures(action: dict) -> list[str]:
+    """Where a step could hand the App key to a shell ([] = nowhere). The mint's `with:` is not a shell."""
+    out = []
+    for s in action["runs"]["steps"]:
+        for k, v in (s.get("env") or {}).items():
+            if _KEY.search(_KEY_TEST.sub("", str(v))):
+                out.append(f"{s.get('id')}: env {k}")
+        if _KEY.search(str(s.get("run") or "")):
+            out.append(f"{s.get('id')}: run")
+    return out
+
+
+@pytest.mark.parametrize("leak", [
+    "${{ inputs.private-key }}", "${{ inputs.deprecated-private-key }}",
+    "${{ inputs.private-key || inputs.deprecated-private-key }}",           # F3: the resolved key, not one name
+    "${{ inputs.deprecated-private-key || inputs.private-key }}",
+    "${{ inputs.private-key != '' && inputs.private-key || '' }}",           # a comparison that still yields it
+    "${{ format('{0}', inputs.private-key) }}", "x-${{ inputs.private-key }}",
+])
+def test_the_key_reaching_a_shell_is_caught_must_fire(leak: str) -> None:
+    for step, where in (("decide", "env"), ("report", "env"), ("decide", "run")):
+        action = _yaml(ACTION)
+        s = {x["id"]: x for x in action["runs"]["steps"]}[step]
+        if where == "env":
+            s["env"]["LEAK"] = leak
+        else:
+            s["run"] += f"\necho {leak}"
+        assert key_exposures(action) == [f"{step}: {where}" + (" LEAK" if where == "env" else "")], (leak, step)
+    # the boolean shapes the composite really uses are NOT exposures (no false red on today's file)
+    action = _yaml(ACTION)
+    env = {x["id"]: x for x in action["runs"]["steps"]}["decide"]["env"]
+    assert "inputs.private-key" in env["HAS_KEY"] and "inputs.deprecated-private-key" in env["DEPRECATED_PRIVATE_KEY"]
 
 
 # The expression subset the composite's `with:`/`outputs:` use, evaluated (no GitHub expression
@@ -289,7 +329,7 @@ def test_an_unknown_scope_is_red(monkeypatch: pytest.MonkeyPatch, tmp_path: path
     assert rc == 1 and outs["source"] == "none" and "reason=scope-invalid" in summary
 
 
-# THE GENERIC NAMES (v1.40.0) and the deprecated aliases they replace, each still accepted
+# THE GENERIC NAMES (v1.41.0) and the deprecated aliases they replace, each still accepted
 NEW_KEY, OLD_KEY = "app-private-key", "EDGE_BOT_PRIVATE_KEY"
 NEW_ID, OLD_ID = "app-client-id", "EDGE_BOT_APP_ID"
 # each spelling passed AS IS: the composite alone resolves them (tests/test_generic_names_must_fire.py)
@@ -308,7 +348,7 @@ def token_faults(wf: dict, jobs: list[str]) -> list[str]:
     """Why a reusable's token jobs do not take their token from the one pr-token step ([] = clean)."""
     out = []
     call = (wf.get("on") or wf.get(True))["workflow_call"]
-    for secret in (NEW_KEY, OLD_KEY):   # the generic name AND its deprecated alias (v1.40.0)
+    for secret in (NEW_KEY, OLD_KEY):   # the generic name AND its deprecated alias (v1.41.0)
         if (call["secrets"].get(secret) or {}).get("required") is not False:
             out.append(f"{secret} is not an optional workflow_call secret")
     for name in ("token-source", "app-client-id"):

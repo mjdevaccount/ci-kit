@@ -2,7 +2,7 @@
 
 ci-kit's token jobs (pr-autoupdate, merge-train, ci-green, pr-heal's claim/push/report) pushed,
 commented and merged with the caller's fine-grained PAT. A GitHub App (the reusables' `app-client-id`
-input and `app-private-key` secret, v1.40.0) replaces it. ONE composite action
+input and `app-private-key` secret, v1.41.0) replaces it. ONE composite action
 (`.github/actions/pr-token/action.yml`) mints the App token with `actions/create-github-app-token`
 (no JWT code here), falls back to the PAT, and records which one each run used. This module is its
 decision and its record, so both are unit-tested; the composite only wires it.
@@ -36,14 +36,15 @@ annotations API) and in the step summary, in ONE fixed shape -- a CONTRACT, a de
 Every value is free of `=` and spaces. The decide step's shell writes `reason=decide-crashed`
 itself when this module cannot run at all.
 
-DEPRECATED NAMES (v1.40.0). The App's id and key were first read under consumer-specific names
-(a repository variable and a secret); the generic names are the reusables' `app-client-id` input and
-`app-private-key` secret, and this composite's `client-id` (create-github-app-token deprecated its own
-`app-id` the same way). The old spellings still resolve to the SAME value, and each one used is a
-`::notice` naming its replacement (`deprecations`): never a different decision, never a different
-record line. Removing them is a major version. The reusables hand the composite BOTH spellings
-(`deprecated-client-id` / `deprecated-private-key`) and the composite alone resolves them, so the
-precedence (generic first) and the notice live in one place, not in every caller.
+DEPRECATED NAMES. The App's id and key were first read under consumer-specific names (a repository
+variable and a secret); the generic names are the reusables' `app-client-id` input and
+`app-private-key` secret (v1.41.0), and this composite's `client-id` (v1.40.0; create-github-app-token
+deprecated its own `app-id` the same way, and `app-id` stays an alias here). The old spellings still
+resolve to the SAME value, and each one used is a `::notice` naming its replacement (`deprecations`):
+never a different decision, never a different record line. Removing them is a major version. The
+reusables hand the composite BOTH spellings (`deprecated-client-id` / `deprecated-private-key`, read
+only when the generic input is empty) and the composite alone resolves them, so the precedence
+(generic first) and the notice live in one place, not in every caller.
 """
 from __future__ import annotations
 
@@ -77,6 +78,7 @@ IDENTITY_SCOPES = frozenset({"update", "train"})
 LOGIN_ENV = "CI_KIT_TOKEN_LOGIN"
 TRUSTED_ENV = "CI_KIT_TRUSTED_LOGINS"
 PREFIX = "pr-token:"
+# NOT the record's title (`pr-token`): a detector grepping the record must never match a notice
 DEPRECATED_TITLE = "ci-kit deprecated name"
 #: the composite's env flag -> the deprecated spelling it stood in for, and its replacement. Each flag
 #: is true exactly when the mint's `||` chain fell through to that spelling (action.yml, decide step).

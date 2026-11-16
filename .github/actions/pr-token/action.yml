@@ -14,10 +14,13 @@
 #       client-id: ${{ inputs.app-client-id }}                       # the App's client id (or app id)
 #       private-key: ${{ secrets.app-private-key }}
 #       pat: ${{ secrets.token }}
-#       # a ci-kit reusable ALSO passes its deprecated spellings (v1.40.0): used only when the generic
+#       # a ci-kit reusable ALSO passes its deprecated spellings (v1.41.0): used only when the generic
 #       # one is empty, each use a ::notice -- the alias logic lives HERE, never in the callers
 #       deprecated-client-id: ${{ vars.EDGE_BOT_APP_ID }}
 #       deprecated-private-key: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}
+#
+# `app-id` is the DEPRECATED spelling of `client-id` (v1.40.0): identical value, decision and record,
+# plus one ::notice. The INPUT NAMES below are a contract (tests/test_pr_token_inputs_must_fire.py).
 #   - env: { GH_TOKEN: "${{ steps.token.outputs.token }}", CI_KIT_TOKEN_LOGIN: "${{ steps.token.outputs.login }}",
 #            CI_KIT_TRUSTED_LOGINS: "${{ steps.token.outputs.trusted }}" }
 #

@@ -74,7 +74,7 @@ on:
         type: string
         default: ""
       secure-runner:
-        description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- README "Generic names"
+        description: runs-on of the `advance` job (it holds the write token), a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- README "Generic names"
         type: string
         default: ""
     secrets:
