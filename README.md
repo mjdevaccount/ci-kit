@@ -250,6 +250,13 @@ labels, so a typo there cannot move a token job onto another pool); else `ubuntu
 secure pool runs in the caller's `ci-secure` environment wherever the workflow used one. A caller
 that sets no input runs on exactly the pools it ran on before.
 
+`sealed-runner` needs `kit-ref` at v1.40.0 or later: an older pinned kit's `pr_admit` reads the
+JSON list as ONE label, which names no pool, so the review never parks -- silently.
+
+Rollback floor: once v1.42.0 is out, moving the floating `v1` tag back goes no lower than v1.40.0.
+The reusables now send the pr-token composite names (`client-id`, `deprecated-client-id`,
+`deprecated-private-key`) that actions older than v1.40.0 do not declare.
+
 ### Relocking a dependency bot's PR (v1.38.0)
 
 A bot's regex manager bumps a pin in the manifest and leaves the lockfile stale, so the PR is red
