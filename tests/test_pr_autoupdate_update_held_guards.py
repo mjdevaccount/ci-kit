@@ -18,6 +18,8 @@ import time
 from datetime import UTC, datetime
 
 import pytest
+import test_pr_autoupdate_update_held as base
+from test_pr_autoupdate_update_held import _Done
 
 import ci_kit.pr_autoupdate as upd
 from ci_kit import pr_held, pr_queue
@@ -26,16 +28,8 @@ from ci_kit.merge_train import RIDING
 OLD = "2026-11-01T00:00:00Z"
 
 
-class _Done:
-    def __init__(self, rc: int = 0, out: str = "", err: str = "") -> None:
-        self.returncode, self.stdout, self.stderr = rc, out, err
-
-
 def _pr(n: int, armed: bool = False, **k) -> dict:
-    return {"number": n, "title": "t", "url": "u", "headRefOid": "a" * 40, "headRefName": f"b{n}", "labels": [],
-            "isCrossRepository": False, "isDraft": False, "mergeStateStatus": "BEHIND", "mergeable": "MERGEABLE",
-            "author": {"__typename": "User", "login": "someone"}, "headCommittedDate": OLD,
-            "autoMergeRequest": {"enabledAt": OLD} if armed else None, "statusCheckRollup": [], **k}
+    return base._pr(n, armed, **{"author": {"__typename": "User", "login": "someone"}, "headCommittedDate": OLD, **k})
 
 
 def _check(name: str, status: str = "COMPLETED", conclusion: str | None = "SUCCESS") -> dict:
