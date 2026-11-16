@@ -116,6 +116,25 @@ jobs:
 
 The secret **names are yours**: the workflow declares `token` and `ntfy-url` and you map onto them.
 
+### Keeping held PRs current (`update-held`)
+
+The update pass merges the base into ARMED PRs only. A PR you hold for review (open, auto-merge
+not enabled, often labelled `autoland-off`) is never updated, so under "require branches to be up
+to date" it falls BEHIND and stays there. `update-held: true` (default `false`: nothing changes
+for a caller that does not set it) keeps those current too, under a cost guard, because every
+update re-runs the PR's CI:
+
+- only on a `schedule` or `workflow_dispatch` pass -- never on push, `workflow_run` or arming --
+  so add a cron to the caller's `on:` (e.g. `schedule: [{cron: "17 * * * *"}]`);
+- only when no armed PR needed an update in that pass, and no merge train is open;
+- only in the free `max-in-flight` slots (lowest PR number first); with no queue, every eligible one.
+
+Eligible: same-repo, not a draft, BEHIND, cleanly mergeable, no check running or failing on its
+head. Never touched: forks, drafts, conflicting PRs (left for you; no label, no page), Renovate's
+branches (Renovate rebases them) and merge-train branches. `autoland-off` opts a PR out of
+auto-LANDING only; it is still kept current. The summary names every held PR it skipped and why,
+and ends `update-held: N held PR(s) updated of M eligible, K skipped`.
+
 ### The push token: GitHub App or PAT (v1.37.0)
 
 A push made with `GITHUB_TOKEN` fires no workflow, so the token jobs (pr-autoupdate, merge-train,

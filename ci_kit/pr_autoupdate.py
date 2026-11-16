@@ -27,7 +27,9 @@ current main at once, lowest PR number first; 0 = every armed PR. The policy and
 behind it: ci_kit/pr_queue.py). With a queue, every pass first ARMS each Renovate PR whose preset
 verdict is automerge (ci_kit/pr_renovate.py, v1.32.0): Renovate never arms or merges in a queue
 repo. A PR the queue picked but skipped for a running review hands its slot to the next eligible PR
-(`Plan.spare`), so one long review does not idle the queue.
+(`Plan.spare`), so one long review does not idle the queue. `update_held` (env CI_KIT_UPDATE_HELD,
+default off) also updates HELD PRs -- open, not armed -- on a scheduled or dispatched pass only,
+after every armed PR and inside the queue's free slots (ci_kit/pr_held.py).
 
 CONFLICT = TRANSITION-ONLY PAGE. The conflict label is the dedup state: a PR that conflicts and
 is not labelled gets the label AND one ntfy push (env `NTFY_URL`; unset = no push) naming the PR
@@ -56,7 +58,7 @@ import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ci_kit import doomed_runs, pr_baseretry, pr_heal, pr_hold, pr_ladder, pr_list, pr_queue, pr_renovate, pr_sched, train_kick
+from ci_kit import doomed_runs, pr_baseretry, pr_heal, pr_held, pr_hold, pr_ladder, pr_list, pr_queue, pr_renovate, pr_sched, train_kick
 from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
 from ci_kit.ntfy import page  # noqa: F401 -- re-exported: _update_one pages through this name
 
@@ -94,6 +96,9 @@ class Options:
     base_retry_bots: tuple[str, ...] = ()
     base_retry_per_pass: int = pr_baseretry.PER_PASS  # candidates whose main runs are read per pass
     base_retry_error: str = ""  # an unreadable cap: the feature is refused, the pass goes on, the run is red
+    # keep HELD (unarmed) PRs current too, on a schedule/workflow_dispatch pass only (ci_kit/pr_held.py)
+    update_held: bool = False
+    event: str = ""  # the caller's github.event_name
 
 
 @dataclass(frozen=True)
@@ -333,6 +338,7 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
         summary += [f"#{p['number']}: in flight against current main" for p in q.in_flight]
         summary += [f"#{p['number']}: held, {why}" for p, why in q.held]
     attempted, updated, conflicts, err = _drive(repo, q, head, opts, relock, summary, cancel, retry)
+    attempted, updated, err = _held_pass(repo, prs, q, opts, relock, summary, (attempted, updated, err))
     errors += err + (cancel.errors if cancel else 0)
     # ONE ACTOR PER HEAD: a PR this pass base-retried has a new head on its way; its old head goes to
     # neither the ladder (whose dispatch marker would spend a tier-3 slot on a head already gone) nor pr_heal
@@ -398,6 +404,28 @@ def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock:
         if line:
             summary.append(line)
     return attempted, updated, conflicts, errors
+
+
+def _held_pass(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, relock: list[int],
+               summary: list[str], armed: tuple[set[int], set[int], int]) -> tuple[set[int], set[int], int]:
+    """The opt-in held-PR pass (ci_kit/pr_held.py), AFTER the armed one: the armed pass's
+    (attempted, updated, errors) with its own added; off = `armed` unchanged. Through `_drive` like
+    an armed PR (review-gate skip, a conflict race, an error), but never offered to doomed_runs (it
+    never cancels an unarmed PR's runs) nor to the heal ladder."""
+    if not opts.update_held:
+        return armed
+    if opts.event not in pr_held.EVENTS:
+        summary.append(f"update-held: not this pass ({opts.event or 'unknown event'}; held PRs are updated "
+                       f"on {' / '.join(pr_held.EVENTS)} only)")
+        return armed
+    eligible, skipped = pr_held.select(prs, opts.required)
+    todo, waiting = pr_held.admit(eligible, prs, q, opts.max_in_flight)
+    skipped += waiting
+    summary += [f"#{p['number']}: held, not updated: {why}" for p, why in skipped]
+    attempted, updated, _, errors = _drive(repo, pr_queue.Plan(update=todo), None, opts, relock, summary)
+    summary.append(f"update-held: {len(updated)} held PR(s) updated of {len(eligible)} eligible, "
+                   f"{len(skipped)} skipped")
+    return armed[0] | attempted, armed[1] | updated, armed[2] + errors
 
 
 def _lazy_default(repo: str, base: str | None) -> Callable[[], str]:
@@ -626,7 +654,10 @@ def main(argv: list[str] | None = None) -> int:
                    cancel_doomed=os.environ.get("CI_KIT_CANCEL_DOOMED", "true").strip().lower() not in ("false", "0", "no"),
                    ladder=pr_ladder.Config.from_env(),
                    base_retry_cap=cap, base_retry_error=cap_error, base_retry_bots=bots,
-                   base_retry_per_pass=per_pass)
+                   base_retry_per_pass=per_pass,
+                   # env vars, never flags: an older @v1 tool would refuse a flag it does not know
+                   update_held=os.environ.get("CI_KIT_UPDATE_HELD", "").strip().lower() in ("1", "true"),
+                   event=os.environ.get("CI_KIT_EVENT", "").strip())
     summary: list[str] = []
     relock: list[int] = []
     healing: list[dict] = []
