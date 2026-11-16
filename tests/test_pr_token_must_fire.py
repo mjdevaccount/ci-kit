@@ -4,7 +4,7 @@ v1.37.0. MUST FIRE: app mode with the App configured -> the App acts; app-requir
 red; app mode with a FAILED mint -> red, never a silent PAT; an unreadable acting identity -> red;
 base-retry under an App token reads no GET /user and honours the PAT's old markers (and the reverse
 on rollback). MUST NOT FIRE: the default (no mode) stays the PAT; a forged marker by any other
-login -- another Bot included -- grants nothing; the no-author case never admits the edge-bot.
+login -- another Bot included -- grants nothing; the no-author case never admits the App.
 The composite and the five reusables are checked as YAML: what cannot be run here is named in
 the PR (the mint itself, the post-step revoke, `vars` resolution in a called workflow).
 """
@@ -28,7 +28,7 @@ from ci_kit import pr_token as pt
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ACTION = ROOT / ".github" / "actions" / "pr-token" / "action.yml"
 WF = ROOT / ".github" / "workflows"
-PAT_USER, BOT = "mjdevaccount", "mjdev-edge-bot[bot]"
+PAT_USER, BOT = "octocat", "example-app[bot]"
 BASH = shutil.which("bash")
 
 
@@ -76,9 +76,9 @@ def test_a_failed_canary_in_pat_mode_leaves_the_pat_acting() -> None:
 
 def test_resolve_names_both_identities_from_config() -> None:
     app = pt.decide("app", True, True, True)
-    assert pt.resolve(app, "success", "mjdev-edge-bot", PAT_USER) == (BOT, [BOT, PAT_USER], "minted", "")
+    assert pt.resolve(app, "success", "example-app", PAT_USER) == (BOT, [BOT, PAT_USER], "minted", "")
     canary = pt.decide("pat", True, True, True)            # rollback: the bot's markers still count
-    assert pt.resolve(canary, "success", "mjdev-edge-bot", PAT_USER) == (PAT_USER, [PAT_USER, BOT], "minted", "")
+    assert pt.resolve(canary, "success", "example-app", PAT_USER) == (PAT_USER, [PAT_USER, BOT], "minted", "")
     plain = pt.decide("pat", False, False, True)
     assert pt.resolve(plain, "skipped", "", PAT_USER) == (PAT_USER, [PAT_USER], "absent", "")
 
@@ -95,7 +95,7 @@ def test_an_unreadable_identity_is_not_red_where_nothing_trusts_markers() -> Non
 
 
 def test_the_app_login_is_the_rest_spelling() -> None:
-    assert pt.bot_login("mjdev-edge-bot") == BOT and pt.bot_login("") == ""
+    assert pt.bot_login("example-app") == BOT and pt.bot_login("") == ""
 
 
 def test_trusted_logins_never_widen_an_unknown_identity() -> None:
@@ -109,7 +109,7 @@ def test_the_record_is_one_fixed_greppable_line() -> None:
     d = pt.decide("app", False, True, True)
     got = pt.line(d, "app", "absent", "o/r", "pr-autoupdate.yml", "update", PAT_USER)
     assert got == ("pr-token: source=pat mode=app reason=var-absent app=absent repo=o/r "
-                   "workflow=pr-autoupdate.yml job=update login=mjdevaccount")
+                   "workflow=pr-autoupdate.yml job=update login=octocat")
 
 
 def _cli(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, step: str, pat_login: str = PAT_USER,
@@ -138,7 +138,7 @@ def test_the_steps_write_outputs_and_the_record(monkeypatch: pytest.MonkeyPatch,
     assert rc == 0 and outs == {"mint": "true", "source": "app", "reason": "configured", "mode": "app"}
     (tmp_path / "out").unlink()
     rc, outs, summary = _cli(monkeypatch, tmp_path, "report", CI_KIT_TOKEN_MODE="app", MINT="true", SOURCE="app",
-                             REASON="configured", MINT_OUTCOME="success", APP_SLUG="mjdev-edge-bot")
+                             REASON="configured", MINT_OUTCOME="success", APP_SLUG="example-app")
     assert rc == 0 and outs == {"login": BOT, "trusted": f"{BOT},{PAT_USER}"}
     line = ("pr-token: source=app mode=app reason=configured app=minted repo=o/r workflow=pr-autoupdate.yml "
             f"job=update login={BOT}")
@@ -192,9 +192,9 @@ def test_markers_from_both_configured_identities_count_across_a_flip_must_fire(m
     assert br.trusted(notes, BOT, br._MARK) == {"b" * 40} and br.trusted(notes, "", br._MARK) == set()
 
 
-def test_the_edge_bot_never_qualifies_for_the_no_author_case() -> None:
+def test_the_app_never_qualifies_for_the_no_author_case() -> None:
     # it is a Bot too, and it pushes onto PRs -- but the case keys on the PR's AUTHOR, exactly listed
-    p = {"author": {"__typename": "Bot", "login": "mjdev-edge-bot"}}
+    p = {"author": {"__typename": "Bot", "login": "example-app"}}
     assert "is not a configured no-author bot" in br.bot_reason(p, ["test"], br.Evidence([], [], []),
                                                                 frozenset({"renovate"}))
 
@@ -216,10 +216,50 @@ def test_the_composite_pins_the_mint_by_sha_and_never_shells_the_token() -> None
     assert mint["with"]["repositories"] == "${{ github.repository }}"                  # this repo only
     assert mint["continue-on-error"] == "${{ steps.decide.outputs.source == 'pat' }}"  # app modes: a failed mint is red
     assert steps["report"]["if"].startswith("always()")                                # the record survives a failed mint
-    for s in steps.values():  # no shell ever holds the key or the App token (the PAT only for GET /user)
-        env = list((s.get("env") or {}).values())
-        assert "${{ inputs.private-key }}" not in env and not any("mint.outputs.token" in v for v in env)
-        assert "${{ inputs.deprecated-private-key }}" not in env
+    for s in steps.values():  # no shell ever holds the App token (the PAT only for GET /user)
+        assert not any("mint.outputs.token" in str(v) for v in (s.get("env") or {}).values())
+    assert key_exposures(_yaml(ACTION)) == []                                          # nor the key
+
+
+# ANY expression naming either key input, in any step's env or run text: the key reaching a shell.
+# The one allowed shape is a comparison with '' (HAS_KEY / the alias flags): a boolean, never the value.
+_KEY = re.compile(r"inputs\.(?:deprecated-)?private-key\b")
+_KEY_TEST = re.compile(r"\(?\s*inputs\.(?:deprecated-)?private-key(?:\s*\|\|\s*inputs\.(?:deprecated-)?private-key)*"
+                       r"\s*\)?\s*[!=]=\s*''")
+
+
+def key_exposures(action: dict) -> list[str]:
+    """Where a step could hand the App key to a shell ([] = nowhere). The mint's `with:` is not a shell."""
+    out = []
+    for s in action["runs"]["steps"]:
+        for k, v in (s.get("env") or {}).items():
+            if _KEY.search(_KEY_TEST.sub("", str(v))):
+                out.append(f"{s.get('id')}: env {k}")
+        if _KEY.search(str(s.get("run") or "")):
+            out.append(f"{s.get('id')}: run")
+    return out
+
+
+@pytest.mark.parametrize("leak", [
+    "${{ inputs.private-key }}", "${{ inputs.deprecated-private-key }}",
+    "${{ inputs.private-key || inputs.deprecated-private-key }}",           # F3: the resolved key, not one name
+    "${{ inputs.deprecated-private-key || inputs.private-key }}",
+    "${{ inputs.private-key != '' && inputs.private-key || '' }}",           # a comparison that still yields it
+    "${{ format('{0}', inputs.private-key) }}", "x-${{ inputs.private-key }}",
+])
+def test_the_key_reaching_a_shell_is_caught_must_fire(leak: str) -> None:
+    for step, where in (("decide", "env"), ("report", "env"), ("decide", "run")):
+        action = _yaml(ACTION)
+        s = {x["id"]: x for x in action["runs"]["steps"]}[step]
+        if where == "env":
+            s["env"]["LEAK"] = leak
+        else:
+            s["run"] += f"\necho {leak}"
+        assert key_exposures(action) == [f"{step}: {where}" + (" LEAK" if where == "env" else "")], (leak, step)
+    # the boolean shapes the composite really uses are NOT exposures (no false red on today's file)
+    action = _yaml(ACTION)
+    env = {x["id"]: x for x in action["runs"]["steps"]}["decide"]["env"]
+    assert "inputs.private-key" in env["HAS_KEY"] and "inputs.deprecated-private-key" in env["DEPRECATED_PRIVATE_KEY"]
 
 
 # The expression subset the composite's `with:`/`outputs:` use, evaluated (no GitHub expression
@@ -289,6 +329,17 @@ def test_an_unknown_scope_is_red(monkeypatch: pytest.MonkeyPatch, tmp_path: path
     assert rc == 1 and outs["source"] == "none" and "reason=scope-invalid" in summary
 
 
+# THE GENERIC NAMES (v1.42.0) and the deprecated aliases they replace, each still accepted
+NEW_KEY, OLD_KEY = "app-private-key", "EDGE_BOT_PRIVATE_KEY"
+NEW_ID, OLD_ID = "app-client-id", "EDGE_BOT_APP_ID"
+# each spelling passed AS IS: the composite alone resolves them (tests/test_generic_names_must_fire.py)
+TOKEN_WITH = {
+    "client-id": "${{ inputs.app-client-id }}",
+    "private-key": "${{ secrets.app-private-key }}",
+    "deprecated-client-id": "${{ vars.EDGE_BOT_APP_ID }}",
+    "deprecated-private-key": "${{ secrets.EDGE_BOT_PRIVATE_KEY }}",
+}
+
 TOKEN_JOBS = {"pr-autoupdate.yml": ["update"], "merge-train.yml": ["train"], "ci-green.yml": ["advance"],
               "pr-heal.yml": ["claim", "push", "report"], "relock.yml": ["push"]}
 
@@ -297,10 +348,12 @@ def token_faults(wf: dict, jobs: list[str]) -> list[str]:
     """Why a reusable's token jobs do not take their token from the one pr-token step ([] = clean)."""
     out = []
     call = (wf.get("on") or wf.get(True))["workflow_call"]
-    if (call["secrets"].get("EDGE_BOT_PRIVATE_KEY") or {}).get("required") is not False:
-        out.append("EDGE_BOT_PRIVATE_KEY is not an optional workflow_call secret")
-    if (call["inputs"].get("token-source") or {}).get("default") != "":
-        out.append("no token-source input defaulting to '' (= the variable, else pat)")
+    for secret in (NEW_KEY, OLD_KEY):   # the generic name AND its deprecated alias (v1.42.0)
+        if (call["secrets"].get(secret) or {}).get("required") is not False:
+            out.append(f"{secret} is not an optional workflow_call secret")
+    for name in ("token-source", "app-client-id"):
+        if (call["inputs"].get(name) or {}).get("default") != "":
+            out.append(f"no {name} input defaulting to ''")
     for j in jobs:
         job = wf["jobs"][j]
         steps = job["steps"]
@@ -316,6 +369,11 @@ def token_faults(wf: dict, jobs: list[str]) -> list[str]:
             out.append(f"{j}: the token step names no known permission scope")
         if w.get("mode") != "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}" or w.get("pat") != "${{ secrets.token }}":
             out.append(f"{j}: the token step's mode or pat is not the staged wiring")
+        for k, want in TOKEN_WITH.items():   # every alias resolves to the same input, and is noticed
+            if " ".join(str(w.get(k, "")).split()) != want:
+                out.append(f"{j}: the token step's {k} is not {want}")
+        if "app-id" in w:
+            out.append(f"{j}: the token step passes the composite's deprecated app-id")
         rest = json.dumps([job.get("env", {}), [s for s in steps if s is not tok]])
         if "secrets.token" in rest:
             out.append(f"{j}: the PAT is used past the token step")
@@ -338,9 +396,10 @@ def test_the_check_catches_a_job_that_still_reads_the_pat_must_fire() -> None:
     wf = _yaml(WF / "pr-heal.yml")
     wf["jobs"]["push"]["steps"] = [s for s in wf["jobs"]["push"]["steps"] if s.get("id") != "token"]
     assert "push: no pr-token step" in token_faults(wf, ["push"])
-    wf = _yaml(WF / "ci-green.yml")
-    (wf.get("on") or wf.get(True))["workflow_call"]["secrets"].pop("EDGE_BOT_PRIVATE_KEY")
-    assert any("EDGE_BOT_PRIVATE_KEY" in f for f in token_faults(wf, ["advance"]))
+    for secret in (OLD_KEY, NEW_KEY):
+        wf = _yaml(WF / "ci-green.yml")
+        (wf.get("on") or wf.get(True))["workflow_call"]["secrets"].pop(secret)
+        assert any(secret in f for f in token_faults(wf, ["advance"])), secret
 
 
 def test_the_identity_reaches_every_tool_that_trusts_markers() -> None:
@@ -519,7 +578,7 @@ def test_unreadable_pat_identity_is_a_warning_where_nothing_trusts_markers_must_
       "MINT_OUTCOME": "failure"}, PAT_USER, True),                                                      # canary failed
     ({"CI_KIT_TOKEN_MODE": "app", "SOURCE": "pat", "REASON": "key-absent", "MINT": "false"}, PAT_USER, True),
     ({"CI_KIT_TOKEN_MODE": "app", "SOURCE": "app", "REASON": "configured", "MINT": "true",
-      "MINT_OUTCOME": "success", "APP_SLUG": "mjdev-edge-bot"}, "", True),                               # no PAT login
+      "MINT_OUTCOME": "success", "APP_SLUG": "example-app"}, "", True),                               # no PAT login
 ])
 def test_the_one_identity_notice_fires_only_where_two_were_expected(
         monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str],

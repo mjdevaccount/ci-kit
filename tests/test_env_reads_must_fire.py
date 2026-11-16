@@ -94,8 +94,8 @@ def test_a_submodule_gitlink_is_skipped_not_blind(new_repo) -> None:
 
 
 def test_a_grep_lookbehind_read_fires(new_repo) -> None:
-    # grep -oP '(?<=^K=).*' FILE -- one command, no pipe, still a hand reader (edge-host's
-    # mcp-grafana-stdio.sh was one, found only after this shape was added).
+    # grep -oP '(?<=^K=).*' FILE -- one command, no pipe, still a hand reader (a consumer's
+    # stdio wrapper script was one, found only after this shape was added).
     look = "TOK=$(grep -oP '(?<=^GRAFANA_MCP_TOKEN=).*' \"$ENVF\" 2>/dev/null || true)" + NL
     r = _run(tracked_repo(new_repo, {"scripts/g.sh": look}))
     assert r.returncode == 1 and "scripts/g.sh: 1 site(s)" in r.stdout, r.stdout + r.stderr

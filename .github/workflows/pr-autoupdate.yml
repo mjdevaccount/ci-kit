@@ -245,6 +245,14 @@ on:
         description: comma-separated EXACT author logins (as GraphQL reports them, e.g. Renovate's app is `renovate`; the author must also be a Bot account) whose red + BEHIND PRs get the NO-AUTHOR base retry -- main green on the failing checks and moved since the red run, no red-at-base evidence -- under the same markers and cap ('' = off, the default; needs base-retry-cap > 0)
         type: string
         default: ''
+      app-client-id:
+        description: the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- README "Generic names"
+        type: string
+        default: ""
+      secure-runner:
+        description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- README "Generic names"
+        type: string
+        default: ""
       update-held:
         description: also merge the base into HELD PRs (open, not armed, BEHIND, mergeable, no check running or failing, not a bot's) on schedule / workflow_dispatch passes only, last, once no armed PR is on its way to current, in the queue's free slots (ci_kit/pr_held.py)
         type: boolean
@@ -253,8 +261,11 @@ on:
       token:
         description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs --, with train-workflow, which dispatches, and with cancel-doomed-runs), administration read (cancel-doomed-runs reads whether the base is strict), commit statuses RW with queue-hold, on the caller repo. Not required since v1.37.0 (token-source app-required never reads it); empty while the PAT acts is still a red run
         required: false
+      app-private-key:
+        description: the App's private key, with the app-client-id input -- README "Generic names"
+        required: false
       EDGE_BOT_PRIVATE_KEY:
-        description: the GitHub App's private key (v1.37.0, with the EDGE_BOT_APP_ID variable); passing it alone changes nothing but a canary mint -- token-source decides who acts
+        description: DEPRECATED alias of app-private-key -- README "Generic names"
         required: false
       ntfy-url:
         description: an ntfy topic URL to page on a NEW conflict ('' = no page)
@@ -292,8 +303,8 @@ jobs:
     # CI_SECURE_RUNNER is an ON/OFF switch, never a label list: the labels are fixed HERE, so a
     # typo in a repo variable cannot send this token job to a socket runner (home-host review
     # 2026-11-07, finding 5). Any non-empty value turns it on.
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
-    environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
+    runs-on: ${{ inputs.secure-runner && fromJSON(inputs.secure-runner) || vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    environment: ${{ (inputs.secure-runner || vars.CI_SECURE_RUNNER) && 'ci-secure' || '' }}
     timeout-minutes: 10
     outputs:
       relock: ${{ steps.update.outputs.relock }}
@@ -335,8 +346,9 @@ jobs:
       - name: Push token (App or PAT)
         id: token
         uses: mjdevaccount/ci-kit/.github/actions/pr-token@v1
-        with: {scope: update, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", app-id: "${{ vars.EDGE_BOT_APP_ID }}",
-               private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}", pat: "${{ secrets.token }}"}
+        with: {scope: update, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", pat: "${{ secrets.token }}",
+               client-id: "${{ inputs.app-client-id }}", private-key: "${{ secrets.app-private-key }}",
+               deprecated-client-id: "${{ vars.EDGE_BOT_APP_ID }}", deprecated-private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}"}
       - name: Update
         id: update
         uses: mjdevaccount/ci-kit@v1

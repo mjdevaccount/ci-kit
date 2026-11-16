@@ -1,6 +1,6 @@
 """ci-gate-lint must fire: a skip-green shape -> 1, the aggregate shape -> 0, cannot read -> 2.
 
-The case that motivated it is trade-infra#806's ci.yml as it was on 2026-11-06: four jobs behind
+The case that motivated it is a consumer's ci.yml as it was on 2026-11-06: four jobs behind
 `needs: detect` and no aggregate, so a dead detect merged four skipped "required" checks.
 """
 from __future__ import annotations

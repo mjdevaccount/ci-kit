@@ -14,7 +14,7 @@ import pytest
 from ci_kit import pr_admit, pr_heal, pr_queue, pr_sched, redclass
 
 NOW = 1_800_000_000.0
-SEALED = "home-sealed"
+SEALED = "sealed"
 
 
 def _pr(n: int, *, armed: bool = True, labels: tuple[str, ...] = (), state: str = "BLOCKED", **kw) -> dict:
@@ -387,8 +387,8 @@ def test_a_later_pr_merged_past_an_in_flight_head_pages_must_fire() -> None:
 
 
 def test_an_unarmed_renovate_merge_pages_whatever_its_number_td3072_must_fire() -> None:
-    # td#3072 (Renovate merging ITSELF, never armed) landed past head #3073, 03:53Z 11-14; so does a
-    # CLEAN Renovate PR mcp pr_reconcile lands unarmed. dies to: dropping the unarmed-Renovate clause
+    # #3072 (Renovate merging ITSELF, never armed) landed past head #3073, 03:53Z 11-14; so does a
+    # CLEAN Renovate PR an outside reconciler lands unarmed. dies to: dropping the unarmed-Renovate clause
     assert "#3072" in _oq([3072], ref="renovate/x-")
     assert "#3072" in _oq([3072], login="renovate[bot]")
 
@@ -460,21 +460,43 @@ def test_admission_parks_a_later_pr_and_labels_it_must_fire(monkeypatch, tmp_pat
 
 def test_admission_reads_a_json_label_list_pool_by_its_last_label_must_fire(monkeypatch, tmp_path) -> None:
     # a runs-on list (v1.40.0): the scheduler's pool is its LAST label, never the raw JSON text
-    for pool in ('["self-hosted","home-sealed"]', SEALED):
+    for pool in ('["self-hosted","sealed"]', '"sealed"', SEALED):
         seen: list[str] = []
         got = _admit(monkeypatch, tmp_path, [_pr(3073), _pr(3080)], pool=pool, seen=seen)
         assert seen == [SEALED] and got["defer"] == "true", (pool, seen)
-    seen = []
-    assert _admit(monkeypatch, tmp_path, [_pr(3073), _pr(3080)], pool="[not json", seen=seen)["defer"] == "false"
-    assert seen == []                                   # unparseable = not scarce: admitted, nothing read
+
+
+@pytest.mark.parametrize("pool", ["[not json", "[]", '["self-hosted", 7]', '{"group": "g"}', '"two words"', "'sealed'"])
+def test_admission_refuses_a_pool_that_names_no_label_must_fire(monkeypatch, tmp_path, capsys, pool: str) -> None:
+    # F4: never read as '' ("not scarce", silently admitted) nor as quoted text no runner carries.
+    # exit 2 before any look; the workflow's `|| printf defer=false` fallback then runs the review
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+
+    def run(*a, **k):
+        raise AssertionError("looked although the pool was refused")
+    monkeypatch.setattr(pr_admit.subprocess, "run", run)
+    assert pr_admit.admit_main(["--repo", "o/r", "--pr", "3080", "--pool", pool]) == 2
+    err = capsys.readouterr().out.strip().splitlines()
+    assert len(err) == 1 and err[0].startswith("::error title=pr-admit::--pool "), err
+    assert not out.exists()
 
 
 @pytest.mark.parametrize(("raw", "want"), [
-    ("", ""), ("home-sealed", "home-sealed"), ('["self-hosted","home-sealed"]', "home-sealed"),
-    ('["sealed"]', "sealed"), ("[]", ""), ("[not json", ""), (" sealed ", "sealed"), ('{"a": 1}', '{"a": 1}'),
+    ("", ""), ("  ", ""), ("home-sealed", "home-sealed"), (" sealed ", "sealed"), ('"sealed"', "sealed"),
+    ('["self-hosted","home-sealed"]', "home-sealed"), ('["sealed"]', "sealed"), ('[" sealed "]', "sealed"),
 ])
 def test_pool_label(raw: str, want: str) -> None:
     assert pr_admit.pool_label(raw) == want
+
+
+@pytest.mark.parametrize("raw", [
+    "[not json", "[]", '[""]', '["self-hosted", 7]', '["self-hosted", null]', '["a", ["b"]]', '{"a": 1}',
+    '"unterminated', '""', '"two words"', "'sealed'", "two words", "sealed,heavy", '"[\\"x\\"]"', "[7]",
+])
+def test_pool_label_refuses_what_names_no_label_must_fire(raw: str) -> None:
+    with pytest.raises(pr_admit.PoolError, match="--pool"):
+        pr_admit.pool_label(raw)
 
 
 def test_admission_skips_a_conflicting_or_stacked_lowest_pr_like_the_hold_must_fire(monkeypatch, tmp_path) -> None:
@@ -504,8 +526,8 @@ def test_admission_parks_nothing_while_the_scheduler_is_off_must_not_fire(monkey
 
 def test_capacity_parses_or_refuses() -> None:
     assert pr_sched.capacity_of("") == {}
-    assert pr_sched.capacity_of('{"home-sealed": 1, "home-heavy": 1}') == {"home-sealed": 1, "home-heavy": 1}
-    for bad in ('["home-sealed"]', '{"home-sealed": 0}', '{"home-sealed": "1"}', "nope"):
+    assert pr_sched.capacity_of('{"sealed": 1, "heavy": 1}') == {"sealed": 1, "heavy": 1}
+    for bad in ('["sealed"]', '{"sealed": 0}', '{"sealed": "1"}', "nope"):
         with pytest.raises(ValueError):
             pr_sched.capacity_of(bad)
 
@@ -535,7 +557,7 @@ def test_the_head_waits_for_a_verdict_its_own_red_or_the_switch_must_not_fire(mo
 
 
 def test_replay_td3078_head_behind_with_unit_running_on_the_stale_base_is_updated_now_must_fire(monkeypatch) -> None:
-    # td#3078, 05:26Z 11-14: queue head, review verdict RECORDED, BEHIND main (its author pushed a
+    # #3078, 05:26Z 11-14: queue head, review verdict RECORDED, BEHIND main (its author pushed a
     # fix on a base missing #3077) while `unit tests` ran on that stale head -- a result worthless for
     # merging. The serial queue held it ("checks still running") until unit finished, then updated,
     # then ran unit again; the coordinator queue-jumped it by hand. The head goes first, NOW.

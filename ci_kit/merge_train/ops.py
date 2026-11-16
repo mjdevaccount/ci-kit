@@ -110,7 +110,7 @@ def bodies(paged: str) -> list[str]:
 
 def cancel_runs(o: Opts, p: Pass, branch: str) -> list[int]:
     """Cancel every unfinished workflow run whose head branch is train branch `branch`; returns the
-    ids cancelled. WHY (trade-data 2026-11-12): train #2998 was closed (recomposed as #2999) and its
+    ids cancelled. WHY (a consumer, 2026-11-12): train #2998 was closed (recomposed as #2999) and its
     CI run kept the ONE heavy runner for ~25 min while real PRs queued. Closing a PR and deleting its
     branch cancels nothing. Only a `train/` branch of THIS repository (never a fork's same-named
     one), never this pass's own run nor any run of the

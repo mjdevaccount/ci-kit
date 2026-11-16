@@ -69,12 +69,23 @@ on:
         description: pat | app | app-required ('' = the caller repo's PR_TOKEN_SOURCE variable, else pat) -- ci_kit/pr_token.py (v1.37.0)
         type: string
         default: ""
+      app-client-id:
+        description: the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- README "Generic names"
+        type: string
+        default: ""
+      secure-runner:
+        description: runs-on of the `advance` job (it holds the write token), a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- README "Generic names"
+        type: string
+        default: ""
     secrets:
       token:
         description: fine-grained PAT with contents + workflows read/write on the caller repo (not required since v1.37.0; empty while the PAT acts is still red)
         required: false
+      app-private-key:
+        description: the App's private key, with the app-client-id input -- README "Generic names"
+        required: false
       EDGE_BOT_PRIVATE_KEY:
-        description: the GitHub App's private key (v1.37.0, with the EDGE_BOT_APP_ID variable); token-source decides who acts
+        description: DEPRECATED alias of app-private-key -- README "Generic names"
         required: false
 
 permissions:
@@ -89,8 +100,8 @@ jobs:
       && github.event.workflow_run.head_branch == github.event.repository.default_branch
       && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')
       && github.event.workflow_run.head_repository.full_name == github.repository
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
-    environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
+    runs-on: ${{ inputs.secure-runner && fromJSON(inputs.secure-runner) || vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    environment: ${{ (inputs.secure-runner || vars.CI_SECURE_RUNNER) && 'ci-secure' || '' }}
     timeout-minutes: 5
     steps:
       # the App or the PAT (v1.37.0, ci_kit/pr_token.py): empty is still RED (ci-green NOT advancing),
@@ -98,8 +109,9 @@ jobs:
       - name: Push token (App or PAT)
         id: token
         uses: mjdevaccount/ci-kit/.github/actions/pr-token@v1
-        with: {scope: push, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", app-id: "${{ vars.EDGE_BOT_APP_ID }}",
-               private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}", pat: "${{ secrets.token }}"}
+        with: {scope: push, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", pat: "${{ secrets.token }}",
+               client-id: "${{ inputs.app-client-id }}", private-key: "${{ secrets.app-private-key }}",
+               deprecated-client-id: "${{ vars.EDGE_BOT_APP_ID }}", deprecated-private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}"}
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}

@@ -1,14 +1,14 @@
 """The push token: a GitHub App installation token or the caller's PAT, and WHO it is (v1.37.0).
 
 ci-kit's token jobs (pr-autoupdate, merge-train, ci-green, pr-heal's claim/push/report) pushed,
-commented and merged with the caller's fine-grained PAT. A GitHub App (`EDGE_BOT_APP_ID` variable,
-`EDGE_BOT_PRIVATE_KEY` secret) replaces it. ONE composite action
+commented and merged with the caller's fine-grained PAT. A GitHub App (the reusables' `app-client-id`
+input and `app-private-key` secret, v1.42.0) replaces it. ONE composite action
 (`.github/actions/pr-token/action.yml`) mints the App token with `actions/create-github-app-token`
 (no JWT code here), falls back to the PAT, and records which one each run used. This module is its
 decision and its record, so both are unit-tested; the composite only wires it.
 
 STAGED (`mode`, the reusables' `token-source` input, else the caller repo's `PR_TOKEN_SOURCE`
-variable, else `pat`). Every repo already holds the App's variable and key, so keying on their
+variable, else `pat`). A consumer may already hold the App's id and key, so keying on their
 presence alone would cut every consumer over the moment `v1` moved:
   pat           the PAT acts, exactly as before. If the caller ALSO passes the key, the App token
                 is minted anyway and NOT used: a canary that proves the key before the flip, and
@@ -36,13 +36,15 @@ annotations API) and in the step summary, in ONE fixed shape -- a CONTRACT, a de
 Every value is free of `=` and spaces. The decide step's shell writes `reason=decide-crashed`
 itself when this module cannot run at all.
 
-DEPRECATED NAMES (v1.40.0). The composite's App id input is `client-id` (create-github-app-token's
-own name; it deprecated `app-id` the same way); `app-id` stays an alias. `deprecated-client-id` /
-`deprecated-private-key` carry a caller's older consumer-specific spellings (the `EDGE_BOT_APP_ID`
-variable, the `EDGE_BOT_PRIVATE_KEY` secret) and are read only when the generic input is empty. An
-old spelling resolves to the SAME value, and each one used is a `::notice` naming its replacement
-(`deprecations`): never a different decision, never a different record line. Removing them is a
-major version. The precedence (generic first) and the notice live in the composite, once.
+DEPRECATED NAMES. The App's id and key were first read under consumer-specific names (a repository
+variable and a secret); the generic names are the reusables' `app-client-id` input and
+`app-private-key` secret (v1.42.0), and this composite's `client-id` (v1.40.0; create-github-app-token
+deprecated its own `app-id` the same way, and `app-id` stays an alias here). The old spellings still
+resolve to the SAME value, and each one used is a `::notice` naming its replacement (`deprecations`):
+never a different decision, never a different record line. Removing them is a major version. The
+reusables hand the composite BOTH spellings (`deprecated-client-id` / `deprecated-private-key`, read
+only when the generic input is empty) and the composite alone resolves them, so the precedence
+(generic first) and the notice live in one place, not in every caller.
 """
 from __future__ import annotations
 
@@ -105,7 +107,8 @@ def decide(mode: str, has_app_id: bool, has_key: bool, has_pat: bool) -> Decisio
     if mode == "app-required":
         if not configured:
             return Decision(False, "none", missing, f"token-source app-required but the App is not configured ({missing}): "
-                            "pass EDGE_BOT_PRIVATE_KEY and set the EDGE_BOT_APP_ID variable; the PAT is never used in this mode")
+                            "pass the App's key as the `app-private-key` secret and its client id as the `app-client-id` input; "
+                            "the PAT is never used in this mode")
         return Decision(True, "app", "configured")
     if mode == "app" and configured:
         return Decision(True, "app", "configured")
@@ -171,6 +174,7 @@ def deprecations(used: list[str]) -> list[str]:
         out.append(f"::notice title={DEPRECATED_TITLE}::{what} -- identical behaviour today; the old name is "
                    "removed in the next major version")
     return out
+
 
 # ── the composite's two steps ────────────────────────────────────────────────────────────────────
 def _out(**kv: str) -> None:

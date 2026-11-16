@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import pathlib
 
+import _runners
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows"
@@ -91,7 +92,7 @@ def test_the_gate_step_reads_a_train_block_as_red() -> None:
     assert "pass)" in run and "block)" in run and "exit 1" in run.split("block)")[1].split(";;")[0]
 
 
-SECURE = "${{ vars.CI_SECURE_RUNNER && fromJSON('[\"self-hosted\",\"home-secure\"]') || 'ubuntu-latest' }}"
+SECURE = _runners.SECURE
 
 
 def test_the_train_job_holds_its_token_off_the_socket_pool() -> None:

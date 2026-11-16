@@ -174,9 +174,9 @@ def findings_in(text: str, rel: str = "") -> list[int]:
 # ── selftest: both directions, on inline cases (each BAD must fire, each GOOD must stay quiet) ──
 BAD = [
     "slot=$(grep -E '^SVC_ACTIVE=' \"$ENV_FILE\" | tail -1 | cut -d= -f2- | tr -d '\"')",
-    "PW=\"$(grep '^APP_RW_PASSWORD=' /home/u/edge/.env | cut -d= -f2-)\"",
+    "PW=\"$(grep '^APP_RW_PASSWORD=' /home/u/app/.env | cut -d= -f2-)\"",
     "envget() { grep -m1 \"^$1=\" \"$ENVF\" 2>/dev/null | cut -d= -f2- | tr -d '\\r'; }",
-    "_hb(){ sed -n \"s/^$1=//p\" \"${EDGE_ENV:-$HOME/.env}\" 2>/dev/null | sed -n 1p; }",
+    "_hb(){ sed -n \"s/^$1=//p\" \"${APP_ENV:-$HOME/.env}\" 2>/dev/null | sed -n 1p; }",
     "a=$(sed -n \"s/^${1:-SVC_ACTIVE}=//p\" \"${BG_STATE}\" 2>/dev/null | sed -n 1p)",
     "CUR=\"$(sed -n 's/^OPS_CF_AUD=//p' .env | sed -n 1p)\"",
     "tok=$(grep -E \"^$2=\" \"$1\" 2>/dev/null | sed -n 1p | sed 's/^[^=]*=//')",

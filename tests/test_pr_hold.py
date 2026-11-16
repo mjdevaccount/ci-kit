@@ -306,7 +306,7 @@ def test_every_pending_is_posted_before_the_success_must_fire() -> None:
 
 
 def test_a_head_holding_success_that_never_merges_pages_on_the_second_pass_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
-    # td#2258's shape: a required check never reports; the head is current, green, BLOCKED, and with
+    # #2258's shape: a required check never reports; the head is current, green, BLOCKED, and with
     # the hold on no other merge moves main to shake it loose
     pages: list[str] = []
     monkeypatch.setattr(pr_hold, "page", lambda title, body, click: pages.append(body) or "published (200)")
@@ -415,7 +415,7 @@ def test_run_hands_one_skip_to_the_hold_the_updater_and_the_scheduler_must_fire(
     monkeypatch.setattr(pr_hold, "hold", lambda *a, **k: seen.setdefault("hold", a[6]) and 0)
     monkeypatch.setattr(pr_autoupdate, "_head_first", lambda *a, **k: seen.setdefault("head_first", a[5]) and None)
     monkeypatch.setattr(pr_autoupdate.pr_sched, "pass_", lambda *a, **k: seen.setdefault("sched", k["skip"]) and 0)
-    pr_autoupdate.run("o/r", [], [], pr_autoupdate.Options(hold=True, scarce=(("home-sealed", 1),), required=REQ))
+    pr_autoupdate.run("o/r", [], [], pr_autoupdate.Options(hold=True, scarce=(("sealed", 1),), required=REQ))
     assert seen["hold"] == seen["head_first"] == seen["sched"] == frozenset({3082})
 
 

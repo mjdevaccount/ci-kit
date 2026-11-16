@@ -104,12 +104,23 @@ on:
         description: pat | app | app-required ('' = the caller repo's PR_TOKEN_SOURCE variable, else pat) -- ci_kit/pr_token.py (v1.37.0)
         type: string
         default: ""
+      app-client-id:
+        description: the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- README "Generic names"
+        type: string
+        default: ""
+      secure-runner:
+        description: runs-on of the `train` job (it holds the write token), a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- README "Generic names"
+        type: string
+        default: ""
     secrets:
       token:
         description: fine-grained PAT with contents, pull requests, workflows and actions RW, on the caller repo (not required since v1.37.0; empty while the PAT acts is still red)
         required: false
+      app-private-key:
+        description: the App's private key, with the app-client-id input -- README "Generic names"
+        required: false
       EDGE_BOT_PRIVATE_KEY:
-        description: the GitHub App's private key (v1.37.0, with the EDGE_BOT_APP_ID variable); token-source decides who acts
+        description: DEPRECATED alias of app-private-key -- README "Generic names"
         required: false
 
 permissions:
@@ -125,8 +136,8 @@ jobs:
     # It holds the token (push, open, merge, close), so never the shared socket pool: the caller's
     # SECURE pool when CI_SECURE_RUNNER is set (labels fixed here, an on/off switch, in its
     # ci-secure environment), hosted otherwise -- pr-autoupdate's update job, same class.
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
-    environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
+    runs-on: ${{ inputs.secure-runner && fromJSON(inputs.secure-runner) || vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    environment: ${{ (inputs.secure-runner || vars.CI_SECURE_RUNNER) && 'ci-secure' || '' }}
     timeout-minutes: 15
     env:
       CI_KIT_READ_TOKEN: ${{ github.token }}
@@ -140,8 +151,9 @@ jobs:
       - name: Push token (App or PAT)
         id: token
         uses: mjdevaccount/ci-kit/.github/actions/pr-token@v1
-        with: {scope: train, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", app-id: "${{ vars.EDGE_BOT_APP_ID }}",
-               private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}", pat: "${{ secrets.token }}"}
+        with: {scope: train, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", pat: "${{ secrets.token }}",
+               client-id: "${{ inputs.app-client-id }}", private-key: "${{ secrets.app-private-key }}",
+               deprecated-client-id: "${{ vars.EDGE_BOT_APP_ID }}", deprecated-private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}"}
       - name: One pass
         uses: mjdevaccount/ci-kit@v1
         env:

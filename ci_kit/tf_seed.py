@@ -3,7 +3,7 @@
 WHY (2026-11-08). A cold `terraform init` fetches each provider's SHA256SUMS, .sig and zip from
 wherever the registry points, for bpg/proxmox `github.com/.../releases/download/...`. That endpoint
 504'd for every repo for over an hour; terraform retries once and fails ("failed to retrieve
-authentication checksums", home-host job 128699260134). A WARM init does not touch it: measured
+authentication checksums", a consumer's job 128699260134). A WARM init does not touch it: measured
 with TF_LOG=TRACE, a cache holding the locked version makes init contact the registry only.
 So this fills the cache first, through `release_bin.fetch` (retry + the REST asset fallback).
 

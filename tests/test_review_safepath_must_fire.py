@@ -3,7 +3,7 @@
 Every step that runs `python -m ci_kit...` has the PR checkout as its cwd, and `-m` puts the cwd
 FIRST on sys.path, ahead of PYTHONPATH (the fetched kit). A PR that adds `ci_kit/review/tier.py`
 writing `required=false` would skip its own review and turn `review gate` green (found by the
-session reviewer on trade-data's caller, 2026-11-06). PYTHONSAFEPATH=1 drops the cwd entry.
+session reviewer on a consumer's caller, 2026-11-06). PYTHONSAFEPATH=1 drops the cwd entry.
 """
 from __future__ import annotations
 

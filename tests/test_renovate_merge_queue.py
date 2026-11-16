@@ -1,6 +1,6 @@
 """In a repo with a merge queue Renovate never merges by itself, and `autoland-off` stops it everywhere.
 
-trade-data#2995 (2026-11-12 03:21:47Z) was merged BY RENOVATE two minutes after a session disarmed
+A consumer's #2995 (2026-11-12 03:21:47Z) was merged BY RENOVATE two minutes after a session disarmed
 it (`gh pr merge --disable-auto`) and labelled it `autoland-off`: Renovate's own merge ignores
 GitHub's auto-merge state, the label and the queue's landing order. `platformAutomerge` does not
 stop it (Renovate still calls mergePr itself when green), so the merge step there is `pr-comment`.
@@ -37,7 +37,7 @@ def test_renovate_never_merges_in_a_merge_queue_repo_must_fire() -> None:
     assert rule["automergeType"] == "pr-comment" and rule["automergeComment"].strip()
     assert "automerge" not in rule
     # Renovate is not a second updater: a branch made current with main by Renovate's own rebase
-    # landed past the queue's in-flight PR (trade-data#3072, 2026-11-14). Only a conflict rebases.
+    # landed past the queue's in-flight PR (a consumer's #3072, 2026-11-14). Only a conflict rebases.
     assert rule["rebaseWhen"] == "conflicted"
     # repository is its ONLY matcher, and nothing after it sets the merge step back
     assert not [k for k in rule if k.startswith("match") and k != "matchRepositories"]
@@ -52,7 +52,7 @@ def _kit_rule() -> dict:
 
 
 def test_a_kit_branch_in_a_queue_repo_is_pushed_once_must_fire() -> None:
-    # trade-data renovate/ci-kit, 11-13: 194 CI runs / 469 job-min, ~5/6 of it Renovate re-pushing an
+    # a consumer's renovate/ci-kit, 11-13: 194 CI runs / 469 job-min, ~5/6 of it Renovate re-pushing an
     # already-pushed version over the relock commit and the relock re-running. `never` is the only
     # rebaseWhen that skips Renovate's content check on an existing branch. Same repos as the queue
     # rule (no other updater elsewhere), first-party sources only (a third-party bump keeps
@@ -66,7 +66,7 @@ def test_a_kit_branch_in_a_queue_repo_is_pushed_once_must_fire() -> None:
 
 
 def test_python_updates_group_by_datasource_not_manager_must_fire() -> None:
-    # trade-portfolio 2026-11-14: a lock-less `[project]` pyproject is parsed by `poetry`, so a group
+    # a consumer, 2026-11-14: a lock-less `[project]` pyproject is parsed by `poetry`, so a group
     # named by manager (pep621) never formed -- 12 PRs at once. renovate 44 dry run: 6 branches -> 2.
     group = [r for r in _cfg()["packageRules"] if r.get("groupName") == "python (non-major)"]
     assert len(group) == 1 and group[0]["matchDatasources"] == ["pypi"]

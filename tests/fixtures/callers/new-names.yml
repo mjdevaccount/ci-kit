@@ -1,0 +1,63 @@
+# A caller written the v1.41 way: every consumer-specific value arrives as the caller's own config
+# -- the App's client id as an input, its key under the generic secret name, the secure and sealed
+# pools as JSON label lists. actionlint must accept it against the reusables in THIS checkout
+# (ci.yml). The names on the RIGHT of each mapping are the consumer's own. Never run: a fixture.
+name: new-names
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  update:
+    permissions: { contents: read, pull-requests: read, checks: read, statuses: read }
+    uses: ./.github/workflows/pr-autoupdate.yml
+    with:
+      app-client-id: ${{ vars.MY_APP_CLIENT_ID }}
+      secure-runner: '["self-hosted","secure"]'
+    secrets:
+      token: ${{ secrets.PR_UPDATE_TOKEN }}
+      app-private-key: ${{ secrets.MY_APP_PRIVATE_KEY }}
+  train:
+    uses: ./.github/workflows/merge-train.yml
+    with:
+      app-client-id: ${{ vars.MY_APP_CLIENT_ID }}
+      secure-runner: '["self-hosted","secure"]'
+    secrets:
+      token: ${{ secrets.PR_UPDATE_TOKEN }}
+      app-private-key: ${{ secrets.MY_APP_PRIVATE_KEY }}
+  advance:
+    permissions: { contents: read }
+    uses: ./.github/workflows/ci-green.yml
+    with:
+      app-client-id: ${{ vars.MY_APP_CLIENT_ID }}
+      secure-runner: '["self-hosted","secure"]'
+    secrets:
+      token: ${{ secrets.PR_UPDATE_TOKEN }}
+      app-private-key: ${{ secrets.MY_APP_PRIVATE_KEY }}
+  heal:
+    uses: ./.github/workflows/pr-heal.yml
+    with:
+      pr: 1
+      head: "0000000000000000000000000000000000000000"
+      mode: regen
+      app-client-id: ${{ vars.MY_APP_CLIENT_ID }}
+      secure-runner: '["self-hosted","secure"]'
+      sealed-runner: '["self-hosted","sealed"]'
+    secrets:
+      token: ${{ secrets.PR_UPDATE_TOKEN }}
+      app-private-key: ${{ secrets.MY_APP_PRIVATE_KEY }}
+  relock:
+    uses: ./.github/workflows/relock.yml
+    with:
+      app-client-id: ${{ vars.MY_APP_CLIENT_ID }}
+      secure-runner: '["self-hosted","secure"]'
+    secrets:
+      token: ${{ secrets.PR_UPDATE_TOKEN }}
+      app-private-key: ${{ secrets.MY_APP_PRIVATE_KEY }}
+  review:
+    uses: ./.github/workflows/review-gate.yml
+    with:
+      guard-paths: ci/
+      secure-runner: '["self-hosted","secure"]'
+      sealed-runner: '["self-hosted","sealed"]'

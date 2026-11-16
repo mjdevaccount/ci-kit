@@ -225,9 +225,37 @@ passes `app-id` + `private-key` exactly as before gets the same App id and key, 
 the same `pr-token:` record line, plus one `::notice` titled `ci-kit deprecated name` (never the
 record's `pr-token` title). Two more optional inputs, `deprecated-client-id` and
 `deprecated-private-key`, are read only when `client-id`/`app-id` resp. `private-key` are empty,
-each use a notice; generic first. The aliases are removed in v2. The reusables still pass
-`app-id` today; nothing a caller of a reusable sets changes in this release.
-`ci_kit.pr_admit --pool` also accepts a runs-on JSON label list, read as its LAST label.
+each use a notice; generic first. The aliases are removed in v2.
+`ci_kit.pr_admit --pool` also accepts a runs-on JSON label list, read as its LAST label, or a JSON
+string; a value that names no label (malformed JSON, `[]`, a non-string item, quoted text) is refused
+with an `::error` and exit 2, and the review then runs (v1.42.0).
+
+### Generic names in the reusables (v1.42.0)
+
+The token reusables (pr-autoupdate, merge-train, ci-green, pr-heal, relock) take the App as the
+`app-client-id` INPUT (its client id, or app id) and the `app-private-key` SECRET -- the caller
+maps whatever it calls them. The older spellings above, the repository variable `EDGE_BOT_APP_ID`
+and the secret `EDGE_BOT_PRIVATE_KEY`, are DEPRECATED aliases: a caller that sets only them gets the
+same values and the same decision, plus one `::notice` per alias used; when both are set the
+generic name wins. They are removed in v2. Each reusable hands both spellings to the pr-token
+composite, which alone resolves them (`deprecated-client-id` / `deprecated-private-key`).
+
+Pools are inputs too, each a JSON label list read with `fromJSON`: `secure-runner` (the jobs that
+hold a write token; pr-autoupdate, merge-train, ci-green, pr-heal, relock, review-gate) and
+`sealed-runner` (the job that holds the model credential AND runs PR code; pr-heal, review-gate;
+its LAST label names the pool to the scheduler). Precedence: the input; else the caller repo's
+`CI_SECURE_RUNNER` / `CI_SEALED_RUNNER` variable, an ON/OFF switch for the kit's default labels
+(`["self-hosted","home-secure"]` / `["self-hosted","home-sealed"]` -- a variable never carries
+labels, so a typo there cannot move a token job onto another pool); else `ubuntu-latest`. The
+secure pool runs in the caller's `ci-secure` environment wherever the workflow used one. A caller
+that sets no input runs on exactly the pools it ran on before.
+
+`sealed-runner` needs `kit-ref` at v1.40.0 or later: an older pinned kit's `pr_admit` reads the
+JSON list as ONE label, which names no pool, so the review never parks -- silently.
+
+Rollback floor: once v1.42.0 is out, moving the floating `v1` tag back goes no lower than v1.40.0.
+The reusables now send the pr-token composite names (`client-id`, `deprecated-client-id`,
+`deprecated-private-key`) that actions older than v1.40.0 do not declare.
 
 ### Relocking a dependency bot's PR (v1.38.0)
 

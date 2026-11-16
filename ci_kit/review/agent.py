@@ -1,9 +1,9 @@
 """The review gate's `api` transport: a pydantic-ai agent on the PLAIN Anthropic Messages API.
 
-WHY NOT claude-code-action (trade-data, 2026-10-18). The action drives the claude CLI, which
+WHY NOT claude-code-action (a consumer, 2026-10-18). The action drives the claude CLI, which
 sends the `anthropic-beta: claude-code-20250219` header, and Anthropic bills that traffic as
 CLAUDE CODE. An org credit grant covering "Agent SDK, API, Batch API, Playground, Managed Agents"
-does not cover it, so every run died in 350ms with "Credit balance is too low" (td#2373, BLIND
+does not cover it, so every run died in 350ms with "Credit balance is too low" (#2373, BLIND
 x4). A plain API call from the `anthropic` SDK carries no such header.
 
 Contract (shared with `claude`): the verdict SCHEMA comes in with `--schema` (the workflow prints

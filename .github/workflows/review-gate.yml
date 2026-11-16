@@ -181,6 +181,14 @@ on:
           red until reviewed. false = every review runs at once, as before.
         type: boolean
         default: false
+      secure-runner:
+        description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- README "Generic names"
+        type: string
+        default: ""
+      sealed-runner:
+        description: the sealed pool's runs-on, a JSON label list ('' = the CI_SEALED_RUNNER switch, else hosted) -- README "Generic names"
+        type: string
+        default: ""
     secrets:
       git-ssh-key:
         description: >-
@@ -218,7 +226,7 @@ jobs:
     # for a full review. Named `review` (the old job's name): mcp review_gate_auth.py reads this
     # job's log for the tier's lines. Unset CI_SECURE_RUNNER = hosted, as before.
     name: review
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.secure-runner && fromJSON(inputs.secure-runner) || vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     env:
       PYTHONSAFEPATH: "1"
@@ -386,7 +394,9 @@ jobs:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-          POOL: ${{ vars.CI_SEALED_RUNNER && 'home-sealed' || '' }}
+          # `model review`'s pool: the input's JSON list (pr_admit takes its LAST label), else the switch's
+          # label exactly as v1.39 passed it (an older kit-ref reads it unchanged), else '' (hosted: admit)
+          POOL: ${{ inputs.sealed-runner || vars.CI_SEALED_RUNNER && 'home-sealed' || '' }}
         run: |
           python3 -m ci_kit.pr_admit --repo "$GITHUB_REPOSITORY" --pr "$PR" --pool "$POOL" --pending \
             --attempt "$GITHUB_RUN_ATTEMPT" \
@@ -532,7 +542,7 @@ jobs:
     name: model review
     needs: decide
     if: needs.decide.outputs.mode == 'review'
-    runs-on: ${{ vars.CI_SEALED_RUNNER && fromJSON('["self-hosted","home-sealed"]') || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.sealed-runner && fromJSON(inputs.sealed-runner) || vars.CI_SEALED_RUNNER && fromJSON('["self-hosted","home-sealed"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       # every `python -m ci_kit...` runs with the PR checkout as cwd, and -m puts the cwd AHEAD of
@@ -577,7 +587,7 @@ jobs:
           PYTHONPATH: ${{ steps.kit.outputs.dir }}
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-          POOL: ${{ vars.CI_SEALED_RUNNER && 'home-sealed' || '' }}
+          POOL: ${{ inputs.sealed-runner || vars.CI_SEALED_RUNNER && 'home-sealed' || '' }}
         run: |
           python3 -m ci_kit.pr_admit --repo "$GITHUB_REPOSITORY" --pr "$PR" --pool "$POOL" \
             --attempt "$GITHUB_RUN_ATTEMPT" \
@@ -778,7 +788,7 @@ jobs:
     name: verdict
     needs: [decide, review]
     if: ${{ !cancelled() && !(needs.decide.result == 'success' && needs.decide.outputs.finished == 'true') }}
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.secure-runner && fromJSON(inputs.secure-runner) || vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       pull-requests: write   # the ONE verdict comment, for every mode

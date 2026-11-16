@@ -2,9 +2,9 @@
 
 WHY (2026-11-10). A Renovate PR is `pyproject.toml` +1/-1 plus `uv.lock`, or a workflow's
 `uses: owner/action@v1.22.2` -> `@v1.22.3`. The model review reads a version string: there is no
-structure to judge, and it cannot see the new release's code either. On 11-09 trade-data opened
+structure to judge, and it cannot see the new release's code either. On 11-09 a consumer opened
 ~12 of them; each held the ONE sealed review runner for ~10-13 min and queued real PRs behind it.
-In trade-data `pyproject.toml` is a guard path, so docs_only's lockfile skip never reached them.
+There `pyproject.toml` is a guard path, so docs_only's lockfile skip never reached them.
 
 THE RULE, rejecting the bad shape rather than defining the good one: every changed line of every
 non-lockfile file pairs with exactly one line on the other side, the pair is IDENTICAL once each

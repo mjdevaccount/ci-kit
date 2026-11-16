@@ -14,9 +14,13 @@ what is parked (`can_act`), so a repo whose token cannot parks nothing here eith
 while the grant held carries pr_sched's OFF description once it is lost: that parks nothing too.
 Token: the job's GITHUB_TOKEN (pull-requests: write for the label, actions: read for the jobs).
 
-POOL is a label, or a runs-on value as a JSON label list (v1.40.0): the scheduler's pool is that
-list's LAST label (`pool_label`), so a workflow can hand over what its runs-on reads and never
-re-derive it in shell. A bare label is read exactly as before.
+POOL is a label, or the sealed job's runs-on as a JSON label list (the reusable's `sealed-runner`
+input, v1.42.0): the scheduler's pool is that list's LAST label (`pool_label`), so the workflow
+hands over what its runs-on reads and never re-derives it in shell. A bare label is read exactly as
+before; a JSON string (`"label"`) is its label. A value that names no label -- a list that does not
+parse, an empty list, a non-string item, an object, a label with quotes/brackets/whitespace -- is
+REFUSED (`::error`, exit 2): never read as '' ("not scarce"), never as quoted text no runner carries.
+The workflow's fallback then RUNS the review, as for any admission crash (never park blind).
 """
 from __future__ import annotations
 
@@ -47,18 +51,38 @@ def head_demand(repo: str, h: dict, pool: str, read: Gh, pending: bool) -> bool:
     return False
 
 
+class PoolError(ValueError):
+    """A --pool value that names no label (pool_label)."""
+
+
+_NOT_IN_A_LABEL = frozenset('"\'[]{},')
+
+
+def _label(x: object, raw: str) -> str:
+    if not isinstance(x, str) or not x.strip() or any(c.isspace() or c in _NOT_IN_A_LABEL for c in x.strip()):
+        raise PoolError(f"--pool {raw!r} does not name a runner label (got {x!r}): pass a label, a JSON string, "
+                        "or a non-empty JSON list of label strings")
+    return x.strip()
+
+
 def pool_label(raw: str) -> str:
-    """The scarce pool a runs-on value names: a bare label as it is, a JSON label list's LAST label,
-    '' for '' or an empty list. Pure. A list that does not parse is '' (not scarce: ADMIT, never park
-    blind) -- the job's own fromJSON would refuse it before any runner was taken."""
+    """The scarce pool a runs-on value names: '' for '' (not scarce), a bare label as it is, a JSON
+    string's label, a JSON label list's LAST label. Pure. Anything else raises PoolError -- a
+    malformed value is never '' (admit as "not scarce") nor quoted or bracketed text no runner carries."""
     raw = (raw or "").strip()
-    if not raw.startswith("["):
-        return raw
-    try:
-        labels = json.loads(raw)
-    except ValueError:
+    if not raw:
         return ""
-    return str(labels[-1]) if isinstance(labels, list) and labels else ""
+    if raw[0] not in '["{':
+        return _label(raw, raw)
+    try:
+        got = json.loads(raw)
+    except ValueError as e:
+        raise PoolError(f"--pool {raw!r} is not valid JSON ({e})") from None
+    if isinstance(got, list):
+        if not got:
+            raise PoolError(f"--pool {raw!r} is an empty label list")
+        return [_label(x, raw) for x in got][-1]
+    return _label(got, raw)
 
 
 def admit_main(argv: list[str] | None = None) -> int:
@@ -70,7 +94,12 @@ def admit_main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pending", action="store_true", help="a head still deciding counts as demand (the pre job)")
     ap.add_argument("--attempt", type=int, default=1, help="this run's attempt: from MAX_ATTEMPT on it is never parked")
     args = ap.parse_args(argv)
-    args.pool = pool_label(args.pool)
+    try:
+        args.pool = pool_label(args.pool)
+    except PoolError as e:
+        # refused, loudly: exit 2 = "did not look"; the workflow's fallback runs the review
+        print(f"::error title=pr-admit::{' '.join(str(e).split())}")
+        return 2
 
     def read(*a: str) -> subprocess.CompletedProcess:
         return subprocess.run(["gh", *a], check=True, capture_output=True, text=True)

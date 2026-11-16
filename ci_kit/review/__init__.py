@@ -1,10 +1,10 @@
 """The pre-merge model review gate: a reviewer whose verdict is a required CI check.
 
-WHY (trade-data, 2026-09-26). PRs open READY with auto-merge armed at open, and CI is the only
-merge gate. A review that lived in session memory lost every race: trade-data#2059 auto-merged
+WHY (a consumer, 2026-09-26). PRs open READY with auto-merge armed at open, and CI is the only
+merge gate. A review that lived in session memory lost every race: a consumer's #2059 auto-merged
 30s after opening, and the reviewer's DO NOT SHIP arrived after. Anthropic's managed Code Review
 never blocks a merge, so the gate is `.github/workflows/review-gate.yml` (reusable) over these
-modules. Moved here from trade-data `scripts/review_gate_*.py` (2026-11-06) so every repo calls
+modules. Moved here from a consumer's `scripts/review_gate_*.py` (2026-11-06) so every repo calls
 ONE gate and no PR can edit the policy that grades it.
 
   tier        which reasons put the diff in the tier, the docs/lockfile-only skip, the credential

@@ -6,7 +6,7 @@ bumps, and nothing red says so. This reads the pattern OUT OF the preset (no cop
 RE2's `(?<name>` into Python's `(?P<name>` (the only syntax difference this pattern uses), and
 drives it both ways.
 
-Moved here from edge-ci with the preset (2026-11-03): the proof lives beside the file it proves.
+Moved here with the preset (2026-11-03): the proof lives beside the file it proves.
 """
 from __future__ import annotations
 

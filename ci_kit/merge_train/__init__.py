@@ -1,6 +1,6 @@
 """The merge train: test N armed PRs ONCE, together, and land them as N commits.
 
-WHY (trade-data operator, 2026-11-11): "when we get like 8 prs queued up in trade data ... merge
+WHY (a consumer's operator, 2026-11-11): "when we get like 8 prs queued up in <repo> ... merge
 them into a common branch and let CI run against that. Keep the commit history per PR at least."
 Under strict protection ("up to date before merging") every merge to main puts every other armed
 PR BEHIND, and the updater (pr_autoupdate) re-tests them one at a time: N queued PRs cost N

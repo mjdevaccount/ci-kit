@@ -1,11 +1,11 @@
 """The review gate's `subscription` transport: the reviewer on the Claude Code CLI (`claude -p`).
 
-WHY (trade-data operator, 2026-11-06): "put my claude sub in github then ... i dont wanna pay api
+WHY (a consumer's operator, 2026-11-06): "put my claude sub in github then ... i dont wanna pay api
 creds". The subscription credential is CLAUDE_CODE_OAUTH_TOKEN (minted by `claude setup-token`),
 and Anthropic's terms scope it to Claude Code itself ("ordinary use of Claude Code and other
 native Anthropic applications"; Agent SDK products "should use API key authentication",
 code.claude.com/docs/en/legal-and-compliance). So this drives the UNMODIFIED CLI headless -- not
-the Python Agent SDK, and not claude-code-action, whose actor checks refused Renovate (td#2311).
+the Python Agent SDK, and not claude-code-action, whose actor checks refused Renovate (a consumer's #2311).
 
 Same contract as `agent`:
   * the verdict SCHEMA goes in with `--json-schema`; the result's `structured_output` is the JSON

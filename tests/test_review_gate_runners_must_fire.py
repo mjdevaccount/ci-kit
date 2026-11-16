@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import pathlib
 
+import _runners
 import yaml
 from _workflow_node import is_setup_node, node_faults
 
 WORKFLOW = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "review-gate.yml"
-SECURE = "${{ vars.CI_SECURE_RUNNER && fromJSON('[\"self-hosted\",\"home-secure\"]') || 'ubuntu-latest' }}"
-SEALED = "${{ vars.CI_SEALED_RUNNER && fromJSON('[\"self-hosted\",\"home-sealed\"]') || 'ubuntu-latest' }}"
+SECURE = _runners.SECURE
+SEALED = _runners.SEALED
 
 
 def placement_faults(jobs: dict) -> list[str]:

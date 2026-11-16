@@ -76,7 +76,7 @@ class FakeGH:
             when = self.prs[int(next(x for x in a if x.startswith("pr="))[3:])]["retargeted"]
             if when == "BLIND":
                 return 1, ""
-            got = json.loads((REC / f"timeline_{'home-host_199_retargeted' if when else 'trade-data_2990_never'}.json")
+            got = json.loads((REC / f"timeline_{'example-b_199_retargeted' if when else 'example-repo_2990_never'}.json")
                              .read_text(encoding="utf-8"))
             for node in got["data"]["repository"]["pullRequest"]["timelineItems"]["nodes"]:
                 node["createdAt"] = when
@@ -466,7 +466,7 @@ def test_a_lost_runner_red_releases_the_riders_never_ejects_must_fire(world: tup
     fake.prs[100]["statusCheckRollup"] = [GREEN[0], {**GREEN[1], "conclusion": "FAILURE"}]
     fake.check_runs = [{"id": 130850491916, "name": "review gate",
                         "details_url": "https://github.com/o/r/actions/runs/43115550872/job/130850491916"}]
-    fake.jobs = json.loads((REC / "jobs_trade-data_43115550872_machinery.json").read_text(encoding="utf-8"))
+    fake.jobs = json.loads((REC / "jobs_example-repo_43115550872_machinery.json").read_text(encoding="utf-8"))
     p = cli.Pass()
     assert cli.run(_opts(), p) == 1, p.summary          # loud, like every machinery retry
     assert not any(EJECTED in fake.prs[n]["labels"] for n in range(1, 5))
@@ -738,7 +738,7 @@ def test_a_held_pr_that_is_no_longer_the_head_gets_no_success_when_the_train_clo
 
 
 # ── v1.37.0: the token may be a GitHub App (ci_kit/pr_token.py) -- both identities across a flip ──
-BOT = "edge-bot[bot]"
+BOT = "example-app[bot]"
 
 
 def _as_app(fake: FakeGH, mp: pytest.MonkeyPatch, trusted: str = f"{BOT},me") -> None:

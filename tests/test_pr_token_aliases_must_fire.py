@@ -4,7 +4,7 @@
 v1.39.0 way (`app-id` + `private-key`). That call must get the SAME App id and key, the SAME
 decision and the SAME `pr-token:` record line as the v1.39.0 composite gave it; the only addition
 is a `::notice` under a title that is NOT the record's. The reusables' switch to the generic names
-is a later change and is not tested here.
+(v1.42.0) is tested in tests/test_generic_names_must_fire.py, over these helpers.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import pathlib
 import re
 
 import pytest
-from test_pr_token_must_fire import ACTION, TOKEN_JOBS, WF, _cli, _yaml
+from test_pr_token_must_fire import ACTION, _cli, _yaml
 
 from ci_kit import pr_token as pt
 
@@ -29,12 +29,12 @@ OLD_ACTION = {"HAS_APP_ID": "${{ inputs.app-id != '' }}", "HAS_KEY": "${{ inputs
 
 def gh(expr: str, ctx: dict[str, str]) -> object:
     """The expression subset these files use, evaluated: `&&`/`||` return an OPERAND (Python's
-    and/or), '' is falsy, `!` is not, a context name absent from `ctx` is ''."""
+    and/or), '' is falsy, `!` is not, `fromJSON` parses, a context name absent from `ctx` is ''."""
     body = expr.strip().removeprefix("${{").removesuffix("}}")
     body = re.sub(r"\b((?:inputs|vars|secrets)\.[\w-]+)", lambda m: f"_c({m.group(1)!r})", body)
-    body = body.replace("&&", " and ").replace("||", " or ")
+    body = body.replace("fromJSON(", "_j(").replace("&&", " and ").replace("||", " or ")
     body = re.sub(r"!(?!=)", " not ", body)
-    return eval(body, {"__builtins__": {}}, {"_c": lambda k: ctx.get(k, "")})  # noqa: S307 -- fixture text
+    return eval(body, {"__builtins__": {}}, {"_c": lambda k: ctx.get(k, ""), "_j": json.loads})  # noqa: S307
 
 
 def _s(v: object) -> str:
@@ -97,13 +97,6 @@ def test_a_v1_39_shape_caller_gets_the_same_decision_and_record_must_fire(
     extra = [x for x in new_lines if x not in old_lines]
     assert [x for x in old_lines if x not in new_lines] == []
     assert extra == pt.deprecations(["APP_ID_ALIAS"])
-
-
-@pytest.mark.parametrize(("wf", "job"), [(wf, j) for wf, jobs in TOKEN_JOBS.items() for j in jobs])
-def test_the_reusables_still_send_the_v1_39_shape(wf: str, job: str) -> None:
-    # holds OLD_CALL to what the reusables send today; the later rename of their inputs replaces this
-    tok = next(s for s in _yaml(WF / wf)["jobs"][job]["steps"] if s.get("id") == "token")
-    assert {k: v for k, v in tok["with"].items() if k != "scope"} == OLD_CALL
 
 
 def test_the_generic_name_and_its_alias_resolve_identically_must_fire() -> None:

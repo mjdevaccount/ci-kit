@@ -1,8 +1,8 @@
 """ci-green: fast-forward a branch (default `ci-green`) to a commit CI just PASSED on main.
 
 WHY. A box that builds from its checkout and follows `origin/main` ships whatever merged, green
-or not: a merge whose push-to-main CI then fails is deployed within the hour (edge-host
-deploy-reconcile, quant + ui, found 2026-11-09). A registry-image deploy can gate on "an image was
+or not: a merge whose push-to-main CI then fails is deployed within the hour (a consumer's
+deploy reconciler, two services, found 2026-11-09). A registry-image deploy can gate on "an image was
 built from a green run"; a build-on-the-box deploy has no such artefact. This is that artefact as
 a git ref: `ci-green` only ever holds commits CI passed on the default branch, so the box follows
 it with a plain fetch and needs no GitHub credential of its own.

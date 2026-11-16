@@ -8,7 +8,7 @@ Split out of `sqlast.py` at review, which found two holes a head-only read had: 
 with a `--` / `/* */` comment, and `WITH t(a) AS`.
 
 TRUNCATE (v1.9.0): a write the head cut never opened, so no gate read a TRUNCATE value or the
-statements chained after it (`TRUNCATE a; DELETE FROM b`). trade-data's `lint_sql_placement`
+statements chained after it (`TRUNCATE a; DELETE FROM b`). a consumer's `lint_sql_placement`
 carried its own fold + parse for it over this package's privates; that branch moved here.
 """
 

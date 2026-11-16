@@ -2,7 +2,7 @@
 """ci-gate-lint: a workflow whose jobs can SKIP must funnel into one always-running aggregate.
 
 WHY. GitHub counts a SKIPPED job as passing, for a required status check and for auto-merge.
-trade-infra#806 (2026-11-06) auto-merged with four required jobs skipped: its `detect` job
+A consumer PR (2026-11-06) auto-merged with four required jobs skipped: its `detect` job
 (dorny/paths-filter) died on runner DNS, every `needs: detect` job skipped, and the four checks
 branch protection required went green without running. The guard existed; it could not fire.
 
@@ -15,7 +15,7 @@ every other job, and [re-actors/alls-green](https://github.com/re-actors/alls-gr
   many           more than one alls-green job (which one does branch protection require?)
   not-always     the aggregate's `if:` is not `always()` -- it skips with its needs
   no-python      it runs on a self-hosted/expression runner with no setup-python first --
-                 alls-green runs `python -m ...`; a python3-only image exits 127 (trade-infra, 2026-11-06)
+                 alls-green runs `python -m ...`; a python3-only image exits 127 (a consumer, 2026-11-06)
   jobs-input     its `jobs:` input is not `${{ toJSON(needs) }}` -- it judges something else
   uncovered      a job missing from the aggregate's `needs:` -- the aggregate does not judge it, so
                  protection must require it by name or it must join `needs:`

@@ -1,8 +1,8 @@
 """Smart auto-merge: an armed PR whose red needs NO judgment fixes itself; one that needs judgment says so once.
 
-WHY (trade-data operator, 2026-11-11: "should have some kind of smart auto merge to handle the ones
-with smart fails"). Eight armed trade-data PRs backed up for hours that evening and nothing healed
-them: a sealed reviewer VM restarted mid-review (td#2988, run 43115550872: no step failed, the log
+WHY (a consumer's operator, 2026-11-11: "should have some kind of smart auto merge to handle the ones
+with smart fails"). Eight armed PRs in one consumer backed up for hours that evening and nothing healed
+them: a sealed reviewer VM restarted mid-review (#2988, run 43115550872: no step failed, the log
 API answers BlobNotFound) and the PR sat red until a person pointed at it. The updater
 (pr_autoupdate) held it as "a check is failing (the author's fix re-queues it)" -- but there was
 no fix for an author to make.
@@ -32,9 +32,9 @@ called workflow that requests a permission its caller did not grant fails to STA
 caller. So the rerun goes through the PAT (`GH_TOKEN`, the updater's push token); a PAT without
 Actions write is refused, and that refusal is an ERROR naming the grant -- never a silent skip.
 
-WATCHED FROM OUTSIDE: mcp scripts/pr_reconcile.py reads the `exhausted` and `judgment` markers on
-open armed PRs into the PR-LAND brief line (a red here also turns pr-autoupdate's run red, which
-mcp ci-schedule-audit names).
+WATCHED FROM OUTSIDE: a PR reconciler outside the kit reads the `exhausted` and `judgment` markers on
+open armed PRs into its report (a red here also turns pr-autoupdate's run red, which an
+outside schedule audit names).
 """
 from __future__ import annotations
 

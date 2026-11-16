@@ -9,7 +9,7 @@ branch NOW, and that run was CREATED AFTER THE PR'S LAST BASE CHANGE.
 
 That last clause is the base binding (session review of ci-kit#70, finding 1, round 2). A run's
 `pull_requests[].base` (and `.head`) are the PR's CURRENT state when the API is asked, not what the
-run saw -- live: trade-data run 43105767267 (created 21:44:53) reports a base sha committed
+run saw -- live: a consumer's run 43105767267 (created 21:44:53) reports a base sha committed
 21:55:29 -- so no field of the run can say which base was reviewed. A PR reviewed on `feat` and
 retargeted to main (`edited` is not a gate trigger, so no new run) would read as reviewed on
 main and land `feat`'s unreviewed content. The PR's timeline records each base change when it
@@ -70,7 +70,7 @@ def runs_at(repo: str, workflow: str, head: str) -> list[dict]:
 
 
 # `filteredCount`, NEVER `totalCount`: GitHub's totalCount IGNORES the itemTypes filter (live,
-# 11-11: trade-data#2990 totalCount 3 / filteredCount 0 / no nodes; home-host#199 32 / 1 / one
+# 11-11: consumer A #2990 totalCount 3 / filteredCount 0 / no nodes; consumer B #199 32 / 1 / one
 # BaseRefChangedEvent). Deciding on totalCount read every PR with any timeline as "retargeted with
 # no time" and no train ever formed (ci-kit#70 round 3). Recorded answers: tests/fixtures/github/.
 RETARGETS = """query($o:String!,$n:String!,$pr:Int!){repository(owner:$o,name:$n){pullRequest(number:$pr){

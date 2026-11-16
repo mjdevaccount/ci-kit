@@ -2,7 +2,7 @@
 
 ci-pin-drift goes red the day a kit releases. If Renovate holds that bump (3-day minimumReleaseAge,
 weekend schedule, the weekly "python (non-major)" group), pin-drift stays red until a session
-bumps by hand. 2026-11-04: finance-ops moved llm-ports to PyPI, its depName became `llm-ports`,
+bumps by hand. 2026-11-04: a consumer moved a kit to PyPI, its depName became the bare name,
 the name-keyed "first-party kits" rule stopped matching, and v1.1.0 sat pending while pin-drift
 was red. Renovate applies packageRules in order and a later match wins, so the rule matched by
 source URL must come AFTER every rule that groups, schedules or age-gates a registry manager.
@@ -73,14 +73,14 @@ def _kit_groups() -> list[dict]:
 
 
 def test_each_kit_release_is_one_pr_across_its_depnames_must_fire() -> None:
-    # trade-data 2026-11-12: ci-kit v1.25.0 opened #2995 (pep621, depName `ci-kit`) AND #2996
+    # a consumer, 2026-11-12: ci-kit v1.25.0 opened #2995 (pep621, depName `ci-kit`) AND #2996
     # (github-actions, depName `mjdevaccount/ci-kit`) -- two heavy unit runs for one release
     at, _ = _source_rule()
     groups = {r["groupName"]: (i, r) for i, r in enumerate(_rules()) if r in _kit_groups()}
     assert set(groups) == set(KITS)
     for kit, (i, r) in groups.items():
         assert i > at, f"{kit}: a later rule wins, so the group must follow the source-url rule"
-        # the source URL both depName forms report; never a bare name (npm has an unrelated edge-platform)
+        # the source URL both depName forms report; never a bare name (npm has unrelated packages under bare names)
         assert set(r["matchSourceUrls"]) == {f"https://github.com/mjdevaccount/{kit}{x}" for x in ("", ".git")}
         # ONE matcher: two matchers in one rule must both match
         assert set(r) - {"description"} == {"matchSourceUrls", *HOLDS}

@@ -229,7 +229,7 @@ def land(o: Opts, p: Pass, train: dict, rode: list[tuple[int, str, str]]) -> tup
 
 def machinery(o: Opts, p: Pass, train: dict) -> str:
     """Why the train's red is MACHINERY at the jobs depth ('' = it is not, or GitHub would not say).
-    The rollup sees a lost runner as a plain FAILURE (td#2988's sealed reviewer, 2026-11-11): read
+    The rollup sees a lost runner as a plain FAILURE (a consumer's #2988, its sealed reviewer, 2026-11-11): read
     as a verdict, it would bisect innocent riders out. ci_kit/pr_heal + redclass, the one classifier
     pr-autoupdate's smart auto-merge reads. Unreadable = '' (bisect, the old behaviour), named."""
     from ci_kit.pr_autoupdate import _gh_read  # lazy: pr_autoupdate imports merge_train
@@ -328,7 +328,7 @@ def queue_position(o: Opts, p: Pass, m: int, tip: str) -> None:
     """A train IS the queue landing: its PR gets the queue hold's `queue/position` success (ci-kit
     ci_kit/pr_hold.py) the moment it opens, not on pr-autoupdate's next pass -- a train green
     before that pass would have its merge refused by protection that requires the status (review
-    of td#3085: up to one merge-train cron, 20 min, of delay). Its branch is never pushed again, so
+    of a consumer's #3085: up to one merge-train cron, 20 min, of delay). Its branch is never pushed again, so
     one post holds. Best effort: a refused post is SAID, not an error -- pr-autoupdate's pass posts
     the same status (pr_hold.TRAIN) and turns red on its own if it cannot."""
     from ci_kit import pr_hold  # lazy: pr_hold -> pr_queue -> nothing of the train

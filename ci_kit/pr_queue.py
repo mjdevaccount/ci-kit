@@ -1,6 +1,6 @@
 """Which armed PRs the updater pushes this run: a serial queue in front of strict protection.
 
-WHY (measured on trade-data, 24h to 2026-10-24 01:22Z). Updating EVERY armed PR on every push to
+WHY (measured on a consumer, 24h to 2026-10-24 01:22Z). Updating EVERY armed PR on every push to
 main ran 228 PR CI runs for 31 main pushes (7.4 per push), and 159 of them (70%) were cancelled
 before finishing: each later push superseded them. That queue sat in front of main's own CI (p90
 wait 235s, max 404s) and of the deploy image built from it. Under "require branches to be up
@@ -78,7 +78,7 @@ def check_state(rollup: list[dict] | None, required: tuple[str, ...] = ()) -> st
 def landing_order(p: dict) -> int:
     """THE order armed PRs land in, for the serial queue AND the merge train: lowest PR number
     first. The operator reads a backlog by number, so arm time (re-armed by any re-push or
-    autoland toggle) reordered it behind his back (trade-data 2026-11-12: #2980 waited behind
+    autoland toggle) reordered it behind his back (a consumer, 2026-11-12: #2980 waited behind
     #2993/#2994). One key, so the two consumers cannot drift."""
     return int(p.get("number", 0))
 
@@ -135,12 +135,12 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = (),
 
 # ── the PR SCHEDULER (v1.29.0): ORDER and TIMING on the scarce runner pools, never fewer checks ──
 #
-# WHY (trade-data 2026-11-14 03:58Z, operator: "why are runners working on ANYTHING else other than
+# WHY (a consumer, 2026-11-14 03:58Z, operator: "why are runners working on ANYTHING else other than
 # 3073? its WAITING and its next in line"). The queue above decides which PR main is merged INTO;
 # GitHub decides which job gets a runner, first come first served with no priority -- and measured
 # over 11-07..11-14 it did not even keep that order: on the one-runner pools a lower-numbered PR's job
-# sat behind a higher one's 90x on home-sealed (23% of PR jobs, wait p90 21 min) and 245x on
-# home-heavy (30%, p90 61 min, 100 runner-hours of waiting), and in half of those the other job was
+# sat behind a higher one's 90x on the sealed pool (23% of PR jobs, wait p90 21 min) and 245x on
+# the heavy pool (30%, p90 61 min, 100 runner-hours of waiting), and in half of those the other job was
 # DISPATCHED AFTER the waiting one queued. This is the policy that puts the queue's order on the
 # pools. It changes when a job runs and nothing else: every PR still passes every required check on
 # the exact head that merges -- a parked job is re-run, never skipped, and a parked check is red.
@@ -170,7 +170,7 @@ def member(p: dict) -> bool:
     `pr-comment` merge step), so pr-autoupdate ARMS each one whose own verdict is automerge
     (ci_kit/pr_renovate.py, v1.32.0) and it joins the queue in number order, like any PR; a held
     one (Automerge Disabled, `autoland-off`, disarmed by hand) stays out. With the queue hold on
-    (ci_kit/pr_hold.py) an UNARMED one reads `queue/position` pending (td#3079, 06:49Z 11-14)."""
+    (ci_kit/pr_hold.py) an UNARMED one reads `queue/position` pending (a consumer's #3079, 06:49Z 11-14)."""
     branch = str(p.get("headRefName") or "")
     return (not p.get("isCrossRepository") and not p.get("isDraft") and not branch.startswith("train/")
             and bool(p.get("autoMergeRequest")))

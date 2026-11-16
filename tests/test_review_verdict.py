@@ -103,7 +103,7 @@ def test_printed_schema_is_the_parsers_schema(capsys) -> None:
 
 
 def test_blind_advice_is_a_fresh_commit_never_a_rerun() -> None:
-    # a re-run of failed jobs keeps the reusable workflow's OLD ref (td#2948, 2026-11-09: the rerun
+    # a re-run of failed jobs keeps the reusable workflow's OLD ref (a consumer's #2948, 2026-11-09: the rerun
     # resolved review-gate.yml@v1 to the pre-setup-node SHA and went BLIND again on exit 127)
     body = decide(None, "x").body
     assert "push a fresh commit" in body

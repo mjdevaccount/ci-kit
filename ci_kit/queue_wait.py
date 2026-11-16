@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ci-queue-wait: how long one workflow's runs waited for a runner, over the last N hours.
 
-WHY. The autoupdater treadmill (trade-data, 2026-10-24): every push to main re-queued CI on every
+WHY. The autoupdater treadmill (a consumer, 2026-10-24): every push to main re-queued CI on every
 armed PR, and main's own CI and its deploy image waited behind them -- p90 235s, max 404s for
 main, max 3340s for a PR -- while the service deploy chased main for two hours. Nothing measured
 it, so nothing could say when it started or whether a fix held. This is the number, as a gate a
@@ -72,7 +72,7 @@ def wait_s(run: dict, jobs: list[dict]) -> tuple[float, bool] | None:
     """-> (seconds this run attempt waited for its first runner, censored); None if it has no job
     that ran or waited (no jobs, or all skipped). Pure."""
     # A partial re-run carries the earlier attempt's finished jobs over with their OLD timestamps
-    # (reviewer 581 N1: trade-ui 42469246881 attempt 2 scored -1407s and was dropped). Only a job
+    # (reviewer 581 N1: a consumer's run 42469246881 attempt 2 scored -1407s and was dropped). Only a job
     # this attempt ran -- started at or after the attempt's start -- is a pick-up.
     t0 = _anchor(run)
     starts = [t for t in (_ts(j["started_at"]) for j in jobs if _ran(j)) if t >= t0]

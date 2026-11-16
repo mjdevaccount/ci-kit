@@ -46,22 +46,22 @@ WF = "jobs:" + NL + "  r:" + NL + "    uses: mjdevaccount/ci-kit/.github/workflo
 
 
 @pytest.mark.parametrize(("before", "after"), [
-    # Renovate's pyproject pin + its lock (trade-data#2955's shape)
+    # Renovate's pyproject pin + its lock (a consumer's #2955 shape)
     ({"pyproject.toml": PY, "uv.lock": "ci-kit 1.22.2" + NL},
      {"pyproject.toml": PY.replace("1.22.2", "1.22.3"), "uv.lock": "ci-kit 1.22.3" + NL}),
-    # a reusable-workflow ref (trade-data#2951's shape)
+    # a reusable-workflow ref (a consumer's #2951 shape)
     ({".github/workflows/ci.yml": WF}, {".github/workflows/ci.yml": WF.replace("v1.22.1", "v1.22.3")}),
     # a SHA-pinned action with its version comment
     ({".github/workflows/ci.yml": f"      - uses: actions/checkout@{SHA_A} # v4.1.0" + NL},
      {".github/workflows/ci.yml": f"      - uses: actions/checkout@{SHA_B} # v4.2.0" + NL}),
-    # package.json's exact pin (trade-data#2902's shape) and a caret range
+    # package.json's exact pin (a consumer's #2902 shape) and a caret range
     ({"web/package.json": '{' + NL + '  "windmill-cli": "1.862.0",' + NL + '  "vite": "^6.1.0"' + NL + '}' + NL},
      {"web/package.json": '{' + NL + '  "windmill-cli": "1.862.1",' + NL + '  "vite": "^6.2.0"' + NL + '}' + NL}),
     # an image tag and digest
     ({"Dockerfile": f"FROM python:3.12.7-slim@sha256:{'c' * 64}" + NL},
      {"Dockerfile": f"FROM python:3.12.8-slim@sha256:{'d' * 64}" + NL}),
     ({"requirements-dev.txt": "ruff==0.7.1" + NL}, {"requirements-dev.txt": "ruff==0.8.0" + NL}),
-    # a uv git source tag (trade-data#2955's real line) and a cargo/poetry git rev
+    # a uv git source tag (a consumer's #2955 real line) and a cargo/poetry git rev
     ({"pyproject.toml": 'ci-kit = { git = "https://github.com/o/ci-kit", tag = "v1.22.2" }' + NL},
      {"pyproject.toml": 'ci-kit = { git = "https://github.com/o/ci-kit", tag = "v1.22.3" }' + NL}),
     ({"Cargo.toml": f'x = {{ git = "https://g/x", rev = "{SHA_A}" }}' + NL},

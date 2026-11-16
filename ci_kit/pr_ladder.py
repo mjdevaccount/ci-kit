@@ -24,7 +24,7 @@ are never armed; one whose body says `**Automerge**: Enabled` counts as armed he
 CONFLICTED Renovate PR is not ours to merge into: its branch is Renovate's, and Renovate rebuilds
 it whole (versions, lockfiles, a terraform lock's hashes) when its rebase checkbox is ticked. So
 the ladder's step for it is to TICK that box (mode `rebase`, the same once-per-head marker), and
-page when the head has not moved after `stale-minutes` (home-host#246 sat conflicted 11-07..11-14).
+page when the head has not moved after `stale-minutes` (a consumer's #246 sat conflicted 11-07..11-14).
 A RED Renovate PR takes the ladder like any other; tier 2's built-in pin rehash
 (ci_kit/pin_rehash.py) moves a release binary's sha256 table to the version Renovate set.
 
@@ -43,8 +43,8 @@ and a page `<!-- smart-merge:paged head=<sha> why=<w> -->` (one per head).
 
 WATCHED: a dispatch with no `healed` record at its head after `stale-minutes` (the heal job never
 ran, was cancelled, or died before its report) is paged by the next pass that sees the PR still red
-or conflicting -- the pass is the scheduled watcher (trade-data runs it every 15 min), and a dark
-pass is mcp ci-schedule-audit's. mcp pr_reconcile reads the markers into the brief's PR-LAND line.
+or conflicting -- the pass is the scheduled watcher (a consumer runs it every 15 min), and a dark
+pass is an outside schedule audit's. An outside PR reconciler reads the markers into its report.
 """
 from __future__ import annotations
 
@@ -296,7 +296,7 @@ def _rebase(repo: str, pr: dict, write: Write, now: dt.datetime) -> str:
     from ci_kit.pr_renovate import ticked  # here: pr_renovate -> pr_sched -> pr_heal -> this module
     body = ticked(r.stdout or "")
     # ticked already (a person, or a pass whose PATCH failed) or no box: nothing to ask, but the head
-    # is still recorded, so the stale-minutes page fires if Renovate never moves it (home-host#246)
+    # is still recorded, so the stale-minutes page fires if Renovate never moves it (a consumer's #246)
     did = "ticked Renovate's rebase box" if body is not None else "its rebase box is already ticked or absent"
     mark = HEAL.format(head=head, mode="rebase", claude=0, at=now.strftime("%Y-%m-%dT%H:%M:%SZ"))
     r = write("pr", "comment", str(n), "-R", repo, "--body-file", "-",

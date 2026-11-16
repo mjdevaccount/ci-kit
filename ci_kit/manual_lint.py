@@ -57,7 +57,7 @@ THE OPTIONAL CHECKS, each off unless asked for:
 
 Usage:
     ci-manual-lint                                  check CLAUDE.md at the repo root
-    ci-manual-lint --sibling trade-data --migrations migrations --line-budget 200
+    ci-manual-lint --sibling example-repo --migrations migrations --line-budget 200
     ci-manual-lint @scripts/manual_lint.args        flags from a file, one per line
 
 Exit codes: 0 clean (warnings do not fail) · 1 errors · 2 DID NOT FINISH LOOKING (no git, empty
@@ -148,7 +148,7 @@ class Repo:
 
     def sibling(self, tok: str) -> tuple[bool, str | None]:
         """(is a sibling pointer, error-or-None). Present sibling -> checked; absent -> silent.
-        Tests the sibling REPO ROOT, never the token's grandparent: `mcp/README.md` is two
+        Tests the sibling REPO ROOT, never the token's grandparent: `tools/README.md` is two
         segments deep, so its grandparent is the workspace root, which always exists."""
         head = tok.split("/", 1)[0]
         if head not in self.siblings or head == self.root.name:

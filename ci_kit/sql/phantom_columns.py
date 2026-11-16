@@ -147,7 +147,7 @@ def run(schema_path: str, scan_dir: pathlib.Path, cfg: Config) -> int:
 def selftest(cfg: Config) -> list[str]:
     """Both directions. A gate that only proves the green case is the bug it exists to catch."""
     f: list[str] = []
-    schema = {"quant.operator_trades": ["trade_id", "entry_px", "exit_px", "setup", "is_paper"]}
+    schema = {"app.trades": ["trade_id", "entry_px", "exit_px", "setup", "is_paper"]}
 
     def found(sql: str) -> set[str]:
         return {c for _ln, _t, bad in phantoms("q = " + repr(sql), "<selftest>", schema, cfg)
@@ -156,30 +156,30 @@ def selftest(cfg: Config) -> list[str]:
     # RED: a cast to a column that does not exist, aliased to its own name (the case a naive
     # alias filter silently misses).
     bad = ("SELECT trade_id, entry_px::float8 AS entry_px,"
-           " risk_usd::float8 AS risk_usd FROM quant.operator_trades WHERE setup = :s")
+           " risk_usd::float8 AS risk_usd FROM app.trades WHERE setup = :s")
     if found(bad) != {"risk_usd"}:
         f.append(f"the #1615 cast was not the one finding: {found(bad)}")
-    if found("SELECT CAST(risk_usd AS float8) FROM quant.operator_trades") != {"risk_usd"}:
+    if found("SELECT CAST(risk_usd AS float8) FROM app.trades") != {"risk_usd"}:
         f.append("the CAST() spelling of the same bug was missed")
-    if found("SELECT t.trade_id FROM quant.operator_trades t WHERE t.risk_usd > 0") != {"risk_usd"}:
+    if found("SELECT t.trade_id FROM app.trades t WHERE t.risk_usd > 0") != {"risk_usd"}:
         f.append("an alias-qualified predicate column was missed")
 
     # GREEN: binds, computed output aliases ordered on, and real columns must all stay quiet.
     good = ("SELECT trade_id, exit_px::float8 AS exit_px, count(*)::int AS runs"
-            " FROM quant.operator_trades WHERE setup = :setup AND is_paper"
+            " FROM app.trades WHERE setup = :setup AND is_paper"
             " ORDER BY runs DESC")
     if found(good):
         f.append(f"false positives on a clean statement: {found(good)}")
     # ...and the shapes a regex read as columns: a comment, a string literal, a JOIN.
-    quiet = ("SELECT trade_id, 'risk_usd::float8' AS s FROM quant.operator_trades"
+    quiet = ("SELECT trade_id, 'risk_usd::float8' AS s FROM app.trades"
              " -- risk_usd::float8 AS risk_usd")
     if found(quiet):
         f.append(f"a comment or string literal was read as a column: {found(quiet)}")
-    if found("SELECT o.risk_usd::float8 FROM quant.operator_trades t JOIN quant.x o ON o.id = t.trade_id"):
+    if found("SELECT o.risk_usd::float8 FROM app.trades t JOIN app.x o ON o.id = t.trade_id"):
         f.append("a two-table statement was analysed; its columns are ambiguous")
     # A cast inside a CTE: the CTE's output columns are not the table's, so the statement is
     # skipped as ambiguous.
-    if found("WITH w AS (SELECT risk_usd::float8 AS r FROM quant.operator_trades) SELECT r FROM w"):
+    if found("WITH w AS (SELECT risk_usd::float8 AS r FROM app.trades) SELECT r FROM w"):
         f.append("a CTE statement was analysed; its columns are ambiguous")
     blind = _cli.blind_probe(
         lambda: phantoms("q = " + repr("".join(("SEL", "ECT FROM WHERE"))), "<selftest>", schema, cfg),

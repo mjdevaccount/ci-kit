@@ -138,12 +138,27 @@ on:
         description: pat | app | app-required ('' = the caller repo's PR_TOKEN_SOURCE variable, else pat) -- ci_kit/pr_token.py (v1.37.0)
         type: string
         default: ""
+      app-client-id:
+        description: the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- README "Generic names"
+        type: string
+        default: ""
+      secure-runner:
+        description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- README "Generic names"
+        type: string
+        default: ""
+      sealed-runner:
+        description: the sealed pool's runs-on, a JSON label list ('' = the CI_SEALED_RUNNER switch, else hosted) -- README "Generic names"
+        type: string
+        default: ""
     secrets:
       token:
         description: the push token (fine-grained PAT, contents + pull requests RW on the repo); comments too. Not required since v1.37.0 (empty while the PAT acts is still red)
         required: false
+      app-private-key:
+        description: the App's private key, with the app-client-id input -- README "Generic names"
+        required: false
       EDGE_BOT_PRIVATE_KEY:
-        description: the GitHub App's private key (v1.37.0, with the EDGE_BOT_APP_ID variable); token-source decides who acts in claim, push and report
+        description: DEPRECATED alias of app-private-key -- README "Generic names"
         required: false
       ntfy-url:
         description: tier 4's page topic ('' = not pushed, named in the record)
@@ -174,7 +189,7 @@ env:
 jobs:
   plan:
     name: plan
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.secure-runner && fromJSON(inputs.secure-runner) || vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       go: ${{ steps.plan.outputs.go }}
@@ -283,8 +298,8 @@ jobs:
     if: >-
       !cancelled() && needs.plan.outputs.go == 'true' && needs.plan.outputs.claude == 'true'
       && needs.regen.outputs.state != 'regen' && needs.regen.outputs.state != 'merge'
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
-    environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
+    runs-on: ${{ inputs.secure-runner && fromJSON(inputs.secure-runner) || vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    environment: ${{ (inputs.secure-runner || vars.CI_SECURE_RUNNER) && 'ci-secure' || '' }}
     timeout-minutes: 5
     outputs:
       claimed: ${{ steps.claim.outputs.claimed || 'false' }}
@@ -300,8 +315,9 @@ jobs:
       - name: Push token (App or PAT)
         id: token
         uses: mjdevaccount/ci-kit/.github/actions/pr-token@v1
-        with: {scope: comment, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", app-id: "${{ vars.EDGE_BOT_APP_ID }}",
-               private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}", pat: "${{ secrets.token }}"}
+        with: {scope: comment, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", pat: "${{ secrets.token }}",
+               client-id: "${{ inputs.app-client-id }}", private-key: "${{ secrets.app-private-key }}",
+               deprecated-client-id: "${{ vars.EDGE_BOT_APP_ID }}", deprecated-private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}"}
       - name: Record the attempt, or refuse a second one at this head
         id: claim
         env:
@@ -320,7 +336,7 @@ jobs:
     if: >-
       !cancelled() && needs.claim.outputs.claimed == 'true'
       && needs.claim.outputs.attempt == format('{0}', github.run_attempt)
-    runs-on: ${{ vars.CI_SEALED_RUNNER && fromJSON('["self-hosted","home-sealed"]') || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.sealed-runner && fromJSON(inputs.sealed-runner) || vars.CI_SEALED_RUNNER && fromJSON('["self-hosted","home-sealed"]') || 'ubuntu-latest' }}
     timeout-minutes: 50   # pr_fix.FIX_JOB_MIN = FIX_STEP_MIN 42 + SETUP_MIN 8 (header)
     permissions:
       contents: read
@@ -417,8 +433,8 @@ jobs:
     if: >-
       !cancelled() && needs.plan.outputs.go == 'true'
       && (needs.regen.outputs.state == 'regen' || needs.regen.outputs.state == 'merge' || needs.fix.outputs.state == 'fixed')
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
-    environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
+    runs-on: ${{ inputs.secure-runner && fromJSON(inputs.secure-runner) || vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    environment: ${{ (inputs.secure-runner || vars.CI_SECURE_RUNNER) && 'ci-secure' || '' }}
     timeout-minutes: 10
     concurrency:
       group: pr-heal-push-${{ github.repository }}-${{ inputs.pr }}
@@ -439,8 +455,9 @@ jobs:
       - name: Push token (App or PAT)
         id: token
         uses: mjdevaccount/ci-kit/.github/actions/pr-token@v1
-        with: {scope: push, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", app-id: "${{ vars.EDGE_BOT_APP_ID }}",
-               private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}", pat: "${{ secrets.token }}"}
+        with: {scope: push, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", pat: "${{ secrets.token }}",
+               client-id: "${{ inputs.app-client-id }}", private-key: "${{ secrets.app-private-key }}",
+               deprecated-client-id: "${{ vars.EDGE_BOT_APP_ID }}", deprecated-private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}"}
       - name: Apply and push (fast-forward only)
         id: apply
         env:
@@ -459,8 +476,8 @@ jobs:
     name: report (tier 4)
     needs: [plan, regen, claim, fix, push]
     if: always()
-    runs-on: ${{ vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
-    environment: ${{ vars.CI_SECURE_RUNNER && 'ci-secure' || '' }}
+    runs-on: ${{ inputs.secure-runner && fromJSON(inputs.secure-runner) || vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    environment: ${{ (inputs.secure-runner || vars.CI_SECURE_RUNNER) && 'ci-secure' || '' }}
     timeout-minutes: 5
     outputs:
       result: ${{ steps.report.outputs.result }}
@@ -474,8 +491,9 @@ jobs:
       - name: Push token (App or PAT)
         id: token
         uses: mjdevaccount/ci-kit/.github/actions/pr-token@v1
-        with: {scope: comment, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", app-id: "${{ vars.EDGE_BOT_APP_ID }}",
-               private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}", pat: "${{ secrets.token }}"}
+        with: {scope: comment, mode: "${{ inputs.token-source || vars.PR_TOKEN_SOURCE }}", pat: "${{ secrets.token }}",
+               client-id: "${{ inputs.app-client-id }}", private-key: "${{ secrets.app-private-key }}",
+               deprecated-client-id: "${{ vars.EDGE_BOT_APP_ID }}", deprecated-private-key: "${{ secrets.EDGE_BOT_PRIVATE_KEY }}"}
       - name: Record, and page once per head when nothing was pushed
         id: report
         env:

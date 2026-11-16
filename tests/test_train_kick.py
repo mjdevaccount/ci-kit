@@ -80,7 +80,7 @@ def test_a_pass_created_after_the_newest_ready_already_judged_this_set() -> None
 
 
 def test_a_skipped_run_judged_nothing_and_never_dedups() -> None:
-    # the live shape (trade-data 11-14): 9 of the newest 10 runs are workflow_run completions the
+    # the live shape (a consumer, 11-14): 9 of the newest 10 runs are workflow_run completions the
     # train job's `if:` skipped. Read as passes, they would stop every wake.
     skipped = runs(*[f"2026-11-14T10:{m:02d}:00Z" for m in range(10, 19)], event="workflow_run",
                    conclusion="skipped")

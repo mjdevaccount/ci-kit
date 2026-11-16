@@ -10,13 +10,14 @@ from __future__ import annotations
 import json
 import pathlib
 
+import _runners
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 HEAL = ROOT / ".github" / "workflows" / "pr-heal.yml"
 UPD = ROOT / ".github" / "workflows" / "pr-autoupdate.yml"
-SECURE = "${{ vars.CI_SECURE_RUNNER && fromJSON('[\"self-hosted\",\"home-secure\"]') || 'ubuntu-latest' }}"
-SEALED = "${{ vars.CI_SEALED_RUNNER && fromJSON('[\"self-hosted\",\"home-sealed\"]') || 'ubuntu-latest' }}"
+SECURE = _runners.SECURE
+SEALED = _runners.SEALED
 
 
 def _jobs(path: pathlib.Path = HEAL) -> dict:
