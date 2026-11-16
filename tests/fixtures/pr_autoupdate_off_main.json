@@ -1,0 +1,194 @@
+{
+ "main_query": "\nquery($owner: String!, $name: String!) {\n  repository(owner: $owner, name: $name) {\n    pullRequests(states: OPEN, first: 100, orderBy: {field: CREATED_AT, direction: ASC}) {\n      nodes {\n        id number title url isCrossRepository headRefOid headRefName mergeStateStatus\n        isDraft mergeable baseRefName createdAt\n        author { __typename login }\n        autoMergeRequest { enabledAt }\n        body\n        labels(first: 30) { nodes { name } }\n        commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {\n          __typename\n          ... on CheckRun { name status conclusion startedAt completedAt }\n          ... on StatusContext { context state description createdAt }\n        } } } } } }\n      }\n    }\n  }\n}\n",
+ "pinned": {
+  "armed-conflict": {
+   "calls": [
+    [
+     "gh",
+     "api",
+     "graphql",
+     "-f",
+     "query=<QUERY>",
+     "-f",
+     "owner=o",
+     "-f",
+     "name=r"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/branches/main/protection/required_status_checks"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/actions/runs?head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&event=pull_request&per_page=100"
+    ],
+    [
+     "gh",
+     "api",
+     "-X",
+     "PUT",
+     "repos/o/r/pulls/4/update-branch",
+     "-f",
+     "expected_head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    [
+     "gh",
+     "pr",
+     "view",
+     "4",
+     "-R",
+     "o/r",
+     "--json",
+     "state",
+     "-q",
+     ".state"
+    ],
+    [
+     "gh",
+     "pr",
+     "edit",
+     "4",
+     "-R",
+     "o/r",
+     "--add-label",
+     "conflict"
+    ]
+   ],
+   "output": "relock=[4]\nheal=[]\n",
+   "rc": 0,
+   "stdout": "- 1 armed PR(s) of 2 open\n- #4: conflict (merge conflict); page NTFY_URL unset: NOT pushed\n"
+  },
+  "no-queue": {
+   "calls": [
+    [
+     "gh",
+     "api",
+     "graphql",
+     "-f",
+     "query=<QUERY>",
+     "-f",
+     "owner=o",
+     "-f",
+     "name=r"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/actions/workflows?per_page=100"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/branches/main/protection/required_status_checks"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/compare/main...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?per_page=1"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/actions/runs?head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&event=pull_request&per_page=100"
+    ],
+    [
+     "gh",
+     "api",
+     "-X",
+     "PUT",
+     "repos/o/r/pulls/1/update-branch",
+     "-f",
+     "expected_head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/actions/runs?head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&event=pull_request&per_page=100"
+    ]
+   ],
+   "output": "relock=[]\nheal=[]\n",
+   "rc": 0,
+   "stdout": "- 1 armed PR(s) of 2 open\n- #1: updated\n"
+  },
+  "queue-of-one": {
+   "calls": [
+    [
+     "gh",
+     "api",
+     "graphql",
+     "-f",
+     "query=<QUERY>",
+     "-f",
+     "owner=o",
+     "-f",
+     "name=r"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/actions/workflows?per_page=100"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/branches/main/protection/required_status_checks"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/compare/main...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?per_page=1"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/actions/runs?head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&event=pull_request&per_page=100"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/compare/main...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?per_page=1"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/actions/runs?head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&event=pull_request&per_page=100"
+    ],
+    [
+     "gh",
+     "api",
+     "-X",
+     "PUT",
+     "repos/o/r/pulls/1/update-branch",
+     "-f",
+     "expected_head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    [
+     "gh",
+     "api",
+     "repos/o/r/actions/runs?head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&event=pull_request&per_page=100"
+    ]
+   ],
+   "output": "relock=[]\nheal=[]\n",
+   "rc": 0,
+   "stdout": "- 2 armed PR(s) of 3 open\n- queue: 0/1 in flight [], 1 to attempt, 1 held\n- #2: held, queued, position 1 (in flight: 0/1)\n- #1: updated\n"
+  }
+ },
+ "source": "git show origin/main:ci_kit/pr_autoupdate.py at c650b66 (v1.40.0), recorded by tests/test_pr_autoupdate_update_held_off_identical.py::record"
+}

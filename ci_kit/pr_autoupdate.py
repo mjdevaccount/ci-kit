@@ -27,7 +27,11 @@ current main at once, lowest PR number first; 0 = every armed PR. The policy and
 behind it: ci_kit/pr_queue.py). With a queue, every pass first ARMS each Renovate PR whose preset
 verdict is automerge (ci_kit/pr_renovate.py, v1.32.0): Renovate never arms or merges in a queue
 repo. A PR the queue picked but skipped for a running review hands its slot to the next eligible PR
-(`Plan.spare`), so one long review does not idle the queue.
+(`Plan.spare`), so one long review does not idle the queue. `update_held` (env CI_KIT_UPDATE_HELD,
+default off) also updates HELD PRs -- open, not armed -- on a scheduled or dispatched pass only,
+LAST (after this pass's outputs and summary are written), once no armed PR is on its way to
+current, inside the queue's free slots; it never labels, pages or
+relocks one, and nothing it raises changes this run's exit code (ci_kit/pr_held.py).
 
 CONFLICT = TRANSITION-ONLY PAGE. The conflict label is the dedup state: a PR that conflicts and
 is not labelled gets the label AND one ntfy push (env `NTFY_URL`; unset = no push) naming the PR
@@ -56,7 +60,7 @@ import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ci_kit import doomed_runs, pr_baseretry, pr_heal, pr_hold, pr_ladder, pr_list, pr_queue, pr_renovate, pr_sched, train_kick
+from ci_kit import doomed_runs, pr_baseretry, pr_heal, pr_held, pr_hold, pr_ladder, pr_list, pr_queue, pr_renovate, pr_sched, train_kick
 from ci_kit.merge_train import EJECTED, NEEDS_UPDATE, RIDING, TRAIN_PREFIX
 from ci_kit.ntfy import page  # noqa: F401 -- re-exported: _update_one pages through this name
 
@@ -94,6 +98,9 @@ class Options:
     base_retry_bots: tuple[str, ...] = ()
     base_retry_per_pass: int = pr_baseretry.PER_PASS  # candidates whose main runs are read per pass
     base_retry_error: str = ""  # an unreadable cap: the feature is refused, the pass goes on, the run is red
+    # keep HELD (unarmed) PRs current too, on a schedule/workflow_dispatch pass only (ci_kit/pr_held.py)
+    update_held: bool = False
+    event: str = ""  # the caller's github.event_name
 
 
 @dataclass(frozen=True)
@@ -276,7 +283,11 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
     return q
 
 
-def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing: list[dict] | None = None) -> int:
+def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing: list[dict] | None = None,
+        later: list[Callable[[list[str]], None]] | None = None) -> int:
+    # One pass. The held pass (`update_held`) is LAST: with `later` (main) it is handed back to run
+    # after this pass's outputs and summary are written, so it can never delay or lose them;
+    # without (a direct caller) it runs here, at the end (`_held_last`).
     prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout))
     # Renovate's automerge PRs JOIN the serial queue (ci_kit/pr_renovate.py): armed here, so no
     # session arms them by hand. Only with a queue: without one Renovate merges itself, on EVERY check
@@ -356,7 +367,20 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
         # default branch is read HERE only, so a caller without hold/scarce sees exactly the old plan.
         errors += train_kick.kick(repo, opts.train_workflow, [p for p in prs if p["number"] not in updated],
                                   opts.required, default(), _gh, summary, opts.train_min_batch)
+    _held_last(repo, prs, q, opts, summary, later)  # LAST, contained: it never reaches `errors` (pr_held.py)
     return 1 if errors else 0
+
+
+def _held_last(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, summary: list[str],
+               later: list[Callable[[list[str]], None]] | None) -> None:
+    """Off: nothing. On: the held pass handed to `later` (main runs it after the outputs), or run
+    now when the caller passed none."""
+    if not opts.update_held:
+        return
+    if later is None:
+        _held_boundary(repo, prs, q, opts, summary)
+    else:
+        later.append(lambda tail: _held_boundary(repo, prs, q, opts, tail))
 
 
 def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock: list[int], summary: list[str],
@@ -398,6 +422,58 @@ def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock:
         if line:
             summary.append(line)
     return attempted, updated, conflicts, errors
+
+
+def _held_boundary(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, summary: list[str]) -> None:
+    """The opt-in held-PR pass, run after EVERYTHING the armed pass does. Never raises and never
+    touches the run's exit code: a failure is one `update-held: FAILED` line and one WARNING
+    annotation, counted in the closing line's errors -- not silent, and not red on every tick.
+    Off (the default) = returns at once: not one call, not one line."""
+    if not opts.update_held:
+        return
+    if opts.event not in pr_held.EVENTS:
+        summary.append(f"update-held: not this pass ({opts.event or 'unknown event'}; held PRs are updated "
+                       f"on {' / '.join(pr_held.EVENTS)} only)")
+        return
+    tally = {"updated": 0, "eligible": 0, "skipped": 0, "errors": 0}
+    try:
+        _held_pass(repo, prs, q, opts, summary, tally)
+    except Exception as e:  # noqa: BLE001 -- the boundary: whatever it was, the armed result stands
+        tally["errors"] += 1
+        msg = f"update-held: FAILED {type(e).__name__}: {e}"
+        summary.append(msg)
+        print(f"::warning::{msg}")
+    summary.append(f"update-held: {tally['updated']} held PR(s) updated of {tally['eligible']} eligible, "
+                   f"{tally['skipped']} skipped, {tally['errors']} error(s)")
+
+
+def _held_pass(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, summary: list[str],
+               tally: dict[str, int]) -> None:
+    """Select, admit, update. A held PR is never labelled, paged, put in `relock`, offered to
+    doomed_runs or to the heal ladder: each outcome is ONE summary line (`_held_update`)."""
+    eligible, skipped = pr_held.select(prs, time.time())
+    todo, waiting = pr_held.admit(eligible, prs, q, opts.max_in_flight, opts.required)
+    skipped += waiting
+    tally["eligible"], tally["skipped"] = len(eligible), len(skipped)
+    summary += [f"#{p['number']}: held, not updated: {why}" for p, why in skipped]
+    for p in todo:
+        if reviewing(repo, p["headRefName"], opts.review_workflow):
+            summary.append(f"#{p['number']}: held, not updated: review gate running")
+            continue
+        kind, line = _held_update(repo, p)
+        tally["updated"] += kind == "updated"
+        tally["errors"] += kind == "error"
+        summary.append(line)
+
+
+def _held_update(repo: str, p: dict) -> tuple[str, str]:
+    """One held PR's update: the shared PUT (`_put`), then a line and nothing else, whatever it said."""
+    o, gone = _put(repo, p)
+    if gone:
+        return "gone", f"#{p['number']}: held, not updated: {gone} during the update"
+    if o.kind in ("updated", "current"):
+        return o.kind, _line(p["number"], o)
+    return o.kind, f"#{p['number']}: held, not updated: " + _line(p["number"], o).split(": ", 1)[1]
 
 
 def _lazy_default(repo: str, base: str | None) -> Callable[[], str]:
@@ -484,10 +560,10 @@ def _head_first(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, sum
     return int(h["number"])
 
 
-def _update_one(repo: str, p: dict, opts: Options, tracker: str, relock: list[int]) -> tuple[str, str]:
-    """PUT update-branch for one PR and act on the answer: (outcome kind | 'gone', summary line)."""
+def _put(repo: str, p: dict) -> tuple[Outcome, str]:
+    """PUT update-branch for one PR: (what it answered, the PR's new state if it is no longer open
+    -- '' while open). Shared by the armed path (`_update_one`) and the held one (`_held_update`)."""
     n = p["number"]
-    labelled = any(lb.get("name") == opts.label for lb in p.get("labels") or [])
     r = _gh("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
             "-f", f"expected_head_sha={p['headRefOid']}", check=False)
     o = classify(r.returncode, r.stdout or r.stderr)
@@ -496,11 +572,25 @@ def _update_one(repo: str, p: dict, opts: Options, tracker: str, relock: list[in
         # answered "merge conflict" for a PR that no longer existed as open
         state = _gh("pr", "view", str(n), "-R", repo, "--json", "state", "-q", ".state", check=False)
         if state.returncode == 0 and state.stdout.strip() not in ("", "OPEN"):
-            return "gone", f"#{n}: {state.stdout.strip().lower()} during the update, skipped"
+            return o, state.stdout.strip().lower()
+    return o, ""
+
+
+def _line(n: int, o: Outcome) -> str:
+    return f"#{n}: {o.kind}" + (f" ({o.detail})" if o.detail else "")
+
+
+def _update_one(repo: str, p: dict, opts: Options, tracker: str, relock: list[int]) -> tuple[str, str]:
+    """PUT update-branch for one ARMED PR and act on the answer: (outcome kind | 'gone', summary line)."""
+    n = p["number"]
+    labelled = any(lb.get("name") == opts.label for lb in p.get("labels") or [])
+    o, gone = _put(repo, p)
+    if gone:
+        return "gone", f"#{n}: {gone} during the update, skipped"
     add, do_page, remove = actions_for(o, labelled)
     if do_page and opts.ladder.on and not pr_ladder.blocked(p):
         do_page = False  # the heal ladder takes the conflict; its tier 4 is the page
-    line = f"#{n}: {o.kind}" + (f" ({o.detail})" if o.detail else "")
+    line = _line(n, o)
     if add:
         added, created = add_label(repo, n, opts.label)
         if created:
@@ -626,12 +716,18 @@ def main(argv: list[str] | None = None) -> int:
                    cancel_doomed=os.environ.get("CI_KIT_CANCEL_DOOMED", "true").strip().lower() not in ("false", "0", "no"),
                    ladder=pr_ladder.Config.from_env(),
                    base_retry_cap=cap, base_retry_error=cap_error, base_retry_bots=bots,
-                   base_retry_per_pass=per_pass)
+                   base_retry_per_pass=per_pass,
+                   # env vars, never flags: an older @v1 tool would refuse a flag it does not know
+                   update_held=os.environ.get("CI_KIT_UPDATE_HELD", "").strip().lower() in ("1", "true"),
+                   event=os.environ.get("CI_KIT_EVENT", "").strip())
     summary: list[str] = []
     relock: list[int] = []
     healing: list[dict] = []
+    later: list[Callable[[list[str]], None]] = []
     try:
-        rc = run(args.repo, summary, relock, opts, healing)
+        # `later` only when on: off, the call is exactly main's (a caller that wraps `run` sees no change)
+        rc = run(args.repo, summary, relock, opts, healing, later) if opts.update_held else \
+            run(args.repo, summary, relock, opts, healing)
     except (subprocess.CalledProcessError, ValueError, KeyError) as e:
         # gh's stderr is the only place the cause is named (a token scope, a GraphQL limit);
         # without it the run says only "returned non-zero exit status 1" (2026-10-24)
@@ -649,7 +745,23 @@ def main(argv: list[str] | None = None) -> int:
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
             fh.write("### PR auto-update\n\n" + text + "\n")
+    _run_later(later)
     return rc
+
+
+def _run_later(later: list[Callable[[list[str]], None]]) -> None:
+    """The held pass, AFTER relock= / heal= and the armed summary are written: its lines append to
+    stdout and the step summary. Nothing queued (off, the default) = not one byte more."""
+    tail: list[str] = []
+    for step in later:
+        step(tail)
+    if not tail:
+        return
+    text = "\n".join(f"- {s}" for s in tail)
+    print(text)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
 
 
 if __name__ == "__main__":

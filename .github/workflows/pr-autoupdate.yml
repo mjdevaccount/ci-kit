@@ -100,6 +100,13 @@
 #         EDGE_BOT_PRIVATE_KEY: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}
 #   then set the repo variable PR_TOKEN_SOURCE=app (README "The push token" has the three stages).
 #
+# HELD PRs (`update-held`, default off; ci_kit/pr_held.py): a PR held for review (open, not armed,
+# e.g. `autoland-off`) is also kept current with the base -- but only on a `schedule` or
+# `workflow_dispatch` pass (add `schedule: [{cron: ...}]` to the caller's `on:`), last, only when no
+# armed PR is still on its way to current, and only in the queue's free `max-in-flight` slots. Drafts, forks, conflicts,
+# bots' PRs, young heads, any running/failing check and train branches are never touched; every skip
+# is named in the summary; a held PR is never labelled or paged, and the held pass never turns the run red.
+#
 # UNCONFIGURED IS RED: with no `token` the job fails naming it. GITHUB_TOKEN is NOT a fallback --
 # a push made with it fires no workflow, so every updated PR would wait on checks that never
 # start, which looks exactly like "CI pending".
@@ -238,6 +245,10 @@ on:
         description: comma-separated EXACT author logins (as GraphQL reports them, e.g. Renovate's app is `renovate`; the author must also be a Bot account) whose red + BEHIND PRs get the NO-AUTHOR base retry -- main green on the failing checks and moved since the red run, no red-at-base evidence -- under the same markers and cap ('' = off, the default; needs base-retry-cap > 0)
         type: string
         default: ''
+      update-held:
+        description: also merge the base into HELD PRs (open, not armed, BEHIND, mergeable, no check running or failing, not a bot's) on schedule / workflow_dispatch passes only, last, once no armed PR is on its way to current, in the queue's free slots (ci_kit/pr_held.py)
+        type: boolean
+        default: false
     secrets:
       token:
         description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs --, with train-workflow, which dispatches, and with cancel-doomed-runs), administration read (cancel-doomed-runs reads whether the base is strict), commit statuses RW with queue-hold, on the caller repo. Not required since v1.37.0 (token-source app-required never reads it); empty while the PAT acts is still a red run
@@ -314,6 +325,7 @@ jobs:
       CI_KIT_BASE_RETRY_CAP: ${{ inputs.base-retry-cap }}
       CI_KIT_BASE_RETRY_BOT_AUTHORS: ${{ inputs.base-retry-bot-authors }}
       CI_KIT_BASE_RETRY_MAX_PER_PASS: ${{ inputs.base-retry-max-per-pass }}
+      CI_KIT_UPDATE_HELD: ${{ inputs.update-held }}
       CI_KIT_EVENT: ${{ github.event_name }}
       CI_KIT_BEFORE: ${{ github.event.before }}
       CI_KIT_SHA: ${{ github.sha }}
