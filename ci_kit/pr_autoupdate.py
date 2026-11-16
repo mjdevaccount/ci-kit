@@ -29,7 +29,8 @@ verdict is automerge (ci_kit/pr_renovate.py, v1.32.0): Renovate never arms or me
 repo. A PR the queue picked but skipped for a running review hands its slot to the next eligible PR
 (`Plan.spare`), so one long review does not idle the queue. `update_held` (env CI_KIT_UPDATE_HELD,
 default off) also updates HELD PRs -- open, not armed -- on a scheduled or dispatched pass only,
-LAST, once every armed PR is current, inside the queue's free slots; it never labels, pages or
+LAST (after this pass's outputs and summary are written), once no armed PR is on its way to
+current, inside the queue's free slots; it never labels, pages or
 relocks one, and nothing it raises changes this run's exit code (ci_kit/pr_held.py).
 
 CONFLICT = TRANSITION-ONLY PAGE. The conflict label is the dedup state: a PR that conflicts and
@@ -282,7 +283,11 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
     return q
 
 
-def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing: list[dict] | None = None) -> int:
+def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing: list[dict] | None = None,
+        later: list[Callable[[list[str]], None]] | None = None) -> int:
+    # One pass. The held pass (`update_held`) is LAST: with `later` (main) it is handed back to run
+    # after this pass's outputs and summary are written, so it can never delay or lose them;
+    # without (a direct caller) it runs here, at the end (`_held_last`).
     prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout))
     # Renovate's automerge PRs JOIN the serial queue (ci_kit/pr_renovate.py): armed here, so no
     # session arms them by hand. Only with a queue: without one Renovate merges itself, on EVERY check
@@ -362,8 +367,20 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
         # default branch is read HERE only, so a caller without hold/scarce sees exactly the old plan.
         errors += train_kick.kick(repo, opts.train_workflow, [p for p in prs if p["number"] not in updated],
                                   opts.required, default(), _gh, summary, opts.train_min_batch)
-    _held_boundary(repo, prs, q, opts, summary)  # LAST, contained: it never reaches `errors` (pr_held.py)
+    _held_last(repo, prs, q, opts, summary, later)  # LAST, contained: it never reaches `errors` (pr_held.py)
     return 1 if errors else 0
+
+
+def _held_last(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, summary: list[str],
+               later: list[Callable[[list[str]], None]] | None) -> None:
+    """Off: nothing. On: the held pass handed to `later` (main runs it after the outputs), or run
+    now when the caller passed none."""
+    if not opts.update_held:
+        return
+    if later is None:
+        _held_boundary(repo, prs, q, opts, summary)
+    else:
+        later.append(lambda tail: _held_boundary(repo, prs, q, opts, tail))
 
 
 def _drive(repo: str, q: pr_queue.Plan, head: int | None, opts: Options, relock: list[int], summary: list[str],
@@ -435,7 +452,7 @@ def _held_pass(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, summ
     """Select, admit, update. A held PR is never labelled, paged, put in `relock`, offered to
     doomed_runs or to the heal ladder: each outcome is ONE summary line (`_held_update`)."""
     eligible, skipped = pr_held.select(prs, time.time())
-    todo, waiting = pr_held.admit(eligible, prs, q, opts.max_in_flight)
+    todo, waiting = pr_held.admit(eligible, prs, q, opts.max_in_flight, opts.required)
     skipped += waiting
     tally["eligible"], tally["skipped"] = len(eligible), len(skipped)
     summary += [f"#{p['number']}: held, not updated: {why}" for p, why in skipped]
@@ -706,8 +723,9 @@ def main(argv: list[str] | None = None) -> int:
     summary: list[str] = []
     relock: list[int] = []
     healing: list[dict] = []
+    later: list[Callable[[list[str]], None]] = []
     try:
-        rc = run(args.repo, summary, relock, opts, healing)
+        rc = run(args.repo, summary, relock, opts, healing, later)
     except (subprocess.CalledProcessError, ValueError, KeyError) as e:
         # gh's stderr is the only place the cause is named (a token scope, a GraphQL limit);
         # without it the run says only "returned non-zero exit status 1" (2026-10-24)
@@ -725,7 +743,23 @@ def main(argv: list[str] | None = None) -> int:
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
             fh.write("### PR auto-update\n\n" + text + "\n")
+    _run_later(later)
     return rc
+
+
+def _run_later(later: list[Callable[[list[str]], None]]) -> None:
+    """The held pass, AFTER relock= / heal= and the armed summary are written: its lines append to
+    stdout and the step summary. Nothing queued (off, the default) = not one byte more."""
+    tail: list[str] = []
+    for step in later:
+        step(tail)
+    if not tail:
+        return
+    text = "\n".join(f"- {s}" for s in tail)
+    print(text)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
 
 
 if __name__ == "__main__":

@@ -122,16 +122,28 @@ The update pass merges the base into ARMED PRs only. A PR you hold for review (o
 not enabled, often labelled `autoland-off`) is never updated, so under "require branches to be up
 to date" it falls BEHIND and stays there. `update-held: true` (default `false`: nothing changes
 for a caller that does not set it) keeps those current too, under a cost guard, because every
-update re-runs the PR's CI:
+update re-runs the PR's CI. The input is available from the release after v1.40.0 (this change
+moves `version` to 1.41.0; a `@v1` caller has it once that tag is cut):
 
 - only on a `schedule` or `workflow_dispatch` pass -- never on push, `workflow_run` or arming --
   so add a cron to the caller's `on:` (e.g. `schedule: [{cron: "17 * * * *"}]`);
-- LAST in that pass, after everything the armed pass does, and only when EVERY armed PR is
-  already current with the base (none BEHIND or not yet computed, wherever the queue holds it)
-  and no merge train is open;
+- LAST in that pass, after the armed pass has written its outputs (`relock`, `heal`) and its
+  summary, and only when no armed PR is still on its way to current: none the queue picked to
+  update this pass, none BEHIND waiting only on its own running checks, none whose merge state
+  is not computed yet. An armed PR held for a FAILING check does not block it (nothing updates
+  that PR until its author pushes). No merge train may be open. The skip line names each
+  blocking PR and its reason;
 - only in the free `max-in-flight` slots -- a held PR whose own checks are running holds one too,
   so armed plus held never exceed it; armed PRs never wait on held ones -- lowest PR number
-  first; with no queue, every eligible one.
+  first; with no queue, every eligible one. The skip line names every slot holder.
+
+Worst case, plainly: on each tick (one scheduled or dispatched pass) every eligible held PR can
+be re-merged with the base and its CI re-run, at most once per PR per tick. The update gives it
+a new head, so the same PR is not eligible again until that head is 10 minutes old AND its CI
+has finished, i.e. one update per PR per max(10 min, CI time), rounded up to your next tick. A
+day costs at most (held PRs) x (ticks per day) CI runs, and fewer in practice: a PR already
+current with the base is never touched. With `max-in-flight: 0` (no queue) ALL eligible held
+PRs are updated in the same tick; with a queue, at most the free slots are.
 
 Eligible: same-repo, not a draft, BEHIND, cleanly mergeable, a head commit at least 10 minutes
 old (younger, or of unreadable age: someone may still be pushing), and no check of ANY name

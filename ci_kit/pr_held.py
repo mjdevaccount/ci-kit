@@ -12,13 +12,17 @@ the serial queue exists to stop. So, with the switch on:
   * WHEN: only a `schedule` or `workflow_dispatch` pass (EVENTS) -- never push, workflow_run or
     arming, which fire on every merge and every check completion -- and LAST in that pass, after
     everything the armed pass does (pr_autoupdate.run);
-  * ARMED FIRST: no held PR is touched while ANY armed PR is not yet current with the base
-    (BEHIND or UNKNOWN, wherever the queue put it: to update, spare, or held for its running or
-    failing checks), nor while a merge train is open (`admit`);
+  * ARMED FIRST (`armed_first`): no held PR is touched while an armed PR is still on its way to
+    current -- one the queue PICKED to update this pass, one BEHIND that it holds only because its
+    own checks are running, or one whose merge state is not computed (UNKNOWN) -- nor while a merge
+    train is open (`admit`). An armed PR held for a FAILING check blocks nothing: nothing updates it
+    until its author pushes, so waiting on it would stop the held pass indefinitely. The skip line
+    names each blocking PR and its own reason;
   * THE SAME SLOTS: with a queue (`max_in_flight` > 0) held PRs take only the slots left free by
     the armed PRs in flight AND by held PRs whose own checks are running (`running`: typically
     one this pass updated earlier), lowest PR number first; with none, every eligible held PR.
-    The armed queue never counts held PRs: it never waits on one.
+    The "no free queue slot" line names every slot holder. The armed queue never counts held
+    PRs: it never waits on one.
 
 ELIGIBLE (`select`): same-repo, not a draft, not a merge-train branch or rider, not a bot's
 (`bot`: any Bot account or `[bot]` login, Renovate included -- a bot owns and rebases its own
@@ -26,8 +30,9 @@ branch, and stops doing so once someone else pushes to it), BEHIND with `mergeab
 head commit older than YOUNG_S (younger, or of unreadable age: someone may still be pushing), and
 no check of ANY name running (an update would cancel it) or failing (the author's push re-runs
 it) on its head -- `required-checks` narrows the armed queue, not this. A conflicting PR is
-skipped, never attempted. A PR current with the base is counted, not listed. Every other skip is
-named with its reason.
+skipped, never attempted. A PR current with the base is neither listed nor counted (nothing to
+do), and a PR out of scope (fork, draft, train, bot) never holds a slot, whatever runs on it.
+Every other skip is named with its reason.
 """
 from __future__ import annotations
 
@@ -120,22 +125,54 @@ def select(prs: list[dict], now: float) -> tuple[list[dict], list[tuple[dict, st
 
 
 def running(prs: list[dict]) -> list[dict]:
-    """The held-pass PRs whose own checks are running now: each holds a slot of the held budget."""
+    """The held-pass PRs whose own checks are running now: each holds a slot of the held budget.
+    An out-of-scope PR (`_scope`: fork, draft, train, bot) holds none, whatever runs on it."""
     return [p for p in prs if not p.get("autoMergeRequest") and not _scope(p) and checks(p)[1]]
 
 
-def admit(eligible: list[dict], prs: list[dict], q: pr_queue.Plan,
-          max_in_flight: int) -> tuple[list[dict], list[tuple[dict, str]]]:
-    """(update now, [(pr, why not)]): every armed PR current first, then the free slots."""
+def armed_first(q: pr_queue.Plan, required: tuple[str, ...] = ()) -> list[tuple[dict, str]]:
+    """[(armed PR, why the held pass waits for it)] in landing order. Pure. Only an armed PR still
+    on its way to current counts: UNKNOWN (not computed), PICKED by the queue this pass (`update`),
+    or BEHIND and held only for its own running checks (the queue's own `required` reading). One
+    held for a failing check, queued past the free slots, in flight or conflicting does not."""
+    picked = {p["number"] for p in q.update}
+    seen: dict[int, dict] = {}
+    for p in q.update + q.spare + [p for p, _ in q.held] + q.in_flight:
+        seen.setdefault(p["number"], p)
+    out: list[tuple[dict, str]] = []
+    for p in sorted(seen.values(), key=pr_queue.landing_order):
+        if _state(p) == "UNKNOWN":
+            out.append((p, "merge state not computed yet"))
+        elif _state(p) != "BEHIND":
+            continue
+        elif p["number"] in picked:
+            out.append((p, "picked by the queue this pass"))
+        elif pr_queue.check_state(p.get("statusCheckRollup"), required) == "running":
+            out.append((p, "behind, its checks are running"))
+    return out
+
+
+def _nums(prs: list[dict]) -> str:
+    return ", ".join(f"#{p['number']}" for p in prs) or "none"
+
+
+def admit(eligible: list[dict], prs: list[dict], q: pr_queue.Plan, max_in_flight: int,
+          required: tuple[str, ...] = ()) -> tuple[list[dict], list[tuple[dict, str]]]:
+    """(update now, [(pr, why not)]): the armed PRs on their way to current first, then the free slots."""
     trains = [p for p in prs if str(p.get("headRefName") or "").startswith(TRAIN_PREFIX)
               and not p.get("isCrossRepository")]
     if trains:
         return [], [(p, f"merge train #{trains[-1]['number']} is open") for p in eligible]
-    if any(_state(p) in _STALE for p in q.update + q.spare + [p for p, _ in q.held]):
-        return [], [(p, "an armed PR needed an update this pass (armed PRs go first)") for p in eligible]
+    if first := armed_first(q, required):
+        why = "armed PRs go first: " + ", ".join(f"#{p['number']} ({w})" for p, w in first)
+        return [], [(p, why) for p in eligible]
     if max_in_flight <= 0:
         return list(eligible), []
-    held = len(running(prs))
-    slots = max(0, max_in_flight - len(q.in_flight) - held)
-    why = f"no free queue slot (in flight: {len(q.in_flight)} armed + {held} held of {max_in_flight})"
-    return eligible[:slots], [(p, why) for p in eligible[slots:]]
+    holders = running(prs)
+    slots = max(0, max_in_flight - len(q.in_flight) - len(holders))
+    todo = eligible[:slots]
+    taken = [f"{what} {_nums(group)}" for what, group in (("armed in flight", q.in_flight),
+             ("held with checks running", holders), ("held, picked this pass", todo)) if group]
+    why = (f"no free queue slot ({len(q.in_flight) + len(holders) + len(todo)} of {max_in_flight} taken: "
+           f"{'; '.join(taken) or 'none'})")
+    return todo, [(p, why) for p in eligible[slots:]]

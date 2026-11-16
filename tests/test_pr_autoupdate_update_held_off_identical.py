@@ -62,6 +62,9 @@ SCENARIOS: dict[str, tuple[list[str], list[dict], tuple[int, str]]] = {
     "queue-of-one": (["--max-in-flight", "1"], [_pr(1, True), _pr(2, True), _pr(3, False)], (0, "")),
     "armed-conflict": ([], [_pr(4, True, "DIRTY"), _pr(5, False)], (1, '{"message": "merge conflict"}')),
 }
+# the switch as the workflow really passes it when off: the boolean input `false` arrives as the
+# STRING "false" (never unset). Unset (the scenario left out here) is a caller on an older @v1 tool.
+HELD_ENV = {"no-queue": "false", "queue-of-one": "false"}
 
 
 def record(mod, scenario: str, monkeypatch: pytest.MonkeyPatch, tmp_path, capsys) -> dict:
@@ -89,6 +92,8 @@ def record(mod, scenario: str, monkeypatch: pytest.MonkeyPatch, tmp_path, capsys
               "CI_KIT_TRAIN_WORKFLOW", "CI_KIT_SCARCE_POOLS", "CI_KIT_REQUIRED_CHECKS", "CI_KIT_BASE_RETRY_CAP",
               "CI_KIT_BASE_RETRY_BOT_AUTHORS", "CI_KIT_BASE_RETRY_MAX_PER_PASS", "CI_KIT_CANCEL_DOOMED"):
         monkeypatch.delenv(k, raising=False)
+    if scenario in HELD_ENV:
+        monkeypatch.setenv("CI_KIT_UPDATE_HELD", HELD_ENV[scenario])
     monkeypatch.setenv("CI_KIT_EVENT", "schedule")
     out, step = tmp_path / f"{scenario}.out", tmp_path / f"{scenario}.md"
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))

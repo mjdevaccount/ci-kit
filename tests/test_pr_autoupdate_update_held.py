@@ -95,7 +95,7 @@ def test_an_armed_pr_that_needed_an_update_outranks_every_held_one(monkeypatch: 
         puts, summary = _run(monkeypatch, [_pr(1, armed=True), _pr(2)], update_held=True, event="schedule",
                              max_in_flight=mif)
         assert puts == [1], mif
-        assert "#2: held, not updated: an armed PR needed an update this pass (armed PRs go first)" in summary
+        assert "#2: held, not updated: armed PRs go first: #1 (picked by the queue this pass)" in summary
 
 
 def test_a_current_armed_pr_does_not_block_the_held_pass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -110,10 +110,10 @@ def test_held_prs_use_the_queues_free_slots_never_a_second_budget(monkeypatch: p
     puts, summary = _run(monkeypatch, [_pr(1, armed=True, mergeStateStatus="BLOCKED", statusCheckRollup=running),
                                        _pr(2)], update_held=True, event="schedule", max_in_flight=1)
     assert puts == []                                                   # #1 holds the one slot
-    assert "#2: held, not updated: no free queue slot (in flight: 1 armed + 0 held of 1)" in summary
+    assert "#2: held, not updated: no free queue slot (1 of 1 taken: armed in flight #1)" in summary
     puts, summary = _run(monkeypatch, [_pr(2), _pr(3)], update_held=True, event="schedule", max_in_flight=1)
     assert puts == [2]                                                  # one slot, lowest number first
-    assert "#3: held, not updated: no free queue slot (in flight: 0 armed + 0 held of 1)" in summary
+    assert "#3: held, not updated: no free queue slot (1 of 1 taken: held, picked this pass #2)" in summary
 
 
 def test_draft_fork_conflict_renovate_and_train_prs_are_untouched_and_named(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,7 +140,7 @@ def test_an_open_merge_train_holds_the_held_pass_too() -> None:
 
 def test_main_reads_the_switch_and_the_event_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[upd.Options] = []
-    monkeypatch.setattr(upd, "run", lambda repo, s, r, opts, h=None: seen.append(opts) or 0)
+    monkeypatch.setattr(upd, "run", lambda repo, s, r, opts, *rest: seen.append(opts) or 0)
     monkeypatch.setenv("CI_KIT_UPDATE_HELD", "true")
     monkeypatch.setenv("CI_KIT_EVENT", "schedule")
     upd.main(["--repo", "o/r"])
