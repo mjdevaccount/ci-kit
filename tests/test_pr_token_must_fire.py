@@ -219,6 +219,7 @@ def test_the_composite_pins_the_mint_by_sha_and_never_shells_the_token() -> None
     for s in steps.values():  # no shell ever holds the key or the App token (the PAT only for GET /user)
         env = list((s.get("env") or {}).values())
         assert "${{ inputs.private-key }}" not in env and not any("mint.outputs.token" in v for v in env)
+        assert "${{ inputs.deprecated-private-key }}" not in env
 
 
 # The expression subset the composite's `with:`/`outputs:` use, evaluated (no GitHub expression
@@ -291,11 +292,12 @@ def test_an_unknown_scope_is_red(monkeypatch: pytest.MonkeyPatch, tmp_path: path
 # THE GENERIC NAMES (v1.40.0) and the deprecated aliases they replace, each still accepted
 NEW_KEY, OLD_KEY = "app-private-key", "EDGE_BOT_PRIVATE_KEY"
 NEW_ID, OLD_ID = "app-client-id", "EDGE_BOT_APP_ID"
+# each spelling passed AS IS: the composite alone resolves them (tests/test_generic_names_must_fire.py)
 TOKEN_WITH = {
-    "client-id": "${{ inputs.app-client-id || vars.EDGE_BOT_APP_ID }}",
-    "private-key": "${{ secrets.app-private-key || secrets.EDGE_BOT_PRIVATE_KEY }}",
-    "deprecated": "${{ !inputs.app-client-id && vars.EDGE_BOT_APP_ID && 'EDGE_BOT_APP_ID>app-client-id' || '' }} "
-                  "${{ !secrets.app-private-key && secrets.EDGE_BOT_PRIVATE_KEY && 'EDGE_BOT_PRIVATE_KEY>app-private-key' || '' }}",
+    "client-id": "${{ inputs.app-client-id }}",
+    "private-key": "${{ secrets.app-private-key }}",
+    "deprecated-client-id": "${{ vars.EDGE_BOT_APP_ID }}",
+    "deprecated-private-key": "${{ secrets.EDGE_BOT_PRIVATE_KEY }}",
 }
 
 TOKEN_JOBS = {"pr-autoupdate.yml": ["update"], "merge-train.yml": ["train"], "ci-green.yml": ["advance"],

@@ -41,7 +41,9 @@ DEPRECATED NAMES (v1.40.0). The App's id and key were first read under consumer-
 `app-private-key` secret, and this composite's `client-id` (create-github-app-token deprecated its own
 `app-id` the same way). The old spellings still resolve to the SAME value, and each one used is a
 `::notice` naming its replacement (`deprecations`): never a different decision, never a different
-record line. Removing them is a major version.
+record line. Removing them is a major version. The reusables hand the composite BOTH spellings
+(`deprecated-client-id` / `deprecated-private-key`) and the composite alone resolves them, so the
+precedence (generic first) and the notice live in one place, not in every caller.
 """
 from __future__ import annotations
 
@@ -76,6 +78,13 @@ LOGIN_ENV = "CI_KIT_TOKEN_LOGIN"
 TRUSTED_ENV = "CI_KIT_TRUSTED_LOGINS"
 PREFIX = "pr-token:"
 DEPRECATED_TITLE = "ci-kit deprecated name"
+#: the composite's env flag -> the deprecated spelling it stood in for, and its replacement. Each flag
+#: is true exactly when the mint's `||` chain fell through to that spelling (action.yml, decide step).
+DEPRECATED = {
+    "APP_ID_ALIAS": ("app-id", "client-id"),                            # the composite's own input
+    "DEPRECATED_CLIENT_ID": ("EDGE_BOT_APP_ID", "app-client-id"),       # a reusable's repo variable
+    "DEPRECATED_PRIVATE_KEY": ("EDGE_BOT_PRIVATE_KEY", "app-private-key"),  # a reusable's secret
+}
 
 
 @dataclass(frozen=True)
@@ -153,18 +162,13 @@ def trusted_logins(acting: str, env: dict[str, str] | None = None) -> frozenset[
     return frozenset(trusted_set(acting, [x.strip() for x in raw.split(",") if x.strip()]))
 
 
-def deprecations(raw: str, app_id_alias: bool = False) -> list[str]:
-    """One `::notice` line per deprecated spelling used. `raw` = whitespace-separated `old>new` pairs
-    the caller resolved a value through; `app_id_alias` = this composite's own `app-id` stood in for
-    `client-id`. Pure. A malformed pair is named as it is, never dropped: a notice that cannot say what
-    to rename is still a notice that something was."""
-    pairs = [p for p in (raw or "").split() if p]
-    if app_id_alias:
-        pairs.append("app-id>client-id")
+def deprecations(used: list[str]) -> list[str]:
+    """One `::notice` line per deprecated spelling that supplied a value (`used` = keys of
+    DEPRECATED, in order; an unknown key is named as it is, never dropped). Pure."""
     out = []
-    for p in dict.fromkeys(pairs):
-        old, sep, new = p.partition(">")
-        what = f"`{old}` is deprecated: use `{new}`" if sep and old and new else f"a deprecated name was used ({p})"
+    for flag in dict.fromkeys(used):
+        old, new = DEPRECATED.get(flag, (flag, ""))
+        what = f"`{old}` is deprecated: use `{new}`" if new else f"a deprecated name was used ({old})"
         out.append(f"::notice title={DEPRECATED_TITLE}::{what} -- identical behaviour today; the old name is "
                    "removed in the next major version")
     return out
@@ -214,7 +218,7 @@ def _pat_login() -> str:
 
 
 def cmd_decide() -> int:
-    for n in deprecations(os.environ.get("CI_KIT_DEPRECATED", ""), _flag("APP_ID_ALIAS")):
+    for n in deprecations([f for f in DEPRECATED if _flag(f)]):
         print(n)
     mode = os.environ.get("CI_KIT_TOKEN_MODE", "")
     d = decide(mode, _flag("HAS_APP_ID"), _flag("HAS_KEY"), _flag("HAS_PAT"))

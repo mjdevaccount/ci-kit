@@ -177,6 +177,26 @@ Read it from outside with `gh run view <run> --log | grep 'pr-token: '` or the j
 annotations (`gh api repos/<owner>/<repo>/check-runs/<job id>/annotations`); the step summary is
 for humans (no REST endpoint serves it).
 
+### Generic names (v1.40.0)
+
+The token reusables (pr-autoupdate, merge-train, ci-green, pr-heal, relock) take the App as the
+`app-client-id` INPUT (its client id, or app id) and the `app-private-key` SECRET -- the caller
+maps whatever it calls them. The older spellings above, the repository variable `EDGE_BOT_APP_ID`
+and the secret `EDGE_BOT_PRIVATE_KEY`, are DEPRECATED aliases: a caller that sets only them gets the
+same values and the same decision, plus one `::notice` per alias used; when both are set the
+generic name wins. They are removed in v2. Each reusable hands both spellings to the pr-token
+composite, which alone resolves them (`deprecated-client-id` / `deprecated-private-key`).
+
+Pools are inputs too, each a JSON label list read with `fromJSON`: `secure-runner` (the jobs that
+hold a write token; pr-autoupdate, merge-train, ci-green, pr-heal, relock, review-gate) and
+`sealed-runner` (the job that holds the model credential AND runs PR code; pr-heal, review-gate;
+its LAST label names the pool to the scheduler). Precedence: the input; else the caller repo's
+`CI_SECURE_RUNNER` / `CI_SEALED_RUNNER` variable, an ON/OFF switch for the kit's default labels
+(`["self-hosted","home-secure"]` / `["self-hosted","home-sealed"]` -- a variable never carries
+labels, so a typo there cannot move a token job onto another pool); else `ubuntu-latest`. The
+secure pool runs in the caller's `ci-secure` environment wherever the workflow used one. A caller
+that sets no input runs on exactly the pools it ran on before.
+
 ### Relocking a dependency bot's PR (v1.38.0)
 
 A bot's regex manager bumps a pin in the manifest and leaves the lockfile stale, so the PR is red

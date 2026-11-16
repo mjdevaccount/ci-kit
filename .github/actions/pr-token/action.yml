@@ -14,7 +14,10 @@
 #       client-id: ${{ inputs.app-client-id }}                       # the App's client id (or app id)
 #       private-key: ${{ secrets.app-private-key }}
 #       pat: ${{ secrets.token }}
-#       deprecated: ''      # `old>new` pairs the CALLER resolved through a deprecated name (a ::notice each)
+#       # a ci-kit reusable ALSO passes its deprecated spellings (v1.40.0): used only when the generic
+#       # one is empty, each use a ::notice -- the alias logic lives HERE, never in the callers
+#       deprecated-client-id: ${{ vars.EDGE_BOT_APP_ID }}
+#       deprecated-private-key: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}
 #   - env: { GH_TOKEN: "${{ steps.token.outputs.token }}", CI_KIT_TOKEN_LOGIN: "${{ steps.token.outputs.login }}",
 #            CI_KIT_TRUSTED_LOGINS: "${{ steps.token.outputs.trusted }}" }
 #
@@ -50,10 +53,16 @@ inputs:
     description: the GitHub App's private key
     required: false
     default: ""
-  deprecated:
+  deprecated-client-id:
     description: >-
-      whitespace-separated `old>new` pairs naming each deprecated spelling the CALLER resolved a value
-      through (e.g. a reusable's secret alias); each is one ::notice naming the replacement. '' = none
+      a ci-kit reusable's DEPRECATED `EDGE_BOT_APP_ID` variable: the client id when client-id and app-id
+      are both empty (identical behaviour, a ::notice naming `app-client-id`; removed in v2)
+    required: false
+    default: ""
+  deprecated-private-key:
+    description: >-
+      a ci-kit reusable's DEPRECATED `EDGE_BOT_PRIVATE_KEY` secret: the key when private-key is empty
+      (identical behaviour, a ::notice naming `app-private-key`; removed in v2)
     required: false
     default: ""
   pat:
@@ -84,11 +93,13 @@ runs:
         PYTHONSAFEPATH: "1"
         CI_KIT_TOKEN_MODE: ${{ inputs.mode }}
         CI_KIT_TOKEN_SCOPE: ${{ inputs.scope }}
-        HAS_APP_ID: ${{ inputs.client-id != '' || inputs.app-id != '' }}
-        # the deprecated spellings (v1.40.0): notices only, never a different decision or record
-        CI_KIT_DEPRECATED: ${{ inputs.deprecated }}
+        HAS_APP_ID: ${{ (inputs.client-id || inputs.app-id || inputs.deprecated-client-id) != '' }}
+        HAS_KEY: ${{ (inputs.private-key || inputs.deprecated-private-key) != '' }}
+        # the deprecated spellings (v1.40.0) that supplied a value: notices only, never a different
+        # decision or record. Each is true exactly when the mint's `||` chain below falls through to it.
         APP_ID_ALIAS: ${{ inputs.client-id == '' && inputs.app-id != '' }}
-        HAS_KEY: ${{ inputs.private-key != '' }}
+        DEPRECATED_CLIENT_ID: ${{ inputs.client-id == '' && inputs.app-id == '' && inputs.deprecated-client-id != '' }}
+        DEPRECATED_PRIVATE_KEY: ${{ inputs.private-key == '' && inputs.deprecated-private-key != '' }}
         HAS_PAT: ${{ inputs.pat != '' }}
       # A decide that could not RUN (no python3, an import error) wrote no outputs and no record:
       # write the record's crash shape here, so the failure is still one greppable line.
@@ -112,8 +123,8 @@ runs:
       continue-on-error: ${{ steps.decide.outputs.source == 'pat' }}
       uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
       with:
-        client-id: ${{ inputs.client-id || inputs.app-id }}
-        private-key: ${{ inputs.private-key }}
+        client-id: ${{ inputs.client-id || inputs.app-id || inputs.deprecated-client-id }}
+        private-key: ${{ inputs.private-key || inputs.deprecated-private-key }}
         owner: ${{ github.repository_owner }}
         repositories: ${{ github.repository }}
         # The job's set ONLY when the App acts; the pat-mode canary asks for metadata:read and nothing
