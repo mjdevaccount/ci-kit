@@ -725,7 +725,9 @@ def main(argv: list[str] | None = None) -> int:
     healing: list[dict] = []
     later: list[Callable[[list[str]], None]] = []
     try:
-        rc = run(args.repo, summary, relock, opts, healing, later)
+        # `later` only when on: off, the call is exactly main's (a caller that wraps `run` sees no change)
+        rc = run(args.repo, summary, relock, opts, healing, later) if opts.update_held else \
+            run(args.repo, summary, relock, opts, healing)
     except (subprocess.CalledProcessError, ValueError, KeyError) as e:
         # gh's stderr is the only place the cause is named (a token scope, a GraphQL limit);
         # without it the run says only "returned non-zero exit status 1" (2026-10-24)
