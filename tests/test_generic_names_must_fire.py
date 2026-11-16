@@ -1,4 +1,4 @@
-"""The generic names (v1.41.0) resolve to EXACTLY what the deprecated ones did -- must fire, both ways.
+"""The generic names (v1.42.0) resolve to EXACTLY what the deprecated ones did -- must fire, both ways.
 
 `v1` floats: every consumer picks this up unasked. A caller that passes only the OLD names
 (`EDGE_BOT_APP_ID` variable, `EDGE_BOT_PRIVATE_KEY` secret, the CI_SECURE_RUNNER / CI_SEALED_RUNNER

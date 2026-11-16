@@ -2,7 +2,7 @@
 
 ci-kit's token jobs (pr-autoupdate, merge-train, ci-green, pr-heal's claim/push/report) pushed,
 commented and merged with the caller's fine-grained PAT. A GitHub App (the reusables' `app-client-id`
-input and `app-private-key` secret, v1.41.0) replaces it. ONE composite action
+input and `app-private-key` secret, v1.42.0) replaces it. ONE composite action
 (`.github/actions/pr-token/action.yml`) mints the App token with `actions/create-github-app-token`
 (no JWT code here), falls back to the PAT, and records which one each run used. This module is its
 decision and its record, so both are unit-tested; the composite only wires it.
@@ -38,7 +38,7 @@ itself when this module cannot run at all.
 
 DEPRECATED NAMES. The App's id and key were first read under consumer-specific names (a repository
 variable and a secret); the generic names are the reusables' `app-client-id` input and
-`app-private-key` secret (v1.41.0), and this composite's `client-id` (v1.40.0; create-github-app-token
+`app-private-key` secret (v1.42.0), and this composite's `client-id` (v1.40.0; create-github-app-token
 deprecated its own `app-id` the same way, and `app-id` stays an alias here). The old spellings still
 resolve to the SAME value, and each one used is a `::notice` naming its replacement (`deprecations`):
 never a different decision, never a different record line. Removing them is a major version. The

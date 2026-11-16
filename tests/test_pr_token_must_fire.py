@@ -329,7 +329,7 @@ def test_an_unknown_scope_is_red(monkeypatch: pytest.MonkeyPatch, tmp_path: path
     assert rc == 1 and outs["source"] == "none" and "reason=scope-invalid" in summary
 
 
-# THE GENERIC NAMES (v1.41.0) and the deprecated aliases they replace, each still accepted
+# THE GENERIC NAMES (v1.42.0) and the deprecated aliases they replace, each still accepted
 NEW_KEY, OLD_KEY = "app-private-key", "EDGE_BOT_PRIVATE_KEY"
 NEW_ID, OLD_ID = "app-client-id", "EDGE_BOT_APP_ID"
 # each spelling passed AS IS: the composite alone resolves them (tests/test_generic_names_must_fire.py)
@@ -348,7 +348,7 @@ def token_faults(wf: dict, jobs: list[str]) -> list[str]:
     """Why a reusable's token jobs do not take their token from the one pr-token step ([] = clean)."""
     out = []
     call = (wf.get("on") or wf.get(True))["workflow_call"]
-    for secret in (NEW_KEY, OLD_KEY):   # the generic name AND its deprecated alias (v1.41.0)
+    for secret in (NEW_KEY, OLD_KEY):   # the generic name AND its deprecated alias (v1.42.0)
         if (call["secrets"].get(secret) or {}).get("required") is not False:
             out.append(f"{secret} is not an optional workflow_call secret")
     for name in ("token-source", "app-client-id"):

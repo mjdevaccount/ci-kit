@@ -1,4 +1,4 @@
-"""The ONE spelling of the secure / sealed pool selection every reusable uses (v1.41.0).
+"""The ONE spelling of the secure / sealed pool selection every reusable uses (v1.42.0).
 
 Precedence: the caller's `secure-runner` / `sealed-runner` input (a JSON label list, from the
 caller's reviewed workflow file); else the caller repo's CI_SECURE_RUNNER / CI_SEALED_RUNNER

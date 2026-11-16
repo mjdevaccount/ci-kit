@@ -14,7 +14,7 @@
 #       client-id: ${{ inputs.app-client-id }}                       # the App's client id (or app id)
 #       private-key: ${{ secrets.app-private-key }}
 #       pat: ${{ secrets.token }}
-#       # a ci-kit reusable ALSO passes its deprecated spellings (v1.41.0): used only when the generic
+#       # a ci-kit reusable ALSO passes its deprecated spellings (v1.42.0): used only when the generic
 #       # one is empty, each use a ::notice -- the alias logic lives HERE, never in the callers
 #       deprecated-client-id: ${{ vars.EDGE_BOT_APP_ID }}
 #       deprecated-private-key: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}

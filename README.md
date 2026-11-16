@@ -116,6 +116,46 @@ jobs:
 
 The secret **names are yours**: the workflow declares `token` and `ntfy-url` and you map onto them.
 
+### Keeping held PRs current (`update-held`)
+
+The update pass merges the base into ARMED PRs only. A PR you hold for review (open, auto-merge
+not enabled, often labelled `autoland-off`) is never updated, so under "require branches to be up
+to date" it falls BEHIND and stays there. `update-held: true` (default `false`: nothing changes
+for a caller that does not set it) keeps those current too, under a cost guard, because every
+update re-runs the PR's CI. The input is available from the release after v1.40.0 (this change
+moves `version` to 1.41.0; a `@v1` caller has it once that tag is cut):
+
+- only on a `schedule` or `workflow_dispatch` pass -- never on push, `workflow_run` or arming --
+  so add a cron to the caller's `on:` (e.g. `schedule: [{cron: "17 * * * *"}]`);
+- LAST in that pass, after the armed pass has written its outputs (`relock`, `heal`) and its
+  summary, and only when no armed PR is still on its way to current: none the queue picked to
+  update this pass, none BEHIND waiting only on its own running checks, none whose merge state
+  is not computed yet. An armed PR held for a FAILING check does not block it (nothing updates
+  that PR until its author pushes). No merge train may be open. The skip line names each
+  blocking PR and its reason;
+- only in the free `max-in-flight` slots -- a held PR whose own checks are running holds one too,
+  so armed plus held never exceed it; armed PRs never wait on held ones -- lowest PR number
+  first; with no queue, every eligible one. The skip line names every slot holder.
+
+Worst case, plainly: on each tick (one scheduled or dispatched pass) every eligible held PR can
+be re-merged with the base and its CI re-run, at most once per PR per tick. The update gives it
+a new head, so the same PR is not eligible again until that head is 10 minutes old AND its CI
+has finished, i.e. one update per PR per max(10 min, CI time), rounded up to your next tick. A
+day costs at most (held PRs) x (ticks per day) CI runs, and fewer in practice: a PR already
+current with the base is never touched. With `max-in-flight: 0` (no queue) ALL eligible held
+PRs are updated in the same tick; with a queue, at most the free slots are.
+
+Eligible: same-repo, not a draft, BEHIND, cleanly mergeable, a head commit at least 10 minutes
+old (younger, or of unreadable age: someone may still be pushing), and no check of ANY name
+running or failing on its head (`required-checks` narrows the armed queue, not this). Never
+touched: forks, drafts, conflicting PRs, any bot's PR (a Bot account or a `[bot]` login,
+Renovate included: a bot rebases its own branch) and merge-train branches. A held PR is never
+labelled, paged or relocked -- a conflict or an error on its update is one summary line,
+`#N: held, not updated: <why>`. `autoland-off` opts a PR out of auto-LANDING only; it is still
+kept current. A failure of the held pass never turns the run red: it is one
+`update-held: FAILED` line and a warning annotation. The summary names every held PR it skipped
+and why, and ends `update-held: N held PR(s) updated of M eligible, K skipped, E error(s)`.
+
 ### The push token: GitHub App or PAT (v1.37.0)
 
 A push made with `GITHUB_TOKEN` fires no workflow, so the token jobs (pr-autoupdate, merge-train,
@@ -188,9 +228,9 @@ record's `pr-token` title). Two more optional inputs, `deprecated-client-id` and
 each use a notice; generic first. The aliases are removed in v2.
 `ci_kit.pr_admit --pool` also accepts a runs-on JSON label list, read as its LAST label, or a JSON
 string; a value that names no label (malformed JSON, `[]`, a non-string item, quoted text) is refused
-with an `::error` and exit 2, and the review then runs (v1.41.0).
+with an `::error` and exit 2, and the review then runs (v1.42.0).
 
-### Generic names in the reusables (v1.41.0)
+### Generic names in the reusables (v1.42.0)
 
 The token reusables (pr-autoupdate, merge-train, ci-green, pr-heal, relock) take the App as the
 `app-client-id` INPUT (its client id, or app id) and the `app-private-key` SECRET -- the caller

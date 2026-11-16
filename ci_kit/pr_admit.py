@@ -15,7 +15,7 @@ while the grant held carries pr_sched's OFF description once it is lost: that pa
 Token: the job's GITHUB_TOKEN (pull-requests: write for the label, actions: read for the jobs).
 
 POOL is a label, or the sealed job's runs-on as a JSON label list (the reusable's `sealed-runner`
-input, v1.41.0): the scheduler's pool is that list's LAST label (`pool_label`), so the workflow
+input, v1.42.0): the scheduler's pool is that list's LAST label (`pool_label`), so the workflow
 hands over what its runs-on reads and never re-derives it in shell. A bare label is read exactly as
 before; a JSON string (`"label"`) is its label. A value that names no label -- a list that does not
 parse, an empty list, a non-string item, an object, a label with quotes/brackets/whitespace -- is

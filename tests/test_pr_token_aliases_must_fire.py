@@ -4,7 +4,7 @@
 v1.39.0 way (`app-id` + `private-key`). That call must get the SAME App id and key, the SAME
 decision and the SAME `pr-token:` record line as the v1.39.0 composite gave it; the only addition
 is a `::notice` under a title that is NOT the record's. The reusables' switch to the generic names
-(v1.41.0) is tested in tests/test_generic_names_must_fire.py, over these helpers.
+(v1.42.0) is tested in tests/test_generic_names_must_fire.py, over these helpers.
 """
 from __future__ import annotations
 
