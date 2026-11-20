@@ -286,20 +286,28 @@
     // ci-pin-drift stayed red in every consumer). We publish these, so there is no yanked or
     // hijacked upstream to wait out, and a consumer's deploy fence covers the deploy risk the
     // weekend window exists for.
-    // ONCE A DAY, NOT AT ANY TIME (v1.35.0, 2026-11-14): every day 04:00-07:59 ET (KIT_WINDOW; the
+    // ONCE A DAY, NOT AT ANY TIME (v1.35.0, 2026-11-14): every day 00:00-11:59 ET (KIT_WINDOW; the
     // same value in every first-party rule below, tests/test_renovate_first_party_rules.py pins it). A
     // burst of kit releases on one day made one PR per release -- a full CI run in every consumer
     // and, in a queue repo, a place in the one-at-a-time lane. A daily window folds a day's releases
     // into ONE PR per kit per repo: in a queue repo the open PR is never re-pushed (`never`, the
     // last rule) so a newer release waits for the next window; elsewhere `updateNotScheduled`
-    // (default true) moves the open PR to the newest release in place. Early in the day on
-    // purpose: hourly ("hot") repos get four runs, and the PR lands before the working day.
-    // ci-pin-drift's grace is 48h for this (ci_kit/pin_drift.py).
+    // (default true) moves the open PR to the newest release in place.
+    // TWELVE HOURS, NOT FOUR (2026-11-20). The window is a filter on runs Mend starts, and Mend
+    // runs a repo it does not consider hot only a few times a day at times of its choosing -- the
+    // weekend window's lesson (top of file), relearned. 04:00-07:59 ET held trade-infra's ci-kit
+    // v1.42.0 bump "Awaiting Schedule" for four days: its Mend runs (Dependency Dashboard edits,
+    // ET) fell at 02:29/08:05 (11-16), 02:24/13:42 (11-17), 00:51/08:08/16:08 (11-18) and
+    // 00:27/09:06 (11-19) -- two of them 5 and 8 minutes past the window -- and the PR opened only
+    // on 11-20 at 05:48. ci-pin-drift (48h grace) went red 11-18, 11-19 and 11-20. Every one of
+    // those days had a run inside 00:00-11:59. Still before the afternoon: a consumer's deploy
+    // fence covers the RTH half of the morning, as it covers the weekend window's deploys.
+    // ci-pin-drift's grace is 48h for this (ci_kit/pin_drift.py): two windows to land in.
     {
       description: "first-party kits",
       matchPackageNames: ["/^mjdevaccount\\//i"],
       groupName: null,
-      schedule: ["* 4-7 * * *"],
+      schedule: ["* 0-11 * * *"],
       minimumReleaseAge: null,
     },
     // By DATASOURCE, not manager (2026-11-14): which manager parses a pyproject is Renovate's call,
@@ -326,7 +334,7 @@
       description: "first-party packages on a registry (e.g. PyPI)",
       matchSourceUrls: ["https://github.com/mjdevaccount/**"],
       groupName: null,
-      schedule: ["* 4-7 * * *"],
+      schedule: ["* 0-11 * * *"],
       minimumReleaseAge: null,
     },
     // ONE PR PER KIT PER RELEASE (2026-11-12). With groupName null, Renovate keys a branch on
@@ -339,10 +347,10 @@
     // https://github.com/mjdevaccount/<kit>, which is how the rule above already caught #2995.
     // Not bare depNames: npm has unrelated packages under the same bare names. Same holds as the two rules above
     // (any time, no age wait). AFTER them on purpose: a later rule wins.
-    { description: "first-party kit ci-kit, one PR a day", matchSourceUrls: ["https://github.com/mjdevaccount/ci-kit", "https://github.com/mjdevaccount/ci-kit.git"], groupName: "ci-kit", schedule: ["* 4-7 * * *"], minimumReleaseAge: null },
-    { description: "first-party kit edge-platform, one PR a day", matchSourceUrls: ["https://github.com/mjdevaccount/edge-platform", "https://github.com/mjdevaccount/edge-platform.git"], groupName: "edge-platform", schedule: ["* 4-7 * * *"], minimumReleaseAge: null },
-    { description: "first-party kit llm-ports, one PR a day", matchSourceUrls: ["https://github.com/mjdevaccount/llm-ports", "https://github.com/mjdevaccount/llm-ports.git"], groupName: "llm-ports", schedule: ["* 4-7 * * *"], minimumReleaseAge: null },
-    { description: "first-party kit market-ports, one PR a day", matchSourceUrls: ["https://github.com/mjdevaccount/market-ports", "https://github.com/mjdevaccount/market-ports.git"], groupName: "market-ports", schedule: ["* 4-7 * * *"], minimumReleaseAge: null },
+    { description: "first-party kit ci-kit, one PR a day", matchSourceUrls: ["https://github.com/mjdevaccount/ci-kit", "https://github.com/mjdevaccount/ci-kit.git"], groupName: "ci-kit", schedule: ["* 0-11 * * *"], minimumReleaseAge: null },
+    { description: "first-party kit edge-platform, one PR a day", matchSourceUrls: ["https://github.com/mjdevaccount/edge-platform", "https://github.com/mjdevaccount/edge-platform.git"], groupName: "edge-platform", schedule: ["* 0-11 * * *"], minimumReleaseAge: null },
+    { description: "first-party kit llm-ports, one PR a day", matchSourceUrls: ["https://github.com/mjdevaccount/llm-ports", "https://github.com/mjdevaccount/llm-ports.git"], groupName: "llm-ports", schedule: ["* 0-11 * * *"], minimumReleaseAge: null },
+    { description: "first-party kit market-ports, one PR a day", matchSourceUrls: ["https://github.com/mjdevaccount/market-ports", "https://github.com/mjdevaccount/market-ports.git"], groupName: "market-ports", schedule: ["* 0-11 * * *"], minimumReleaseAge: null },
 
     // ---- container images in compose files DEPLOY ON MERGE ---------------------------------
     // A consumer's compose may be shipped by a deploy reconciler within the hour, unattended.
