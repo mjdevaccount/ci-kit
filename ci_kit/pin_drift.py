@@ -35,9 +35,10 @@ version hide a stale pin. A release date it cannot read, or one in the FUTURE (c
 NO grace: unknown is not "young". A pin naming no release is never graced. The throwaway repo
 holds no credential, so a PRIVATE kit's dates are unreadable and its lag fails closed (strict).
 `--grace-hours 0` is the old strict check. 48h since v1.35.0: Renovate now opens a kit bump only in
-its DAILY window (renovate/default.json5 "first-party kits", 04:00-07:59 ET), so a release just after
-the window waits ~20h for it and then the queue's landing time; 24h would go red on every such
-release that the next morning lands.
+its DAILY window (renovate/default.json5 "first-party kits", 00:00-11:59 ET since 2026-11-20), so a
+release just after the window waits ~12h for it and then the queue's landing time; 24h would go red
+on every such release that the next morning lands. The window is a filter on runs Mend starts, so a
+repo Mend runs rarely can miss one window: 48h gives it two.
 
 EXIT. 0 every pin is the newest tag, or lags only within the grace - 1 a pin is stale, or names
 no release tag (each printed with file:line) - 2 could not look: a file missing, NO pin found in

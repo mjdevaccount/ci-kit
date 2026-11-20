@@ -9,6 +9,8 @@ source URL must come AFTER every rule that groups, schedules or age-gates a regi
 
 v1.35.0: "never held" is now "held at most a day": every first-party rule shares ONE daily window
 (KIT_WINDOW), so a day's releases fold into one PR per kit per repo; pin-drift's grace is 48h.
+2026-11-20: the window is 00:00-11:59 ET, not 04:00-07:59 -- a repo Mend runs only a few times a day
+missed the four-hour window four days running (MEASURED_RUNS_ET below).
 Lock-file maintenance is ONE weekly window and never touched outside it; security is any time.
 """
 from __future__ import annotations
@@ -19,7 +21,7 @@ import json5
 
 PRESET = pathlib.Path(__file__).resolve().parent.parent / "renovate" / "default.json5"
 HOLDS = ("groupName", "schedule", "minimumReleaseAge")
-KIT_WINDOW = ["* 4-7 * * *"]   # every day, 04:00-07:59 America/New_York
+KIT_WINDOW = ["* 0-11 * * *"]   # every day, 00:00-11:59 America/New_York
 REGISTRY_MANAGERS = {"pep621", "pip_requirements", "pip-compile", "npm", "nuget"}
 
 
@@ -104,8 +106,11 @@ def window_faults(cfg: dict) -> list[str]:
         out.append("a first-party rule is off the one daily window")
     minute, hours, dom, month, dow = KIT_WINDOW[0].split()
     lo, hi = (int(h) for h in hours.split("-"))
-    if (minute, dom, month, dow) != ("*", "*", "*", "*") or not 1 <= hi - lo + 1 <= 6 or hi >= 9:
-        out.append("the kit window is not one early window every day")
+    # one window every day, at most half of it, closed by noon ET: wide enough that a repo Mend
+    # runs a few times a day still lands a run in it (MEASURED_RUNS_ET), narrow enough to fold a
+    # day's releases into one PR -- "at any time" is the v1.35.0 burst this window exists to stop.
+    if (minute, dom, month, dow) != ("*", "*", "*", "*") or not 1 <= hi - lo + 1 <= 12 or hi >= 12:
+        out.append("the kit window is not one morning window every day")
     lock = cfg["lockFileMaintenance"]
     if lock.get("schedule") != ["* 0-5 * * 6"]:
         out.append("lock maintenance is not one weekly window")
@@ -148,3 +153,29 @@ def test_each_window_fault_fires_must_fire() -> None:
 def test_the_queue_repos_still_never_rebase_a_kit_branch() -> None:
     rules = [r for r in _cfg()["packageRules"] if r.get("matchRepositories") and r.get("rebaseWhen") == "never"]
     assert len(rules) == 1 and rules[0]["matchSourceUrls"] == ["https://github.com/mjdevaccount/**"]
+
+
+# ── 2026-11-20: the window must contain a real cold repo's runs ──────────────────────────────────
+# trade-infra's Mend runs, read from its Dependency Dashboard edit history (each edit is a run that
+# changed the body, so these are a FLOOR on its runs), as ET hours per ET day. Under 04:00-07:59 not
+# one of these days had a run in the window: ci-kit v1.42.0 sat "Awaiting Schedule" 11-16..11-19
+# and ci-pin-drift was red 11-18, 11-19 and 11-20. A window that misses these misses that repo.
+MEASURED_RUNS_ET = {
+    "2026-11-16": (2, 8, 20),
+    "2026-11-17": (2, 13, 22),
+    "2026-11-18": (0, 8, 16),
+    "2026-11-19": (0, 9),
+}
+
+
+def days_missed(window: list[str], runs: dict[str, tuple[int, ...]]) -> list[str]:
+    lo, hi = (int(h) for h in window[0].split()[1].split("-"))
+    return [day for day, hours in runs.items() if not any(lo <= h <= hi for h in hours)]
+
+
+def test_the_kit_window_holds_a_cold_repos_measured_runs_must_not_fire() -> None:
+    assert days_missed(KIT_WINDOW, MEASURED_RUNS_ET) == []
+
+
+def test_the_old_four_hour_window_missed_them_must_fire() -> None:
+    assert days_missed(["* 4-7 * * *"], MEASURED_RUNS_ET) == list(MEASURED_RUNS_ET)

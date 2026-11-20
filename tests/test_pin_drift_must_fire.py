@@ -214,8 +214,9 @@ def test_lag_past_the_grace_still_fires(new_repo, tmp_path: Path) -> None:
 
 
 def test_a_release_waiting_for_the_daily_kit_window_is_pending_must_not_fire(new_repo, tmp_path: Path) -> None:
-    # v1.35.0: Renovate opens a kit bump only 04:00-07:59 ET; a release at 08:00 waits ~20h for the
-    # window plus the queue's landing. 30h was red under the old 24h default; under 48h it is pending.
+    # v1.35.0: Renovate opens a kit bump only in its daily window (00:00-11:59 ET since 2026-11-20);
+    # a release after it waits for the next one plus the queue's landing. 30h was red under the old
+    # 24h default; under 48h it is pending.
     rem = _remote(new_repo, "v1.1.0")
     _release(rem, "v1.2.0", age_h=30)
     lock = _consumer(tmp_path, LOCK)
