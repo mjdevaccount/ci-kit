@@ -11,6 +11,21 @@ pr_autoupdate and the merge train (ci_kit/merge_train) read them unchanged.
 """
 from __future__ import annotations
 
+import os
+import time
+from collections.abc import Callable
+
+# UNKNOWN IS NOT BEHIND (2026-11-23). GitHub computes mergeStateStatus lazily: right after a push
+# to the base every open PR reads UNKNOWN until something asks, and a read is the ask. The updater
+# fires ON that push, and pr_queue treats UNKNOWN like BEHIND (eligible for an update) -- right
+# under strict protection, where it IS behind, but in a repo without strict GitHub never reports
+# BEHIND at all (probed live: plans#134, behind_by=2 with every required check green read CLEAN),
+# so an UNKNOWN read there merged main into a PR that could already land and threw its CI away.
+# settle() re-reads, bounded, while an ARMED PR is still UNKNOWN; whatever is left is said in the
+# summary and planned as before. UNKNOWN_TRIES = 0 is off (the tests' default, conftest).
+UNKNOWN_TRIES = int(os.environ.get("CI_KIT_UNKNOWN_TRIES", "2"))
+UNKNOWN_WAIT_S = float(os.environ.get("CI_KIT_UNKNOWN_WAIT_S", "5"))
+
 QUERY = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
@@ -64,3 +79,24 @@ def rows(answer: dict) -> list[dict]:
             "headCommittedDate": committed,
         })
     return out
+
+
+def unknown(prs: list[dict]) -> list[int]:
+    """Armed same-repo PRs whose merge state GitHub has not computed (absent reads as UNKNOWN)."""
+    return [int(p["number"]) for p in prs if p.get("autoMergeRequest") and not p.get("isCrossRepository")
+            and (p.get("mergeStateStatus") or "UNKNOWN").upper() == "UNKNOWN"]
+
+
+def settle(read: Callable[[], list[dict]], tries: int | None = None, wait_s: float | None = None,
+           sleep: Callable[[float], None] = time.sleep) -> tuple[list[dict], list[int]]:
+    """read(), then re-read up to `tries` times, `wait_s` apart, while an armed PR is UNKNOWN.
+    Returns (rows, the armed PR numbers still UNKNOWN after the last read)."""
+    tries = UNKNOWN_TRIES if tries is None else tries
+    wait_s = UNKNOWN_WAIT_S if wait_s is None else wait_s
+    prs = read()
+    for _ in range(max(0, tries)):
+        if not unknown(prs):
+            break
+        sleep(wait_s)
+        prs = read()
+    return prs, unknown(prs)
