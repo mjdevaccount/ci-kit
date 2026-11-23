@@ -334,7 +334,10 @@ jobs:
       CI_KIT_HEAL_STALE_MIN: ${{ inputs.heal-stale-minutes }}
       # an env var, never a flag (the older-@v1-tool reason above)
       CI_KIT_BASE_RETRY_CAP: ${{ inputs.base-retry-cap }}
-      CI_KIT_BASE_RETRY_BOT_AUTHORS: ${{ inputs.base-retry-bot-authors }}
+      # the DEFAULT list (renovate) is passed only where it can act (cap > 0 and a queue): a caller that
+      # turns retry off with `base-retry-cap: 0` alone, or runs no queue, is quiet. A list the caller SET
+      # is always passed, so ci_kit.pr_autoupdate.base_retry_warning still names one that cannot act.
+      CI_KIT_BASE_RETRY_BOT_AUTHORS: ${{ (inputs.base-retry-bot-authors != 'renovate' || (inputs.base-retry-cap > 0 && inputs.max-in-flight > 0)) && inputs.base-retry-bot-authors || '' }}
       CI_KIT_BASE_RETRY_MAX_PER_PASS: ${{ inputs.base-retry-max-per-pass }}
       CI_KIT_UPDATE_HELD: ${{ inputs.update-held }}
       CI_KIT_EVENT: ${{ github.event_name }}
