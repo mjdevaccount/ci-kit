@@ -286,7 +286,12 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
 def _read_prs(repo: str, summary: list[str]) -> list[dict]:
     """The open PRs, an UNKNOWN merge state re-read before anything is planned on it
     (pr_list.settle: not computed is not behind -- a non-strict base never reports BEHIND)."""
-    prs, unknown = pr_list.settle(lambda: pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout)))
+    errors: list[str] = []
+    prs, unknown = pr_list.settle(lambda: pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout)),
+                                  errors=errors)
+    if errors:
+        summary.append("re-reading an UNKNOWN merge state failed (planned on the last good read): "
+                       + "; ".join(errors))
     if unknown:
         summary.append("merge state still UNKNOWN after re-reading (planned as behind): "
                        + ", ".join(f"#{n}" for n in unknown))

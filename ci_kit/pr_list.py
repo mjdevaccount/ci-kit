@@ -23,8 +23,22 @@ from collections.abc import Callable
 # so an UNKNOWN read there merged main into a PR that could already land and threw its CI away.
 # settle() re-reads, bounded, while an ARMED PR is still UNKNOWN; whatever is left is said in the
 # summary and planned as before. UNKNOWN_TRIES = 0 is off (the tests' default, conftest).
-UNKNOWN_TRIES = int(os.environ.get("CI_KIT_UNKNOWN_TRIES", "2"))
-UNKNOWN_WAIT_S = float(os.environ.get("CI_KIT_UNKNOWN_WAIT_S", "5"))
+# NOT COVERED: unarmed rows (pr_heal's renovate_pool) are not waited for -- an unarmed PR is not
+# planned onto the queue, and pr_renovate.join arms only what GitHub lets it arm.
+
+
+def _env_num(name: str, default: float, cast: Callable[[str], float]) -> float:
+    """A tuning knob from env: unparsable, negative or NaN falls back to the default (a typo in an
+    env var must not crash every importer -- the updater AND the merge train load this module)."""
+    try:
+        v = cast(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return v if v == v and v >= 0 else default
+
+
+UNKNOWN_TRIES = int(_env_num("CI_KIT_UNKNOWN_TRIES", 2, int))
+UNKNOWN_WAIT_S = _env_num("CI_KIT_UNKNOWN_WAIT_S", 5.0, float)
 
 QUERY = """
 query($owner: String!, $name: String!) {
@@ -88,9 +102,15 @@ def unknown(prs: list[dict]) -> list[int]:
 
 
 def settle(read: Callable[[], list[dict]], tries: int | None = None, wait_s: float | None = None,
-           sleep: Callable[[float], None] = time.sleep) -> tuple[list[dict], list[int]]:
+           sleep: Callable[[float], None] = time.sleep,
+           errors: list[str] | None = None) -> tuple[list[dict], list[int]]:
     """read(), then re-read up to `tries` times, `wait_s` apart, while an armed PR is UNKNOWN.
-    Returns (rows, the armed PR numbers still UNKNOWN after the last read)."""
+    Returns (rows, the armed PR numbers still UNKNOWN after the last read).
+
+    The FIRST read raises as it always did (no rows = nothing to plan). A failed RE-read keeps the
+    last good rows and stops re-reading: the pass had a usable answer, and a re-read is an
+    optimisation, never a new way for the pass (and the queue hold after it) to die. The failure
+    is appended to `errors` for the caller's summary."""
     tries = UNKNOWN_TRIES if tries is None else tries
     wait_s = UNKNOWN_WAIT_S if wait_s is None else wait_s
     prs = read()
@@ -98,5 +118,10 @@ def settle(read: Callable[[], list[dict]], tries: int | None = None, wait_s: flo
         if not unknown(prs):
             break
         sleep(wait_s)
-        prs = read()
+        try:
+            prs = read()
+        except Exception as e:  # noqa: BLE001 -- any read failure: keep the rows we have
+            if errors is not None:
+                errors.append(f"{type(e).__name__}: {e}")
+            break
     return prs, unknown(prs)
