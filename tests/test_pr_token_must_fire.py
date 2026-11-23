@@ -211,7 +211,9 @@ def test_the_composite_pins_the_mint_by_sha_and_never_shells_the_token() -> None
     assert mint["uses"].split("@")[0] == "actions/create-github-app-token"
     sha = mint["uses"].split("@")[1]
     assert len(sha) == 40 and all(c in "0123456789abcdef" for c in sha)
-    assert f"{mint['uses']} # v3.3.0" in text
+    # the SHA carries its release tag as a comment (what Renovate's digest pin reads and moves), any
+    # vX.Y.Z: a literal version here failed every Renovate bump of the action (ci-kit#120, v3.4.0)
+    assert re.search(rf"{re.escape(mint['uses'])} # v\d+\.\d+\.\d+\s*$", text, re.MULTILINE)
     assert mint["with"]["owner"] == "${{ github.repository_owner }}"
     assert mint["with"]["repositories"] == "${{ github.repository }}"                  # this repo only
     assert mint["continue-on-error"] == "${{ steps.decide.outputs.source == 'pat' }}"  # app modes: a failed mint is red
