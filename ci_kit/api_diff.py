@@ -49,7 +49,7 @@ from ci_kit import discover, release_bin, site_lint
 
 GATE = "api-diff"
 # renovate: datasource=github-releases depName=oasdiff/oasdiff
-OASDIFF_VERSION = "1.37.0"
+OASDIFF_VERSION = "1.39.0"
 #: sha256 of each release tarball, from the release's checksums.txt (v1.37.0, 2026-11-14). A bump
 #: moves the version AND every hash in one edit; a tarball that does not match is exit 2.
 OASDIFF = release_bin.Pin(
@@ -58,12 +58,12 @@ OASDIFF = release_bin.Pin(
     assets={"darwin-arm64": "darwin_all", "darwin-x64": "darwin_all", "linux-arm64": "linux_arm64",
             "linux-x64": "linux_amd64", "windows-arm64": "windows_arm64", "windows-x64": "windows_amd64"},
     sha256={
-        "darwin-arm64": "eccf5b9f46e689f8adcd79b79d4fdbde26a28301b6a74a0b449ad6a49e187e45",
-        "darwin-x64": "eccf5b9f46e689f8adcd79b79d4fdbde26a28301b6a74a0b449ad6a49e187e45",
-        "linux-arm64": "072a425ac647ecf2808721e91293fd644cee7935d2b32e650b3158539b2c7898",
-        "linux-x64": "eac87307d31d08c36800c58a409c247f1c5db37fbb72e2544402f22a87cbca3c",
-        "windows-arm64": "8d452a04078ffa2428ce303d7565d5ec01de590cb9cd01f159b10341b3dde7e1",
-        "windows-x64": "d72f1c5c4ba4adddafa4ec3c38f1c34f09df8ddb2d2bdd75869f94145c5bcc6d",
+        "darwin-arm64": "fe88d9950324d3b0ebeaf8e0d3a210b64cb099a0f55fce5ee5a22b276df0eac4",
+        "darwin-x64": "fe88d9950324d3b0ebeaf8e0d3a210b64cb099a0f55fce5ee5a22b276df0eac4",
+        "linux-arm64": "481db7d891d916f13df277b2ef8bbb95477702827710e49fe22cef69c359c780",
+        "linux-x64": "71a85930728f367a2086077b7ae1411319421549d18473a3e8258b6451520433",
+        "windows-arm64": "5699ac9dc74b432f78990cd369ff2bec3a79302c58e923c1ec823e47a86ddb82",
+        "windows-x64": "956a73df88e03efdf3fcc5f327446cc176fefe4adcea1978b0fef464a1ee8901",
     },
 )
 LEVEL = {3: "ERR", 2: "WARN", 1: "INFO"}
