@@ -226,9 +226,9 @@ on:
         type: number
         default: 135
       base-retry-cap:
-        description: base-driven retries (since the PR's last own commit) of an armed PR held red + BEHIND on a check MAIN went red -> green on (ci_kit/pr_baseretry.py; once per head, after every green PR; at the cap a marker comment + a red pass; 0 = off, the default; at most 30, a larger value is refused)
+        description: base-driven retries (since the PR's last own commit) of an armed PR held red + BEHIND on a check MAIN went red -> green on (ci_kit/pr_baseretry.py; once per head, after every green PR; at the cap a marker comment + a red pass; 0 = off; DEFAULT 1 since v1.43.0, measured on edge-host 11-14..11-23 -- 2 retries, both PRs merged, none spent; at most 30, a larger value is refused)
         type: number
-        default: 0
+        default: 1
       base-retry-max-per-pass:
         description: base-retry candidates whose main runs are read per pass, lowest PR number first (the rest are named in the summary and wait for the next pass); 1..100
         type: number
@@ -242,9 +242,9 @@ on:
         type: string
         default: ""
       base-retry-bot-authors:
-        description: comma-separated EXACT author logins (as GraphQL reports them, e.g. Renovate's app is `renovate`; the author must also be a Bot account) whose red + BEHIND PRs get the NO-AUTHOR base retry -- main green on the failing checks and moved since the red run, no red-at-base evidence -- under the same markers and cap ('' = off, the default; needs base-retry-cap > 0)
+        description: comma-separated EXACT author logins (as GraphQL reports them, e.g. Renovate's app is `renovate`; the author must also be a Bot account) whose red + BEHIND PRs get the NO-AUTHOR base retry -- main green on the failing checks and moved since the red run, no red-at-base evidence -- under the same markers and cap ('' = off; DEFAULT `renovate` since v1.43.0 -- a Renovate PR red on a stale base has no author to push the fix; needs base-retry-cap > 0)
         type: string
-        default: ''
+        default: 'renovate'
       app-client-id:
         description: the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- README "Generic names"
         type: string
