@@ -51,7 +51,8 @@ author, which is fail-safe here: a forged one can only HOLD a PR.
 
 ORDER. A retry takes a queue slot only AFTER every green eligible PR (pr_queue.plan's `base_retry`),
 is never the queue head (pr_queue.blocked still counts it red), and its marker is written BEFORE the
-PUT (pr_autoupdate._drive): no record, no update. Default OFF (`base-retry-cap` 0): nothing is read.
+PUT (pr_autoupdate._drive): no record, no update. The WORKFLOW default is ON since v1.43.0 (cap 1, bot
+authors `renovate`; `CAP` below stays the CLI/library default, 0); `base-retry-cap: 0` = nothing is read.
 
 THE RECORD: `<!-- smart-merge:base-retry head=<sha> base=<sha> -->`, `<!-- smart-merge:base-retry-spent head=<sha> -->`.
 """

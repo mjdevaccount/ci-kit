@@ -45,3 +45,11 @@ def new_repo(tmp_path: Path):
         git(r, "config", "core.autocrlf", "false")
         return r
     return make
+
+
+@pytest.fixture(autouse=True)
+def _no_unknown_reread(monkeypatch):
+    """pr_list.settle re-reads an UNKNOWN merge state with a real sleep; fixtures that omit
+    mergeStateStatus read UNKNOWN. Off here; tests/test_pr_list_settle.py drives it explicitly."""
+    from ci_kit import pr_list
+    monkeypatch.setattr(pr_list, "UNKNOWN_TRIES", 0)

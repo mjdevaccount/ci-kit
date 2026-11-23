@@ -283,12 +283,27 @@ def _train_plan(prs: list[dict], armed: list[dict], summary: list[str], opts: Op
     return q
 
 
+def _read_prs(repo: str, summary: list[str]) -> list[dict]:
+    """The open PRs, an UNKNOWN merge state re-read before anything is planned on it
+    (pr_list.settle: not computed is not behind -- a non-strict base never reports BEHIND)."""
+    errors: list[str] = []
+    prs, unknown = pr_list.settle(lambda: pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout)),
+                                  errors=errors)
+    if errors:
+        summary.append("re-reading an UNKNOWN merge state failed (planned on the last good read): "
+                       + "; ".join(errors))
+    if unknown:
+        summary.append("merge state still UNKNOWN after re-reading (planned as behind): "
+                       + ", ".join(f"#{n}" for n in unknown))
+    return prs
+
+
 def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing: list[dict] | None = None,
         later: list[Callable[[list[str]], None]] | None = None) -> int:
     # One pass. The held pass (`update_held`) is LAST: with `later` (main) it is handed back to run
     # after this pass's outputs and summary are written, so it can never delay or lose them;
     # without (a direct caller) it runs here, at the end (`_held_last`).
-    prs = pr_list.rows(json.loads(_gh_read(*pr_list.gh_args(repo)).stdout))
+    prs = _read_prs(repo, summary)
     # Renovate's automerge PRs JOIN the serial queue (ci_kit/pr_renovate.py): armed here, so no
     # session arms them by hand. Only with a queue: without one Renovate merges itself, on EVERY check
     joined = pr_renovate.join(repo, prs, _gh_read, pr_heal.write, summary) if opts.max_in_flight > 0 else 0
