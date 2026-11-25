@@ -198,7 +198,7 @@ def _iso(age_h: float, plus_s: float = 0) -> str:
 
 
 def _aged(runs: dict[int, tuple[float, float]], ever: int, calls: list[str] | None = None,
-          newest_h: float = 30):
+          newest_h: float = 240):
     """runs: id -> (age in hours, wait in seconds). The runs list honours `created=>=` like the API."""
     def api(path: str) -> dict:
         if calls is not None:
