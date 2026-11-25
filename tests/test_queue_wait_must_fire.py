@@ -329,3 +329,10 @@ def test_a_summary_write_failure_is_2(monkeypatch: pytest.MonkeyPatch, tmp_path)
     monkeypatch.setattr(qw, "_api", _aged({}, ever=412))
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "no" / "such" / "dir"))
     assert _main("--max-p90", "180") == 2
+
+
+@pytest.mark.parametrize("newest_h", [1, -48])
+def test_reads_that_disagree_are_2_not_idle(monkeypatch: pytest.MonkeyPatch, newest_h: float) -> None:
+    """Reviewer N1: no run in the window, yet the undated read names one inside it (or in the future)."""
+    monkeypatch.setattr(qw, "_api", _aged({}, ever=412, newest_h=newest_h))
+    assert _main("--max-p90", "180") == 2

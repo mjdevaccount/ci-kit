@@ -242,6 +242,12 @@ def _judge(a: argparse.Namespace) -> int:
             print(f"ci-queue-wait: DID NOT FINISH: {scope}: the filter matches NO completed run ever "
                   f"-- a wrong --workflow/--branch/--event, not an idle window")
             return 2
+        if newest * 24 < hours:
+            # The windowed list returned no run, the undated read a run inside the window (or dated
+            # in the future): the two reads disagree, so neither is evidence of a quiet window (N1).
+            print(f"ci-queue-wait: DID NOT FINISH: {scope}: no run listed in the window, yet the "
+                  f"filter's newest completed run is {newest * 24:.1f}h old -- the API reads disagree")
+            return 2
         if newest > a.stale_days:
             print(f"ci-queue-wait: DID NOT FINISH: {scope}: the filter's newest completed run is "
                   f"{newest:.0f} days old (limit {a.stale_days:g}) -- a filter gone stale (renamed "
