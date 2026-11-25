@@ -25,9 +25,20 @@ start (`run_started_at`: a re-run hours later is not hours of queue), or the cen
 job was ever picked up. `--unit job` = every job's own started_at - created_at (a pool behind another:
 the run's lint can start in 16s while its unit job waits an hour).
 
-Exit 0 = measured and every given limit (`--max-p90`, `--max-p95`) held; 1 = over one; 2 = could not
-measure (an API error, or fewer than `--min-runs` waits -- a gate that measured nothing has verified
-nothing).
+IDLE WINDOWS (2026-11-25). A day with no main push, or no PR job, held no wait to measure, and the
+old exit 2 ("could not measure") went red on every quiet Sunday (a consumer's 11-22 and 11-25 runs):
+a false red that reads the same as a dead API. Too few waits in `--hours` now WIDENS the window,
+doubling up to `--widen-to-hours` (default 168), and gates the widened sample, named in the line.
+NO completed run at the cap is IDLE -- a distinct verdict, exit 0 -- only while the filter's newest
+completed run (an undated read) is under `--stale-days` (30) old. Not idle, exit 2: a filter that
+never matched (a typo); one whose newest run is older (a renamed branch, a removed trigger -- it
+used to be right, and IDLE would hide it forever); runs read with no wait in any (a startup_failure
+has no jobs). A widened sample under `--min-runs` is still judged: over a limit exits 1.
+
+Exit 0 = measured and every given limit (`--max-p90`, `--max-p95`) held, or IDLE; 1 = over one;
+2 = could not measure (any exception, a stale or never-matching filter, runs with nothing to
+measure, a sample under `--min-runs` within the limits -- a gate that measured nothing has verified
+nothing, and a crashed detector never exits 0).
 """
 from __future__ import annotations
 
@@ -104,12 +115,16 @@ def p90(xs: list[float]) -> float:
     return pct(xs, 0.9)
 
 
+def _filters(branch: str, event: str) -> str:
+    return (f"&branch={branch}" if branch else "") + (f"&event={event}" if event else "")
+
+
 def list_runs(repo: str, workflow: str, branch: str, event: str, hours: float,
               max_runs: int) -> tuple[list[dict], bool]:
     """-> (completed runs in the window, newest first, at most `max_runs`; True when the window
     held more). Reads until a short page or one run past the cap, so `truncated` is a fact."""
     since = (dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    q = f"per_page=100&created=>={since}" + (f"&branch={branch}" if branch else "") + (f"&event={event}" if event else "")
+    q = f"per_page=100&created=>={since}" + _filters(branch, event)
     out: list[dict] = []
     seen: set[int] = set()
     page = 1
@@ -132,14 +147,30 @@ def list_runs(repo: str, workflow: str, branch: str, event: str, hours: float,
     return out[:max_runs], len(out) > max_runs or total > len(out)
 
 
+def last_completed(repo: str, workflow: str, branch: str, event: str) -> tuple[int, float | None]:
+    """-> (completed runs this filter has EVER matched, age in days of the newest one; None when
+    none). 0 = the filter is wrong (a typo, a workflow that never ran); a newest run older than
+    `--stale-days` = a filter that WAS right (a renamed branch, a removed trigger). Neither is idle."""
+    body = _api(f"repos/{repo}/actions/workflows/{workflow}/runs?per_page=1&status=completed"
+                + _filters(branch, event))
+    runs = body["workflow_runs"]
+    newest = (dt.datetime.now(dt.UTC) - _ts(runs[0]["created_at"])).total_seconds() / 86400 if runs else None
+    return max(int(body.get("total_count") or 0), len(runs)), newest
+
+
 def measure(repo: str, workflow: str, branch: str, event: str, hours: float,
-            max_runs: int = 300, unit: str = "run") -> tuple[list[Wait], int, bool, int]:
-    """-> (waits, runs with nothing to measure, truncated, runs read). unit 'job' = one entry per job."""
+            max_runs: int = 300, unit: str = "run",
+            cache: dict[int, list[dict]] | None = None) -> tuple[list[Wait], int, bool, int]:
+    """-> (waits, runs with nothing to measure, truncated, runs read). unit 'job' = one entry per job.
+    `cache` (run id -> jobs) lets a widened re-measure skip the runs an earlier window already read."""
     out: list[Wait] = []
     empty = 0
+    cache = {} if cache is None else cache
     runs, truncated = list_runs(repo, workflow, branch, event, hours, max_runs)
     for r in runs:
-        jobs = _api(f"repos/{repo}/actions/runs/{r['id']}/jobs?per_page=100")["jobs"]
+        if r["id"] not in cache:
+            cache[r["id"]] = _api(f"repos/{repo}/actions/runs/{r['id']}/jobs?per_page=100")["jobs"]
+        jobs = cache[r["id"]]
         got = ([(int(r["id"]), s, c) for s, c in job_waits(jobs)] if unit == "job"
                else [(int(r["id"]), *w) for w in [wait_s(r, jobs)] if w is not None])
         got = [g for g in got if g[1] >= 0]
@@ -155,43 +186,102 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--branch", default="main", help="empty (--branch=) = every branch")
     ap.add_argument("--event", default="push", help="empty (--event=) = every event")
     ap.add_argument("--hours", type=float, default=24)
+    ap.add_argument("--widen-to-hours", type=float, default=168,
+                    help="too few waits in --hours doubles the window up to this; no completed run at all = IDLE "
+                         "(exit 0) while the filter's newest run is under --stale-days old. = --hours never widens")
     ap.add_argument("--max-p90", type=float, help="seconds; a p90 over this exits 1")
     ap.add_argument("--max-p95", type=float, help="seconds; a p95 over this exits 1")
-    ap.add_argument("--min-runs", type=int, default=1, help="fewer measured waits (runs or jobs, per --unit) exits 2")
+    ap.add_argument("--min-runs", type=int, default=1,
+                    help="fewer measured waits (runs or jobs, per --unit) after widening: over a limit exits 1, else 2")
     ap.add_argument("--unit", choices=("run", "job"), default="run",
                     help="run = each run's first-job wait; job = every job's own wait (a pool behind another)")
     ap.add_argument("--max-runs", type=int, default=300,
                     help="newest completed runs read (each costs one jobs call; GITHUB_TOKEN allows 1000/h)")
+    ap.add_argument("--stale-days", type=float, default=30,
+                    help="an idle window is IDLE only while the filter's newest completed run is younger "
+                         "than this; older = a filter that went stale (exit 2)")
     a = ap.parse_args(argv)
     if a.max_p90 is None and a.max_p95 is None:
         ap.error("give --max-p90 and/or --max-p95")
-    scope = f"{a.repo} {a.workflow} branch={a.branch or '*'} event={a.event or '*'} last {a.hours:g}h per {a.unit}"
+    # NaN fails every comparison, so `> 0` rejects it too; --hours 0 would double forever (reviewer F4).
+    for name in ("hours", "widen_to_hours", "stale_days"):
+        if not getattr(a, name) > 0 or getattr(a, name) == float("inf"):
+            ap.error(f"--{name.replace('_', '-')} must be a finite number > 0")
+    if a.max_runs < 1:
+        ap.error("--max-runs must be >= 1")
     try:
-        waits, empty, truncated, read = measure(a.repo, a.workflow, a.branch, a.event, a.hours, a.max_runs, a.unit)
-    except (RuntimeError, KeyError, ValueError, TypeError, OSError, subprocess.SubprocessError) as e:
-        # OSError: no gh on PATH; TypeError: a response of an unexpected shape. Either is "did not
-        # look", never an over-the-limit 1 (reviewer 582 F5).
-        print(f"ci-queue-wait: DID NOT FINISH: {scope}: {e}")
+        return _judge(a)
+    except Exception as e:  # noqa: BLE001 -- ANY crash is "did not look" (2), never 0, never a 1 read as OVER LIMIT
+        print(f"ci-queue-wait: DID NOT FINISH: {a.repo} {a.workflow}: {type(e).__name__}: {e}")
         return 2
-    if not waits or len(waits) < a.min_runs:
-        print(f"ci-queue-wait: DID NOT FINISH: {scope}: {len(waits)} {a.unit} wait(s) measured, "
-              f"need {max(1, a.min_runs)}")
-        return 2
+
+
+def _judge(a: argparse.Namespace) -> int:
+    need = max(1, a.min_runs)
+    hours, cap = a.hours, max(a.hours, a.widen_to_hours)
+    cache: dict[int, list[dict]] = {}
+    while True:
+        waits, empty, truncated, read = measure(a.repo, a.workflow, a.branch, a.event, hours,
+                                                a.max_runs, a.unit, cache)
+        if len(waits) >= need or hours >= cap or truncated:
+            break
+        hours = min(cap, hours * 2)
+    widened = f" (widened from {a.hours:g}h: too few waits there)" if hours > a.hours else ""
+    scope = (f"{a.repo} {a.workflow} branch={a.branch or '*'} event={a.event or '*'} last {hours:g}h"
+             f"{widened} per {a.unit}")
+    limits = {k: v for k, v in (("p90", a.max_p90), ("p95", a.max_p95)) if v is not None}
+    if not waits:
+        if read:
+            # Runs exist and none had a wait (no jobs: a startup_failure; every job skipped). That is
+            # not a quiet window, and not a measurement either (reviewer F3).
+            print(f"ci-queue-wait: DID NOT FINISH: {scope}: {read} run(s) read, none with a job that "
+                  f"waited or ran -- not idle, not measured")
+            return 2
+        ever, newest = last_completed(a.repo, a.workflow, a.branch, a.event)
+        if not ever or newest is None:
+            print(f"ci-queue-wait: DID NOT FINISH: {scope}: the filter matches NO completed run ever "
+                  f"-- a wrong --workflow/--branch/--event, not an idle window")
+            return 2
+        if newest * 24 < hours:
+            # The windowed list returned no run, the undated read a run inside the window (or dated
+            # in the future): the two reads disagree, so neither is evidence of a quiet window (N1).
+            print(f"ci-queue-wait: DID NOT FINISH: {scope}: no run listed in the window, yet the "
+                  f"filter's newest completed run is {newest * 24:.1f}h old -- the API reads disagree")
+            return 2
+        if newest > a.stale_days:
+            print(f"ci-queue-wait: DID NOT FINISH: {scope}: the filter's newest completed run is "
+                  f"{newest:.0f} days old (limit {a.stale_days:g}) -- a filter gone stale (renamed "
+                  f"branch? removed trigger?), not an idle window")
+            return 2
+        line = (f"{scope}: no completed run in the window; the filter's newest completed run is "
+                f"{newest:.1f} days old ({ever} ever), so this window was quiet, not unmeasurable. "
+                f"No limit judged")
+        print(f"ci-queue-wait: IDLE: {line}")
+        _summary("IDLE", line)
+        return 0
     vals = [w for _, w, _ in waits]
     worst = max(waits, key=lambda t: t[1])
-    limits = {k: v for k, v in (("p90", a.max_p90), ("p95", a.max_p95)) if v is not None}
     got = {"p90": p90(vals), "p95": pct(vals, 0.95)}
     capped = f" (newest {read} runs of more: a sample)" if truncated else ""
-    line = (f"{scope}: {len(vals)} {a.unit}(s){capped}, {sum(c for *_, c in waits)} ended still queued "
+    thin = len(waits) < need
+    line = (f"{scope}: {len(vals)} {a.unit}(s){capped}{f', under --min-runs {need}' if thin else ''}, "
+            f"{sum(c for *_, c in waits)} ended still queued "
             f"(censored), {empty} run(s) with nothing to measure; queue wait p50 "
             f"{sorted(vals)[len(vals) // 2]:.0f}s p90 {got['p90']:.0f}s p95 {got['p95']:.0f}s "
             f"max {worst[1]:.0f}s (run {worst[0]}); limit " + " ".join(f"{k} {v:.0f}s" for k, v in limits.items()))
     bad = any(got[k] > v for k, v in limits.items())
-    print(("ci-queue-wait: OVER LIMIT: " if bad else "ci-queue-wait: ok: ") + line)
+    # A thin sample that already breaks a limit is judged (reviewer F2: four 3000s waits under
+    # --min-runs 5 read IDLE); a thin sample within the limits is too small to call ok.
+    verdict = "OVER LIMIT" if bad else ("THIN" if thin else "ok")
+    print(f"ci-queue-wait: {verdict}: {line}")
+    _summary(verdict, line)
+    return 1 if bad else (2 if thin else 0)
+
+
+def _summary(verdict: str, line: str) -> None:
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
-            fh.write(f"### CI queue wait\n\n{'OVER LIMIT' if bad else 'ok'}: {line}\n")
-    return 1 if bad else 0
+            fh.write(f"### CI queue wait\n\n{verdict}: {line}\n")
 
 
 if __name__ == "__main__":
