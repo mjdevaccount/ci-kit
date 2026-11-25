@@ -25,9 +25,17 @@ start (`run_started_at`: a re-run hours later is not hours of queue), or the cen
 job was ever picked up. `--unit job` = every job's own started_at - created_at (a pool behind another:
 the run's lint can start in 16s while its unit job waits an hour).
 
-Exit 0 = measured and every given limit (`--max-p90`, `--max-p95`) held; 1 = over one; 2 = could not
-measure (an API error, or fewer than `--min-runs` waits -- a gate that measured nothing has verified
-nothing).
+IDLE WINDOWS (2026-11-25). A day with no main push, or no PR job, held no wait to measure, and the
+old exit 2 ("could not measure") went red on every quiet Sunday (a consumer's 11-22 and 11-25 runs):
+a false red that reads the same as a dead API. Too few waits in `--hours` now WIDENS the window,
+doubling up to `--widen-to-hours` (default 168), and gates the widened sample, named in the line.
+Still too few at the cap is IDLE -- a distinct verdict, exit 0 -- but only once the filter is shown
+to match at least one completed run EVER: a filter that never matched (a branch or event typo) is
+misconfigured, not idle, and stays 2, so a typo cannot read green forever.
+
+Exit 0 = measured and every given limit (`--max-p90`, `--max-p95`) held, or IDLE; 1 = over one;
+2 = could not measure (an API error, or a filter that matches no completed run at all -- a gate that
+measured nothing has verified nothing, and a crashed detector never exits 0).
 """
 from __future__ import annotations
 
@@ -104,12 +112,16 @@ def p90(xs: list[float]) -> float:
     return pct(xs, 0.9)
 
 
+def _filters(branch: str, event: str) -> str:
+    return (f"&branch={branch}" if branch else "") + (f"&event={event}" if event else "")
+
+
 def list_runs(repo: str, workflow: str, branch: str, event: str, hours: float,
               max_runs: int) -> tuple[list[dict], bool]:
     """-> (completed runs in the window, newest first, at most `max_runs`; True when the window
     held more). Reads until a short page or one run past the cap, so `truncated` is a fact."""
     since = (dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    q = f"per_page=100&created=>={since}" + (f"&branch={branch}" if branch else "") + (f"&event={event}" if event else "")
+    q = f"per_page=100&created=>={since}" + _filters(branch, event)
     out: list[dict] = []
     seen: set[int] = set()
     page = 1
@@ -132,14 +144,27 @@ def list_runs(repo: str, workflow: str, branch: str, event: str, hours: float,
     return out[:max_runs], len(out) > max_runs or total > len(out)
 
 
+def ever_completed(repo: str, workflow: str, branch: str, event: str) -> int:
+    """-> how many completed runs this filter has EVER matched (no date bound). 0 = the filter is
+    wrong (a branch/event typo, a workflow that never ran), which is never 'idle'."""
+    body = _api(f"repos/{repo}/actions/workflows/{workflow}/runs?per_page=1&status=completed"
+                + _filters(branch, event))
+    return max(int(body.get("total_count") or 0), len(body["workflow_runs"]))
+
+
 def measure(repo: str, workflow: str, branch: str, event: str, hours: float,
-            max_runs: int = 300, unit: str = "run") -> tuple[list[Wait], int, bool, int]:
-    """-> (waits, runs with nothing to measure, truncated, runs read). unit 'job' = one entry per job."""
+            max_runs: int = 300, unit: str = "run",
+            cache: dict[int, list[dict]] | None = None) -> tuple[list[Wait], int, bool, int]:
+    """-> (waits, runs with nothing to measure, truncated, runs read). unit 'job' = one entry per job.
+    `cache` (run id -> jobs) lets a widened re-measure skip the runs an earlier window already read."""
     out: list[Wait] = []
     empty = 0
+    cache = {} if cache is None else cache
     runs, truncated = list_runs(repo, workflow, branch, event, hours, max_runs)
     for r in runs:
-        jobs = _api(f"repos/{repo}/actions/runs/{r['id']}/jobs?per_page=100")["jobs"]
+        if r["id"] not in cache:
+            cache[r["id"]] = _api(f"repos/{repo}/actions/runs/{r['id']}/jobs?per_page=100")["jobs"]
+        jobs = cache[r["id"]]
         got = ([(int(r["id"]), s, c) for s, c in job_waits(jobs)] if unit == "job"
                else [(int(r["id"]), *w) for w in [wait_s(r, jobs)] if w is not None])
         got = [g for g in got if g[1] >= 0]
@@ -155,9 +180,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--branch", default="main", help="empty (--branch=) = every branch")
     ap.add_argument("--event", default="push", help="empty (--event=) = every event")
     ap.add_argument("--hours", type=float, default=24)
+    ap.add_argument("--widen-to-hours", type=float, default=168,
+                    help="too few waits in --hours doubles the window up to this; still too few = IDLE "
+                         "(exit 0) when the filter has ever matched a run. Set equal to --hours to never widen")
     ap.add_argument("--max-p90", type=float, help="seconds; a p90 over this exits 1")
     ap.add_argument("--max-p95", type=float, help="seconds; a p95 over this exits 1")
-    ap.add_argument("--min-runs", type=int, default=1, help="fewer measured waits (runs or jobs, per --unit) exits 2")
+    ap.add_argument("--min-runs", type=int, default=1, help="fewer measured waits (runs or jobs, per --unit) after widening = IDLE")
     ap.add_argument("--unit", choices=("run", "job"), default="run",
                     help="run = each run's first-job wait; job = every job's own wait (a pool behind another)")
     ap.add_argument("--max-runs", type=int, default=300,
@@ -165,18 +193,37 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     if a.max_p90 is None and a.max_p95 is None:
         ap.error("give --max-p90 and/or --max-p95")
-    scope = f"{a.repo} {a.workflow} branch={a.branch or '*'} event={a.event or '*'} last {a.hours:g}h per {a.unit}"
+    need = max(1, a.min_runs)
+    hours, cap = a.hours, max(a.hours, a.widen_to_hours)
+    cache: dict[int, list[dict]] = {}
     try:
-        waits, empty, truncated, read = measure(a.repo, a.workflow, a.branch, a.event, a.hours, a.max_runs, a.unit)
-    except (RuntimeError, KeyError, ValueError, TypeError, OSError, subprocess.SubprocessError) as e:
-        # OSError: no gh on PATH; TypeError: a response of an unexpected shape. Either is "did not
+        while True:
+            waits, empty, truncated, read = measure(a.repo, a.workflow, a.branch, a.event, hours,
+                                                    a.max_runs, a.unit, cache)
+            if len(waits) >= need or hours >= cap or truncated:
+                break
+            hours = min(cap, hours * 2)
+        ever = ever_completed(a.repo, a.workflow, a.branch, a.event) if len(waits) < need else -1
+    except (RuntimeError, LookupError, ValueError, TypeError, OSError, subprocess.SubprocessError) as e:
+        # OSError: no gh on PATH; TypeError/IndexError: a response of an unexpected shape. Any is "did not
         # look", never an over-the-limit 1 (reviewer 582 F5).
-        print(f"ci-queue-wait: DID NOT FINISH: {scope}: {e}")
+        print(f"ci-queue-wait: DID NOT FINISH: {a.repo} {a.workflow}: {e}")
         return 2
-    if not waits or len(waits) < a.min_runs:
-        print(f"ci-queue-wait: DID NOT FINISH: {scope}: {len(waits)} {a.unit} wait(s) measured, "
-              f"need {max(1, a.min_runs)}")
-        return 2
+    widened = f" (widened from {a.hours:g}h: too few waits there)" if hours > a.hours else ""
+    scope = (f"{a.repo} {a.workflow} branch={a.branch or '*'} event={a.event or '*'} last {hours:g}h"
+             f"{widened} per {a.unit}")
+    if len(waits) < need:
+        if ever == 0:
+            print(f"ci-queue-wait: DID NOT FINISH: {scope}: the filter matches NO completed run ever "
+                  f"-- a wrong --workflow/--branch/--event, not an idle window")
+            return 2
+        seen = f" (max {max(w for _, w, _ in waits):.0f}s)" if waits else ""
+        line = (f"{scope}: {len(waits)} {a.unit} wait(s){seen} measured from {read} run(s), need {need}; "
+                f"the filter has matched {ever} completed run(s) before, so this window was quiet, "
+                f"not unmeasurable. No limit judged")
+        print(f"ci-queue-wait: IDLE: {line}")
+        _summary("IDLE", line)
+        return 0
     vals = [w for _, w, _ in waits]
     worst = max(waits, key=lambda t: t[1])
     limits = {k: v for k, v in (("p90", a.max_p90), ("p95", a.max_p95)) if v is not None}
@@ -188,10 +235,14 @@ def main(argv: list[str] | None = None) -> int:
             f"max {worst[1]:.0f}s (run {worst[0]}); limit " + " ".join(f"{k} {v:.0f}s" for k, v in limits.items()))
     bad = any(got[k] > v for k, v in limits.items())
     print(("ci-queue-wait: OVER LIMIT: " if bad else "ci-queue-wait: ok: ") + line)
+    _summary("OVER LIMIT" if bad else "ok", line)
+    return 1 if bad else 0
+
+
+def _summary(verdict: str, line: str) -> None:
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
-            fh.write(f"### CI queue wait\n\n{'OVER LIMIT' if bad else 'ok'}: {line}\n")
-    return 1 if bad else 0
+            fh.write(f"### CI queue wait\n\n{verdict}: {line}\n")
 
 
 if __name__ == "__main__":
