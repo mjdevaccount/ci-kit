@@ -37,7 +37,8 @@ def _fake(jobs_for: dict[int, list[dict]], fail: bool = False, ever: int | None 
         if path.endswith("/jobs?per_page=100"):
             return {"jobs": jobs_for[int(path.split("/runs/")[1].split("/")[0])]}
         if "per_page=1&" in path:
-            return {"total_count": len(jobs_for) if ever is None else ever, "workflow_runs": []}
+            n = len(jobs_for) if ever is None else ever
+            return {"total_count": n, "workflow_runs": [{**RUN, "created_at": _iso(1)}] if n else []}
         n = len(jobs_for) if _page(path) == 1 else 0
         return {"workflow_runs": [{**RUN, "id": i} for i in range(n)]}
     return api
@@ -196,7 +197,8 @@ def _iso(age_h: float, plus_s: float = 0) -> str:
     return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _aged(runs: dict[int, tuple[float, float]], ever: int, calls: list[str] | None = None):
+def _aged(runs: dict[int, tuple[float, float]], ever: int, calls: list[str] | None = None,
+          newest_h: float = 30):
     """runs: id -> (age in hours, wait in seconds). The runs list honours `created=>=` like the API."""
     def api(path: str) -> dict:
         if calls is not None:
@@ -206,7 +208,8 @@ def _aged(runs: dict[int, tuple[float, float]], ever: int, calls: list[str] | No
             return {"jobs": [{"started_at": _iso(age, w), "created_at": _iso(age),
                               "conclusion": "success", "runner_name": "home-1"}]}
         if "per_page=1&" in path:
-            return {"total_count": ever, "workflow_runs": []}
+            return {"total_count": ever,
+                    "workflow_runs": [{"id": 99, "status": "completed", "created_at": _iso(newest_h)}] if ever else []}
         since = path.split("created=>=", 1)[1].split("&", 1)[0]
         hits = [{"id": i, "status": "completed", "created_at": _iso(age)}
                 for i, (age, _) in runs.items() if _iso(age) >= since] if _page(path) == 1 else []
@@ -221,7 +224,7 @@ def test_a_quiet_day_is_idle_not_red(monkeypatch: pytest.MonkeyPatch, capsys: py
     monkeypatch.setattr(qw, "_api", _aged({}, ever=412, calls=calls))
     assert _main("--max-p90", "180") == 0
     out = capsys.readouterr().out
-    assert out.startswith("ci-queue-wait: IDLE: ") and "last 168h (widened from 24h" in out and "412" in out
+    assert out.startswith("ci-queue-wait: IDLE: ") and "last 168h (widened from 24h" in out and "412 ever" in out
     lists = [c for c in calls if "created=>=" in c]
     assert len(lists) == 4   # 24h, 48h, 96h, 168h: doubling, capped
 
@@ -274,8 +277,55 @@ def test_widen_off_still_idle_not_2(monkeypatch: pytest.MonkeyPatch) -> None:
     assert sum("created=>=" in c for c in calls) == 1
 
 
-def test_a_thin_widened_sample_under_min_runs_is_idle(monkeypatch: pytest.MonkeyPatch,
-                                                      capsys: pytest.CaptureFixture) -> None:
-    monkeypatch.setattr(qw, "_api", _aged({1: (100, 10)}, ever=412))
-    assert _main("--max-p90", "180", "--min-runs", "5") == 0
-    assert "1 run wait(s) (max 10s) measured from 1 run(s), need 5" in capsys.readouterr().out
+@pytest.mark.parametrize(("wait", "rc", "verdict"), [(10, 2, "THIN"), (3000, 1, "OVER LIMIT")])
+def test_a_thin_widened_sample_is_still_judged(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+                                               wait: float, rc: int, verdict: str) -> None:
+    """Reviewer F2: four 3000s waits under --min-runs 5 read IDLE, exit 0. Never idle when runs had waits."""
+    monkeypatch.setattr(qw, "_api", _aged({i: (100, wait) for i in range(4)}, ever=412))
+    assert _main("--max-p90", "180", "--min-runs", "5") == rc
+    out = capsys.readouterr().out
+    assert out.startswith(f"ci-queue-wait: {verdict}: ") and "under --min-runs 5" in out
+
+
+def test_a_filter_gone_stale_is_2_not_idle(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    """Reviewer F1: `--branch master` after a rename still matches old runs; IDLE would hide it forever."""
+    monkeypatch.setattr(qw, "_api", _aged({}, ever=900, newest_h=24 * 45))
+    assert _main("--max-p90", "180", "--branch", "master") == 2
+    assert "45 days old (limit 30)" in capsys.readouterr().out
+    assert _main("--max-p90", "180", "--branch", "master", "--stale-days", "60") == 0
+
+
+def test_runs_with_nothing_to_measure_are_not_idle(monkeypatch: pytest.MonkeyPatch,
+                                                   capsys: pytest.CaptureFixture) -> None:
+    """Reviewer F3: every push a startup_failure (no jobs) read 'this window was quiet', exit 0."""
+    monkeypatch.setattr(qw, "_api", _fake({0: [], 1: [], 2: []}, ever=500))
+    assert _main("--max-p90", "180") == 2
+    assert "3 run(s) read, none with a job" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("bad", [["--hours", "0"], ["--hours", "-1"], ["--hours", "nan"], ["--hours", "inf"],
+                                 ["--widen-to-hours", "0"], ["--max-runs", "0"], ["--stale-days", "0"]])
+def test_bad_inputs_are_refused(bad: list[str]) -> None:
+    """Reviewer F4: --hours 0 doubled forever burning the token; --max-runs 0 read IDLE."""
+    with pytest.raises(SystemExit) as e:
+        _main("--max-p90", "180", *bad)
+    assert e.value.code == 2
+
+
+@pytest.mark.parametrize("shape", [None, [], "nulljob"])
+def test_any_crash_is_2(monkeypatch: pytest.MonkeyPatch, shape) -> None:
+    """Reviewer F5: an AttributeError (a null body / a null job) escaped main() and exited 1."""
+    def api(p: str):
+        if "per_page=1&" in p:
+            return shape
+        if p.endswith("/jobs?per_page=100"):
+            return {"jobs": [None]}
+        return {"workflow_runs": [{**RUN, "id": 1}] if shape == "nulljob" and _page(p) == 1 else []}
+    monkeypatch.setattr(qw, "_api", api)
+    assert _main("--max-p90", "180") == 2
+
+
+def test_a_summary_write_failure_is_2(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(qw, "_api", _aged({}, ever=412))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "no" / "such" / "dir"))
+    assert _main("--max-p90", "180") == 2
