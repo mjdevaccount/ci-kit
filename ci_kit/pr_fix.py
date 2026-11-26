@@ -22,6 +22,14 @@ under .github/, a line budget. A fix that needs a test changed is a DECLINE by i
 refusal by fence. Structured output: {action: fixed | declined, summary, reason}.
 
 Outputs `state` = fixed | declined | refused | failed, and `why`.
+
+CANNOT START IS NOT A FAILED FIX (v1.45.0). The env scrub below makes the CLI run every Bash command
+in a bubblewrap sandbox, and refuse to run one outside it. A runner that cannot build that sandbox
+(no bwrap, no socat, a container whose seccomp profile refuses user namespaces) fails EVERY tier-3
+heal the same way, whatever the PR: 17 attempts on 15 PRs, 2026-11-15..26, each recorded and paged
+as that one PR's `failed`. So the runner is asked first (`sandbox_check`), the CLI's own words are
+read afterwards (`judge`), and either one is `why` = `KIND=cannot-start: ...`, which the record
+(ci_kit/pr_ladder.py outcome) names as the RUNNER's, never the PR's.
 """
 from __future__ import annotations
 
@@ -29,6 +37,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -51,6 +60,20 @@ FIX_JOB_MIN = FIX_STEP_MIN + SETUP_MIN
 # runs PR code with Bash; the one credential it needs is put back below, by name)
 SECRETISH = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|_KEY$|^NTFY|CREDENTIAL", re.I)
 MAX_TURNS = 80
+# WHAT THE ENV SCRUB NEEDS FROM THE RUNNER. Measured on the CLI this workflow pins (2.1.329, in the
+# runner's own base image): without bwrap it exits "could not start: bubblewrap is required"; with
+# bwrap and no socat every Bash call returns "Sandbox is required but failed to initialize ... socat
+# not installed"; with both under Docker's default seccomp profile every one returns "bwrap: No
+# permissions to create new namespace", and with seccomp lifted but /proc/sys still masked "bwrap:
+# cannot open /proc/sys/user/max_user_namespaces: Read-only file system" (its --disable-userns). The
+# probe is the FLOOR -- the namespaces, the userns lock and the fresh /proc no sandboxed command runs
+# without; it failed and passed with the CLI's own Bash in all four container confinements tried --
+# and `sandbox_refused` reads what the CLI itself then said.
+CANNOT_START = "cannot-start"
+SANDBOX_TOOLS = ("bwrap", "socat")
+SANDBOX_PROBE = ("bwrap", "--unshare-user", "--unshare-pid", "--disable-userns", "--ro-bind", "/", "/", "--proc", "/proc",
+                 "--dev", "/dev", "true")
+_SANDBOX_DOWN = re.compile(r"Sandbox is required but failed to initialize|^bwrap: ", re.M)
 FILE_TOOLS = ("Read", "Edit", "Write", "Grep", "Glob")
 DEFAULT_COMMANDS = ("uv run", "uv sync", "pytest", "python -m pytest", "ruff", "make", "npm test", "npm run",
                     "npx tsc", "npx vitest", "npx eslint", "dotnet build", "dotnet test", "dotnet format",
@@ -121,14 +144,67 @@ def env(environ: dict[str, str]) -> dict[str, str]:
     return e
 
 
+def sandbox_check(environ: dict[str, str], which=shutil.which, run=subprocess.run) -> str:
+    """Why this runner cannot run the sandbox the env scrub demands, or ''. Asked BEFORE the CLI: a
+    runner that cannot is the same answer for every PR, and not worth a model session to learn."""
+    missing = [t for t in SANDBOX_TOOLS if not which(t, path=environ.get("PATH"))]
+    if missing:
+        return f"{' and '.join(missing)} not installed on this runner (the CLI's subprocess sandbox needs both)"
+    try:
+        p = run(list(SANDBOX_PROBE), env=environ, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"the bubblewrap probe did not run: {type(e).__name__}: {e}"
+    if p.returncode:
+        return (f"bubblewrap cannot build a sandbox on this runner (exit {p.returncode}): "
+                f"{(p.stderr or '').strip()[-200:] or 'no message'}")
+    return ""
+
+
+def _text(content: object) -> str:
+    if isinstance(content, list):
+        return " ".join(str(b.get("text") or "") for b in content if isinstance(b, dict))
+    return str(content or "")
+
+
+def sandbox_refused(stdout: str) -> str:
+    """The CLI's own words when its sandbox ran NONE of the Bash commands it was asked for, else ''.
+    One Bash result that is not such a refusal means the sandbox works: any other error is the
+    command's own, and a run that called no Bash at all says nothing either way."""
+    bash: list[str] = []
+    results: dict[str, tuple[bool, str]] = {}
+    for line in stdout.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        content = (ev.get("message") or {}).get("content") if isinstance(ev, dict) and isinstance(ev.get("message"), dict) else None
+        for b in content if isinstance(content, list) else []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use" and b.get("name") == "Bash":
+                bash.append(str(b.get("id")))
+            elif b.get("type") == "tool_result":
+                results[str(b.get("tool_use_id"))] = (bool(b.get("is_error")), _text(b.get("content")))
+    ran = [results[i] for i in bash if i in results]
+    if not ran or not all(err and _SANDBOX_DOWN.search(text) for err, text in ran):
+        return ""
+    return f"the CLI's sandbox ran none of its {len(ran)} Bash command(s): {ran[0][1].strip()[:240]}"
+
+
 def judge(stdout: str, stderr: str, code: int | str) -> tuple[str, str, str]:
     """(fixed | declined | failed, summary, why)."""
     _, result, categories = cli.parse_stream(stdout)
+    secret = os.environ.get(cli.CRED, "") or os.environ.get("ANTHROPIC_API_KEY", "")
+    # before the model's own answer: a fix it could not run one command to prove, or a decline that
+    # only says its commands failed, is the runner's story and would be recorded as the PR's
+    down = sandbox_refused(stdout) or (stderr.strip()[-300:] if result is None and "could not start" in stderr.lower() else "")
+    if down:
+        return "failed", "", cli.tools.scrub(f"KIND={CANNOT_START} exit={code}: {down}", secret)[:400]
     out = (result or {}).get("structured_output")
     if result and not result.get("is_error") and isinstance(out, dict) and out.get("action") in ("fixed", "declined"):
         return str(out["action"]), str(out.get("summary") or "")[:2000], str(out.get("reason") or "")[:1000]
     detail = " ".join(str(x) for x in ((result or {}).get("subtype"), (result or {}).get("result"), stderr.strip()[-300:]) if x)
-    secret = os.environ.get(cli.CRED, "") or os.environ.get("ANTHROPIC_API_KEY", "")
     why = cli.tools.scrub(f"KIND={cli.failure_kind(categories, detail)} exit={code}: {detail or 'no result event'}", secret)
     return "failed", "", why[:400]
 
@@ -194,12 +270,16 @@ def main(argv_: list[str] | None = None) -> int:
                       conflicted=p.conflicted, mine=pr_files(root, p.base, p.head), regen=regen_text, context=context)
         if not (os.environ.get(cli.CRED) or os.environ.get("ANTHROPIC_API_KEY")):
             state, why = "failed", "KIND=no-credential: neither claude-code-oauth-token nor anthropic-api-key reached the fixer"
+        elif down := sandbox_check({k: v for k, v in env(dict(os.environ)).items() if k not in (cli.CRED, "ANTHROPIC_API_KEY")}):
+            state, why = "failed", f"KIND={CANNOT_START}: {down}"
         else:
             action, summary, reason = run_cli(args.model, commands, text, root)
             state, why = ("failed", reason) if action == "failed" else \
                 finish(root, p, action, summary, reason, Path(args.out), args.max_lines, regen_globs)
     except (subprocess.CalledProcessError, RuntimeError, ValueError, OSError) as e:
         state, why = "failed", f"{e} {(getattr(e, 'stderr', '') or '').strip()[-200:]}"
+    if why.startswith(f"KIND={CANNOT_START}"):   # the run page says it too: this is every heal's failure, not this PR's
+        print(f"::error::tier 3 cannot start on this runner: {why}".replace("\n", " ")[:700])
     output(state=state, why=why.replace("\n", " ")[:600])
     return 0
 
