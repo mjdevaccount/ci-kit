@@ -47,7 +47,9 @@ own result, `cannot-start` -- in the `healed` marker, in the `paged` marker's `w
 page's TITLE ("tier 3 CANNOT START", naming the runner, never "could not fix it"). 17 tier-3
 attempts on 15 PRs (2026-11-15..26) were each recorded `failed` and paged under the title every
 honest decline carries; nothing said they were one fault. One search lists the PRs that hit it:
-`repo:<owner>/<repo> in:comments "result=cannot-start"`.
+`repo:<owner>/<repo> in:comments "result=cannot-start"`. A cannot-start head keeps its once-per-head
+dispatch (no retry loop against a broken runner) and does NOT count toward `heal-claude-per-pr`:
+the next head, on a runner that works, still gets tier 3.
 
 WATCHED: a dispatch with no `healed` record at its head after `stale-minutes` (the heal job never
 ran, was cancelled, or died before its report) is paged by the next pass that sees the PR still red
@@ -198,7 +200,11 @@ def decide(pr: dict, bodies: list[str], cfg: Config, claude_left: int, now: dt.d
         return ("quiet" if paged else "capped"), False, f"{cfg.per_pr} heal(s) already spent on this PR"
     if mode == "conflict" and is_renovate(pr):
         return "rebase", False, "a Renovate branch: Renovate rebuilds it (rebase checkbox), never a merge pushed onto it"
-    used = sum(1 for _, _, c, _ in heals if c == "1")
+    # a head whose tier 3 could not START spent nothing of the PR's: two of them, then a runner that
+    # works, must not read as `tier 3 spent 2/2` for the life of the PR. Once per HEAD still holds
+    # (`mine`, above), so a runner that stays broken is not retried every pass.
+    down = {h for h, _, r in marks(bodies, _HEALED) if r == CANNOT_START}
+    used = sum(1 for h, _, c, _ in heals if c == "1" and h not in down)
     tier3 = cfg.claude_per_pass > 0 and used < cfg.claude_per_pr and not claude_blocked(pr)
     if tier3 and claude_left <= 0:
         return "defer", False, f"tier 3 allowed, but this pass's {cfg.claude_per_pass} tier-3 slot(s) are taken"

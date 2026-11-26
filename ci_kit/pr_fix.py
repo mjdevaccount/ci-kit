@@ -29,7 +29,10 @@ in a bubblewrap sandbox, and refuse to run one outside it. A runner that cannot 
 heal the same way, whatever the PR: 17 attempts on 15 PRs, 2026-11-15..26, each recorded and paged
 as that one PR's `failed`. So the runner is asked first (`sandbox_check`), the CLI's own words are
 read afterwards (`judge`), and either one is `why` = `KIND=cannot-start: ...`, which the record
-(ci_kit/pr_ladder.py outcome) names as the RUNNER's, never the PR's.
+(ci_kit/pr_ladder.py outcome) names as the RUNNER's, never the PR's. A CLI that is not installed
+(`exit=not-run`) is the same kind. What is NOT: a command that ran and went red, whatever it
+printed. The preflight runs in the Fix step, after the installs: moving it ahead of them needs a
+step of its own and a gate on each install step.
 """
 from __future__ import annotations
 
@@ -70,10 +73,19 @@ MAX_TURNS = 80
 # without; it failed and passed with the CLI's own Bash in all four container confinements tried --
 # and `sandbox_refused` reads what the CLI itself then said.
 CANNOT_START = "cannot-start"
+NOT_RUN = "not-run"            # ci_kit/review/claude.py run(): the exit "code" of a CLI that is not installed
 SANDBOX_TOOLS = ("bwrap", "socat")
 SANDBOX_PROBE = ("bwrap", "--unshare-user", "--unshare-pid", "--disable-userns", "--ro-bind", "/", "/", "--proc", "/proc",
                  "--dev", "/dev", "true")
-_SANDBOX_DOWN = re.compile(r"Sandbox is required but failed to initialize|^bwrap: ", re.M)
+# THE MEASURED REFUSAL, AND ONLY IT: the tool result BEGINS with the sandbox's own words, after the
+# `Exit code N` line the CLI puts first, because the command never ran to print anything before
+# them. A command that RAN and printed a `bwrap: ` line of its own further down (a repository's
+# sandbox selftest going red) is that command's failure, and the PR's.
+_SANDBOX_DOWN = re.compile(r"\A(?:Exit code \d+\n)?(?:bwrap: |Sandbox is required but failed to initialize)")
+# A command the permission rules DENIED (outside --allowedTools) never reached the sandbox: it says
+# nothing about the runner either way. Captured from the same CLI: the result event lists it under
+# `permission_denials` (by tool_use_id), and its tool result begins with this sentence.
+_DENIED = "Permission for this tool use was denied"
 FILE_TOOLS = ("Read", "Edit", "Write", "Grep", "Glob")
 DEFAULT_COMMANDS = ("uv run", "uv sync", "pytest", "python -m pytest", "ruff", "make", "npm test", "npm run",
                     "npx tsc", "npx vitest", "npx eslint", "dotnet build", "dotnet test", "dotnet format",
@@ -170,14 +182,19 @@ def _text(content: object) -> str:
 def sandbox_refused(stdout: str) -> str:
     """The CLI's own words when its sandbox ran NONE of the Bash commands it was asked for, else ''.
     One Bash result that is not such a refusal means the sandbox works: any other error is the
-    command's own, and a run that called no Bash at all says nothing either way."""
+    command's own, and a run that called no Bash at all says nothing either way. Neither does a
+    call the permission rules denied (`_DENIED`): it never reached the sandbox, so it is left out
+    of "every", and a run of denials alone is not a refusal."""
     bash: list[str] = []
     results: dict[str, tuple[bool, str]] = {}
+    denied: set[str] = set()
     for line in stdout.splitlines():
         try:
             ev = json.loads(line)
         except ValueError:
             continue
+        if isinstance(ev, dict) and ev.get("type") == "result" and isinstance(ev.get("permission_denials"), list):
+            denied |= {str(d.get("tool_use_id")) for d in ev["permission_denials"] if isinstance(d, dict)}
         content = (ev.get("message") or {}).get("content") if isinstance(ev, dict) and isinstance(ev.get("message"), dict) else None
         for b in content if isinstance(content, list) else []:
             if not isinstance(b, dict):
@@ -186,8 +203,8 @@ def sandbox_refused(stdout: str) -> str:
                 bash.append(str(b.get("id")))
             elif b.get("type") == "tool_result":
                 results[str(b.get("tool_use_id"))] = (bool(b.get("is_error")), _text(b.get("content")))
-    ran = [results[i] for i in bash if i in results]
-    if not ran or not all(err and _SANDBOX_DOWN.search(text) for err, text in ran):
+    ran = [results[i] for i in bash if i in results and i not in denied and not results[i][1].startswith(_DENIED)]
+    if not ran or not all(err and _SANDBOX_DOWN.match(text) for err, text in ran):
         return ""
     return f"the CLI's sandbox ran none of its {len(ran)} Bash command(s): {ran[0][1].strip()[:240]}"
 
@@ -198,7 +215,11 @@ def judge(stdout: str, stderr: str, code: int | str) -> tuple[str, str, str]:
     secret = os.environ.get(cli.CRED, "") or os.environ.get("ANTHROPIC_API_KEY", "")
     # before the model's own answer: a fix it could not run one command to prove, or a decline that
     # only says its commands failed, is the runner's story and would be recorded as the PR's
-    down = sandbox_refused(stdout) or (stderr.strip()[-300:] if result is None and "could not start" in stderr.lower() else "")
+    if code == NOT_RUN:        # cli.run: the binary is not on this runner (the install step failed). No PR caused it.
+        down = f"the Claude Code CLI is not installed on this runner (it never ran): {stderr.strip()[-200:]}"
+    else:
+        down = sandbox_refused(stdout) or (
+            stderr.strip()[-300:] if result is None and "could not start" in stderr.lower() else "")
     if down:
         return "failed", "", cli.tools.scrub(f"KIND={CANNOT_START} exit={code}: {down}", secret)[:400]
     out = (result or {}).get("structured_output")

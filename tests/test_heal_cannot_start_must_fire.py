@@ -17,10 +17,12 @@ runner's base image under Docker's default seccomp profile, then with bwrap and 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 import pytest
 from conftest import git, write
+from test_heal_ladder_must_fire import NOW, ON, heal_mark, pr
 
 from ci_kit import pr_fix, pr_ladder
 
@@ -183,6 +185,146 @@ def test_the_probe_is_never_handed_the_credential(monkeypatch, capsys, new_repo,
     monkeypatch.setattr(pr_fix, "sandbox_check", lambda environ: seen.append(environ) or "no")
     pr_fix.main(["run", "--state-file", str(state), "--out", str(tmp_path / "heal"), "--model", "m"])
     assert seen and "CLAUDE_CODE_OAUTH_TOKEN" not in seen[0] and "ANTHROPIC_API_KEY" not in seen[0]
+
+
+# ── review (cab3410): what the first cut got wrong ────────────────────────────────────────────
+# A command that RAN and went red, in a repository whose own target wraps bwrap. Its output has a
+# line that starts `bwrap: ` -- after the lines the command itself printed first.
+RED_SELFTEST = NL.join(("Exit code 2", "sandbox-selftest: starting",
+                        "bwrap: Can't find source path /nope/rootfs: No such file or directory",
+                        "make: *** [Makefile:4: sandbox-test] Error 1"))
+
+
+def test_a_red_command_that_printed_its_own_bwrap_line_is_the_prs_must_not_fire() -> None:
+    red = stream(use("t1"), res("t1", RED_SELFTEST, True), use("t2"), res("t2", RED_SELFTEST, True))
+    assert pr_fix.sandbox_refused(red) == ""
+    for said in ("declined", "fixed"):         # the model's own answer stands: this is one PR's red
+        assert pr_fix.judge(red + NL + json.dumps(answer(said)), "", 0)[0] == said
+    # the other measured sentence, quoted by a command's own log, is not the refusal either
+    quoted = NL.join(("Exit code 1", "FAILED tests/test_sandbox.py::test_message", "Sandbox is required but failed to initialize"))
+    assert pr_fix.sandbox_refused(stream(use("t1"), res("t1", quoted, True))) == ""
+
+
+def test_the_refusal_is_the_body_beginning_with_the_sandboxs_words_must_fire() -> None:
+    for text in (NO_USERNS, f"Exit code 1{NL}{NO_USERNS}", f"Exit code 137{NL}bwrap: pivot_root: Operation not permitted",
+                 NO_SOCAT, f"Exit code 1{NL}{NO_SOCAT}"):
+        assert "ran none of its 1 Bash command(s)" in pr_fix.sandbox_refused(stream(use("t1"), res("t1", text, True))), text
+
+
+def test_the_probe_runs_bounded_in_the_scrubbed_env_with_no_credential(monkeypatch, capsys, new_repo, tmp_path) -> None:
+    """Through main() and the REAL sandbox_check: only `which` and `run` are stood in."""
+    seen: list[dict] = []
+    paths: list[object] = []
+    real = pr_fix.sandbox_check
+
+    def which(tool, path=None):
+        paths.append(path)
+        return f"/usr/bin/{tool}"
+
+    def run(argv, **kw):
+        seen.append({"argv": argv, **kw})
+        return _Done(1, err=NO_USERNS)
+    r, state = _prepared(new_repo, tmp_path)
+    monkeypatch.chdir(r)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "not-a-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "not-a-key")
+    monkeypatch.setattr(pr_fix, "sandbox_check", lambda environ: real(environ, which, run))
+    monkeypatch.setattr(pr_fix, "run_cli", lambda *a: (_ for _ in ()).throw(AssertionError("the CLI ran")))
+    assert pr_fix.main(["run", "--state-file", str(state), "--out", str(tmp_path / "heal"), "--model", "m"]) == 0
+    assert "why=KIND=cannot-start: bubblewrap cannot build a sandbox" in capsys.readouterr().out
+    (call,) = seen
+    assert call["argv"] == list(pr_fix.SANDBOX_PROBE)
+    assert call["timeout"] == 30                       # a probe that hangs must not hold the sealed runner
+    env = call["env"]                                  # the env the CLI's commands would get, never this process's
+    assert env["PATH"] == os.environ["PATH"] and paths == [env["PATH"]] * len(pr_fix.SANDBOX_TOOLS)
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env and "ANTHROPIC_API_KEY" not in env
+    assert not [k for k in env if pr_fix.SECRETISH.search(k)], sorted(env)
+    assert "not-a-token" not in env.values() and "not-a-key" not in env.values()
+
+
+def test_a_cli_that_is_not_installed_is_the_runners_must_fire() -> None:
+    state, _, why = pr_fix.judge("", "FileNotFoundError: [Errno 2] No such file or directory: 'claude'", pr_fix.NOT_RUN)
+    assert state == "failed" and why.startswith("KIND=cannot-start exit=not-run:")
+    assert "CLI is not installed on this runner" in why and "FileNotFoundError" in why
+    assert pr_ladder.outcome(True, "eligible", "nothing", "", "failed", why, "", "", True)[1] == "cannot-start"
+
+
+def test_a_cli_that_ran_and_died_is_not_called_uninstalled_must_not_fire() -> None:
+    for code in ("timeout", 1, 137):
+        state, _, why = pr_fix.judge("", "timed out after 2400s", code)
+        assert state == "failed" and not why.startswith("KIND=cannot-start"), why
+
+
+def _down(head: str) -> list[str]:
+    return [heal_mark(head), pr_ladder.HEALED.format(head=head, tier="claude", result="cannot-start")]
+
+
+def test_a_cannot_start_does_not_spend_the_prs_tier_3_must_fire() -> None:
+    """Two heads met a runner that could not start tier 3; the runner is fixed; the PR moves again."""
+    bodies = [*_down("c" * 40), *_down("d" * 40)]
+    action, claude, why = pr_ladder.decide(pr(), bodies, ON, 1, NOW)
+    assert (action, claude, why) == ("dispatch", True, "tiers 1-3")
+    # ... and one honest tier-3 attempt beside them is one spent, not three
+    honest = [heal_mark("e" * 40), pr_ladder.HEALED.format(head="e" * 40, tier="claude", result="declined")]
+    assert pr_ladder.decide(pr(), [*bodies, *honest], ON, 1, NOW)[:2] == ("dispatch", True)
+
+
+def test_a_cannot_start_head_is_not_retried_and_real_attempts_still_count_must_not_fire() -> None:
+    # the SAME head stays quiet: a runner that is still broken is not re-dispatched every pass
+    action, claude, why = pr_ladder.decide(pr(head="c" * 40), _down("c" * 40), ON, 1, NOW)
+    assert (action, claude) == ("quiet", False) and "already dispatched at this head" in why
+    # attempts that RAN still spend the cap, whatever they ended as
+    for result in ("failed", "declined", "refused", "pushed"):
+        ran = [x for h in ("c" * 40, "d" * 40) for x in (heal_mark(h), pr_ladder.HEALED.format(head=h, tier="claude", result=result))]
+        action, claude, why = pr_ladder.decide(pr(), ran, ON, 1, NOW)
+        assert (action, claude) == ("dispatch", False) and "spent 2/2" in why, result
+    # a dispatch with no record yet (in flight, or died) is counted: only a RECORDED cannot-start is forgiven
+    assert pr_ladder.decide(pr(), [heal_mark("c" * 40), heal_mark("d" * 40)], ON, 1, NOW)[:2] == ("dispatch", False)
+    # the total cap is the push-loop brake and is not this rule's: six heads are six heads
+    six = [x for c in "cdef01" for x in _down(c * 40)]
+    assert pr_ladder.decide(pr(), six, ON, 1, NOW)[0] == "capped"
+
+
+# A command outside --allowedTools, as the pinned CLI (2.1.329) reports it under the env scrub with
+# no approval surface: captured beside two sandbox refusals in one session (scripted loopback API).
+DENIED = ("Permission for this tool use was denied. It requires approval, and this session has no approval surface "
+          "\u2014 nobody can answer a permission prompt here \u2014 so it was denied automatically. The action was NOT "
+          "performed; do not claim it succeeded, and do not retry it: this action, and anything else that requires "
+          "approval, will be denied the same way for the rest of this session. Tell the user what was blocked and why "
+          "you needed it, then continue with the parts of the task that do not require approval. What required "
+          "approval: This command requires approval")
+REFUSED = f"Exit code 1{NL}{NO_USERNS}"
+
+
+def denials(*ids: str, action: str = "declined") -> dict:
+    return {**answer(action), "permission_denials": [{"tool_name": "Bash", "tool_use_id": i,
+                                                      "tool_input": {"command": "curl -s http://127.0.0.1:9/x"}} for i in ids]}
+
+
+def test_a_denied_command_beside_refusals_is_still_cannot_start_must_fire() -> None:
+    captured = stream(use("t1"), res("t1", DENIED, True), use("t2"), res("t2", REFUSED, True),
+                      use("t3"), res("t3", REFUSED, True), denials("t1"))
+    assert "ran none of its 2 Bash command(s)" in pr_fix.sandbox_refused(captured)
+    assert pr_fix.judge(captured, "", 0)[2].startswith("KIND=cannot-start exit=0:")
+    # each half of the capture is enough alone: the result event's list (a denial reworded by a later
+    # CLI), and the sentence (a session that timed out before its result event)
+    by_id = stream(use("t1"), res("t1", "This command requires approval", True), use("t2"), res("t2", REFUSED, True), denials("t1"))
+    assert "ran none of its 1 Bash command(s)" in pr_fix.sandbox_refused(by_id)
+    by_text = stream(use("t1"), res("t1", DENIED, True), use("t2"), res("t2", REFUSED, True))
+    assert "ran none of its 1 Bash command(s)" in pr_fix.sandbox_refused(by_text)
+
+
+def test_denials_alone_or_beside_a_command_that_ran_say_nothing_must_not_fire() -> None:
+    alone = stream(use("t1"), res("t1", DENIED, True), use("t2"), res("t2", DENIED, True), denials("t1", "t2"))
+    assert pr_fix.sandbox_refused(alone) == "" and pr_fix.judge(alone, "", 0)[0] == "declined"
+    ran = stream(use("t1"), res("t1", DENIED, True), use("t2"), res("t2", REFUSED, True),
+                 use("t3"), res("t3", "3 passed", False), denials("t1"))
+    assert pr_fix.sandbox_refused(ran) == ""
+    # a denial the list names for ANOTHER call does not excuse this one's red
+    other = stream(use("t1"), res("t1", f"Exit code 1{NL}FAILED tests/test_x.py::test_y", True), use("t2"), res("t2", REFUSED, True),
+                   denials("t9"))
+    assert pr_fix.sandbox_refused(other) == ""
 
 
 # ── the record and the page ───────────────────────────────────────────────────────────────────
