@@ -324,3 +324,98 @@ def test_pending_age_is_the_oldest_missing_release() -> None:
     assert pin_drift.pending_age_h("v1.0.0", tags, dates, 24, now) == 5
     assert pin_drift.pending_age_h("v1.0.0", tags, dates, 4, now) is None      # v1.2.0 past grace
     assert pin_drift.pending_age_h("v1.0.0", tags, {"v1.2.0": dates["v1.2.0"]}, 24, now) is None
+
+
+# --- a remote read is tried REMOTE_TRIES times, each bounded (v1.47.0) ---------------------------
+class _Answer:
+    def __init__(self, returncode: int, stdout: bytes = b"", stderr: bytes = b"") -> None:
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def _scripted(*steps):
+    """A stand-in for subprocess.run that plays `steps` in order and records every call."""
+    calls: list[dict] = []
+    todo = list(steps)
+
+    def run(argv, **kw):
+        calls.append({"argv": argv, **kw})
+        step = todo.pop(0)
+        if isinstance(step, BaseException):
+            raise step
+        return step
+    return run, calls
+
+
+_STALL = subprocess.TimeoutExpired(cmd="git", timeout=pin_drift.REMOTE_TRY_S)
+_TAGS = b"aaaa\trefs/tags/v1.0.0\nbbbb\trefs/tags/v1.1.0\n"
+
+
+def test_a_stalled_read_is_tried_again_and_the_recovery_is_seen_must_fire(capsys) -> None:
+    run, calls = _scripted(_STALL, _Answer(0, _TAGS))
+    r, why = pin_drift.read_remote(["git", "ls-remote", "x"], "git ls-remote x", run)
+    assert r is not None and r.stdout == _TAGS and why == ""
+    assert len(calls) == 2 and all(c["timeout"] == pin_drift.REMOTE_TRY_S for c in calls)
+    io = capsys.readouterr()
+    assert "try 1/3 failed (no answer in 40s)" in io.err
+    assert io.out.startswith("::warning::ci-pin-drift: git ls-remote x answered on try 2/3")
+
+
+def test_a_read_that_answers_first_time_is_one_call_and_silent_must_not_fire(capsys) -> None:
+    run, calls = _scripted(_Answer(0, _TAGS))
+    r, _ = pin_drift.read_remote(["git", "ls-remote", "x"], "git ls-remote x", run)
+    assert r is not None and len(calls) == 1
+    io = capsys.readouterr()
+    assert io.out == "" and io.err == ""
+
+
+def test_three_failures_are_none_with_the_last_reason_must_fire(capsys) -> None:
+    run, calls = _scripted(_STALL, _Answer(128, stderr=b"fatal: early\n"), _Answer(128, stderr=b"x\nfatal: last\n"))
+    r, why = pin_drift.read_remote(["git", "ls-remote", "x"], "git ls-remote x", run)
+    assert r is None and why == "fatal: last" and len(calls) == pin_drift.REMOTE_TRIES
+    err = capsys.readouterr().err
+    assert "try 2/3 failed (fatal: early)" in err and "try 3/3 failed (fatal: last)" in err
+
+
+def test_the_tries_fit_inside_the_old_single_limit() -> None:
+    # the fix is a faster failure and a second look, never a longer wait
+    assert pin_drift.REMOTE_TRIES * pin_drift.REMOTE_TRY_S <= 120 and pin_drift.REMOTE_TRIES >= 2
+
+
+def test_a_stall_then_an_answer_is_still_a_verdict_must_not_fire(new_repo, tmp_path: Path, monkeypatch) -> None:
+    # through release_tags against a REAL remote: only the first call is made to stall
+    remote = _remote(new_repo, "v1.0.0", "v1.1.0")
+    real, seen = subprocess.run, []
+
+    def run(argv, **kw):
+        seen.append(argv)
+        if len(seen) == 1:
+            raise _STALL
+        return real(argv, **kw)
+    monkeypatch.setattr(pin_drift.subprocess, "run", run)
+    assert pin_drift.release_tags(str(remote)) == ["v1.0.0", "v1.1.0"]
+    assert len(seen) == 2
+
+
+def test_a_missing_git_is_not_retried(monkeypatch, capsys) -> None:
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        raise FileNotFoundError("git")
+    monkeypatch.setattr(pin_drift.subprocess, "run", run)
+    try:
+        pin_drift.release_tags("anything")
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("a git that is not there must be exit 2")
+    assert len(calls) == 1 and "could not run git ls-remote" in capsys.readouterr().err
+
+
+def test_the_ssh_route_ends_a_stalled_connection() -> None:
+    # read from the script itself (the route tests need bash + ssh-agent): the options a stalled
+    # peer is cut by must stay on the one command every routed git call uses
+    text = (Path(pin_drift.__file__).parent / "git_ssh.sh").read_text(encoding="utf-8")
+    (line,) = [ln for ln in text.splitlines() if ln.strip().startswith('export GIT_SSH_COMMAND="ssh ')]
+    for opt in ("ConnectTimeout=20", "ServerAliveInterval=15", "ServerAliveCountMax=3", "BatchMode=yes"):
+        assert f"-o {opt}" in line, opt
