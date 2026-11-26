@@ -203,7 +203,7 @@ def sandbox_refused(stdout: str) -> str:
                 bash.append(str(b.get("id")))
             elif b.get("type") == "tool_result":
                 results[str(b.get("tool_use_id"))] = (bool(b.get("is_error")), _text(b.get("content")))
-    ran = [results[i] for i in bash if i in results and i not in denied and not results[i][1].startswith(_DENIED)]
+    ran = [results[i] for i in bash if i in results and i not in denied and not (results[i][0] and results[i][1].startswith(_DENIED))]
     if not ran or not all(err and _SANDBOX_DOWN.match(text) for err, text in ran):
         return ""
     return f"the CLI's sandbox ran none of its {len(ran)} Bash command(s): {ran[0][1].strip()[:240]}"

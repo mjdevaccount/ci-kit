@@ -229,6 +229,7 @@ def test_the_probe_runs_bounded_in_the_scrubbed_env_with_no_credential(monkeypat
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "not-a-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "not-a-key")
+    monkeypatch.setenv("GH_TOKEN", "not-a-gh-token")   # the scrub must be proven here, not by a variable CI happens to export
     monkeypatch.setattr(pr_fix, "sandbox_check", lambda environ: real(environ, which, run))
     monkeypatch.setattr(pr_fix, "run_cli", lambda *a: (_ for _ in ()).throw(AssertionError("the CLI ran")))
     assert pr_fix.main(["run", "--state-file", str(state), "--out", str(tmp_path / "heal"), "--model", "m"]) == 0
@@ -241,6 +242,7 @@ def test_the_probe_runs_bounded_in_the_scrubbed_env_with_no_credential(monkeypat
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env and "ANTHROPIC_API_KEY" not in env
     assert not [k for k in env if pr_fix.SECRETISH.search(k)], sorted(env)
     assert "not-a-token" not in env.values() and "not-a-key" not in env.values()
+    assert "GH_TOKEN" not in env and "not-a-gh-token" not in env.values()
 
 
 def test_a_cli_that_is_not_installed_is_the_runners_must_fire() -> None:
