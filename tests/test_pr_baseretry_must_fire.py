@@ -362,7 +362,7 @@ def test_a_red_pr_with_no_check_run_at_its_head_is_held(monkeypatch: pytest.Monk
 
 def test_the_cap_reaches_the_options_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[upd.Options] = []
-    monkeypatch.setattr(upd, "run", lambda repo, s, r, opts, h=None: seen.append(opts) or 0)
+    monkeypatch.setattr(upd, "run", lambda repo, s, r, opts, *rest: seen.append(opts) or 0)
     for var in ("CI_KIT_BASE_RETRY_CAP", "GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY"):
         monkeypatch.delenv(var, raising=False)
     assert upd.main(["--repo", "o/r"]) == 0 and seen[-1].base_retry_cap == 0
@@ -456,7 +456,7 @@ def test_a_bot_pr_whose_red_run_time_is_unknown_is_held(monkeypatch: pytest.Monk
 
 def test_bot_authors_reach_the_options_exactly(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[upd.Options] = []
-    monkeypatch.setattr(upd, "run", lambda repo, s, r, opts, h=None: seen.append(opts) or 0)
+    monkeypatch.setattr(upd, "run", lambda repo, s, r, opts, *rest: seen.append(opts) or 0)
     for var in ("GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "CI_KIT_BASE_RETRY_BOT_AUTHORS"):
         monkeypatch.delenv(var, raising=False)
     assert upd.main(["--repo", "o/r"]) == 0 and seen[-1].base_retry_bots == ()
@@ -522,7 +522,7 @@ def test_reads_are_bounded_per_pass_lowest_number_first_must_fire(monkeypatch: p
 def test_bot_authors_that_cannot_act_warn_and_a_bad_bound_refuses(monkeypatch: pytest.MonkeyPatch,
                                                                    capsys: pytest.CaptureFixture[str]) -> None:
     seen: list[upd.Options] = []
-    monkeypatch.setattr(upd, "run", lambda repo, s, r, opts, h=None: seen.append(opts) or 0)
+    monkeypatch.setattr(upd, "run", lambda repo, s, r, opts, *rest: seen.append(opts) or 0)
     for var in ("GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "CI_KIT_BASE_RETRY_CAP", "CI_KIT_BASE_RETRY_MAX_PER_PASS"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("CI_KIT_BASE_RETRY_BOT_AUTHORS", "renovate")
