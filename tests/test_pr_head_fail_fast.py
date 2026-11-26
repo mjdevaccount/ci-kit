@@ -509,3 +509,102 @@ def test_r6_moved_reads_only_a_run_at_another_head() -> None:
     assert pr_sched.moved("o/r", "b1", SHA9, gh(SHA9, None)) is False         # a run that names no head: none either
     assert pr_sched.moved("o/r", "b1", SHA9, gh(SHA9, "e" * 40)) is True
 
+
+
+# ── second review of v1.45.0 (2026-11-26) ─────────────────────────────────────────────────────
+OLD9 = "a" * 40   # #3209's PREVIOUS head: its review run was cancelled by the push and has not ended
+# what that cancelled run reads as while it is still active
+CANCELLED = [_job("reviewer / review", "completed", conclusion="success"),
+             _job("reviewer / model review", "completed", conclusion="cancelled")]
+YOUNG = [_job("reviewer / review", "completed", conclusion="success"),
+         _job("reviewer / model review", "in_progress", started=NOW - 60)]
+OWED = [_job("reviewer / review", "completed", conclusion="success"),
+        _job("reviewer / model review", "completed", conclusion="cancelled"), _job("reviewer / verdict", "in_progress")]
+RECORDED = [_job("reviewer / review", "completed", conclusion="success"),
+            _job("reviewer / model review", "completed", conclusion="success"),
+            _job("reviewer / verdict", "completed", conclusion="success")]
+
+
+def _two_heads(old_jobs: list[dict], now_jobs: list[dict], branch: str = "b3209") -> Gh:
+    """Two ACTIVE review-gate runs on one branch: run 8 at the previous head (created first), run 9 at SHA9."""
+    runs = [{"id": 8, "event": "pull_request", "head_branch": branch, "head_sha": OLD9, "status": "in_progress",
+             "created_at": _iso(NOW - 900)},
+            {"id": 9, "event": "pull_request", "head_branch": branch, "head_sha": SHA9, "status": "in_progress",
+             "created_at": _iso(NOW - 300)}]
+    return Gh({"repos/o/r/actions/runs?status=queued": {"workflow_runs": []},
+               "repos/o/r/actions/runs?status=in_progress": {"workflow_runs": runs},
+               "repos/o/r/actions/runs/8/jobs": {"jobs": old_jobs}, "repos/o/r/actions/runs/9/jobs": {"jobs": now_jobs}})
+
+
+def test_review2_an_older_heads_active_run_is_not_read_for_this_head() -> None:
+    # young: the old head's CANCELLED model job is not this head's finished review
+    assert pr_sched.review_young("o/r", "b3209", _two_heads(CANCELLED, YOUNG), NOW, 180, SHA9) == (True, "")
+    assert pr_sched.review_young("o/r", "b3209", _two_heads(CANCELLED, YOUNG), NOW, 180)[0] is False   # unfiltered: the bug
+    # and a review at THIS head past the bound is still not young
+    assert pr_sched.review_young("o/r", "b3209", _two_heads(CANCELLED, DONE), NOW, 180, SHA9)[0] is False
+    # settled: the old head's run owes this head nothing; this head's own verdict is what counts
+    assert pr_sched.review_settled("o/r", "b3209", _two_heads(OWED, RECORDED), SHA9) is True
+    assert pr_sched.review_settled("o/r", "b3209", _two_heads(OWED, RECORDED)) is False               # unfiltered
+    assert pr_sched.review_settled("o/r", "b3209", _two_heads(RECORDED, YOUNG), SHA9) is False        # still owed HERE
+    # a run that names no head is read, as before
+    assert pr_sched.review_settled("o/r", "b1", Gh(_review("b1", YOUNG)), SHA9) is False
+
+
+def test_review2_the_pass_reads_the_review_at_the_heads_own_sha_must_fire(monkeypatch) -> None:
+    """Through the real planner and the real reads: the previous head's cancelled run is still
+    active, this head's review is 60 s into its model job -> fail-fast fires."""
+    head = _pr(3209, sha=SHA9, rollup=RUNNING)
+    prs = [head, _pr(3210, state="BLOCKED", rollup=RUNNING)]
+    monkeypatch.setattr(upd, "_gh_read", _two_heads(CANCELLED, YOUNG))
+    monkeypatch.setattr(upd, "reviewing", lambda *a: True)
+    monkeypatch.setattr(upd.time, "time", lambda: NOW)
+    summary: list[str] = []
+    q = upd._train_plan(prs, prs, summary, OPTS)
+    assert upd._head_first("o/r", prs, q, OPTS, summary) == 3209 and q.update[0] is head
+    assert any("head fail-fast" in s for s in summary)
+
+
+def test_review2_the_wait_is_not_ended_or_stretched_by_the_previous_heads_run(monkeypatch) -> None:
+    """The tail's wait with the real reads: run 8 (previous head, still cancelling, owes a verdict
+    it will never record) beside run 9 (this head, verdict on record). Not a push, and settled."""
+    clock, puts, tail = Clock(), [], []
+    head = _pr(3209, sha=SHA9, rollup=RUNNING)
+    monkeypatch.setattr(upd.time, "time", clock.time)
+    monkeypatch.setattr(upd.time, "sleep", clock.sleep)
+    monkeypatch.setattr(upd, "_gh_read", _two_heads(OWED, RECORDED))
+    monkeypatch.setattr(upd, "_read_prs", lambda repo, summary: [head])
+    monkeypatch.setattr(upd, "_put", lambda repo, p: (puts.append(p["headRefOid"]), (upd.Outcome("updated"), ""))[1])
+    upd._await_head("o/r", head, SKIP, WAIT, tail)
+    assert puts == [SHA9] and clock.sleeps == [], tail
+
+
+def test_review2_moved_is_a_run_newer_than_this_heads_never_an_older_one() -> None:
+    def gh(*runs: tuple[str, float | None]) -> Gh:
+        rows = [{"id": i, "head_sha": s, **({"created_at": _iso(t)} if t else {})} for i, (s, t) in enumerate(runs)]
+        return Gh({"repos/o/r/actions/runs?status=queued": {"workflow_runs": []},
+                   "repos/o/r/actions/runs?status=in_progress": {"workflow_runs": rows}})
+
+    assert pr_sched.moved("o/r", "b1", SHA9, gh((SHA9, NOW - 300), (OLD9, NOW - 900))) is False   # the previous head's run
+    assert pr_sched.moved("o/r", "b1", SHA9, gh((SHA9, NOW - 300), ("e" * 40, NOW - 30))) is True  # a push
+    assert pr_sched.moved("o/r", "b1", SHA9, gh((SHA9, NOW - 300), ("e" * 40, None))) is True      # age unread: a push
+    assert pr_sched.moved("o/r", "b1", SHA9, gh(("e" * 40, NOW - 30))) is True                     # nothing left at this head
+
+
+def test_review2_the_wait_is_clamped_to_300_s_with_a_warning(monkeypatch, capsys) -> None:
+    for raw, want in (("300", 300.0), ("301", 300.0), ("900", 300.0), ("inf", 300.0), ("240", 240.0)):
+        monkeypatch.setenv("CI_KIT_HEAD_VERDICT_WAIT_S", raw)
+        assert upd.head_wait_s(True) == want
+    out = capsys.readouterr().out
+    assert out.count("::warning::head-verdict-wait-seconds") == 3 and "900 is over the 300 s" in out
+    monkeypatch.delenv("CI_KIT_HEAD_VERDICT_WAIT_S")
+    assert upd.head_wait_s(True) == upd.HEAD_WAIT_S == 240.0                   # the default is under the clamp
+    root = pathlib.Path(__file__).resolve().parent.parent
+    wf = yaml.safe_load((root / ".github/workflows/pr-autoupdate.yml").read_text(encoding="utf-8"))
+    inputs = (wf.get("on") or wf[True])["workflow_call"]["inputs"]
+    # the clamp leaves the pass its own time inside the job, and the input says so
+    assert wf["jobs"]["update"]["timeout-minutes"] * 60 - upd.HEAD_WAIT_MAX_S >= 300
+    assert "CLAMPED to 300" in inputs["head-verdict-wait-seconds"]["description"]
+    # what the wait holds is said where a consumer sets it: the verdict job shares the pool
+    for name in ("head-verdict-wait-seconds", "scarce-pools", "head-fail-fast"):
+        assert "verdict" in inputs[name]["description"] and "pool" in inputs[name]["description"], name
+    assert "blocks its own verdict" in (root / "README.md").read_text(encoding="utf-8")

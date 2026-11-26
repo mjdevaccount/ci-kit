@@ -174,12 +174,23 @@ def _deferred(j: dict) -> bool:
         for s in j.get("steps") or [])
 
 
-def review_settled(repo: str, branch: str, read: Gh) -> bool:
+def _at(run: dict, sha: str) -> bool:
+    """This run is at head `sha` -- or cannot be told apart from it ('' = every run, a run that
+    names no head). A run still ACTIVE at an OLDER head (a push cancelled it and it has not ended)
+    says nothing about the head a pass is deciding for: its cancelled model job reads as a finished
+    review, its missing verdict as one still owed (second review of v1.45.0, 2026-11-26)."""
+    return not sha or str(run.get("head_sha") or sha) == sha
+
+
+def review_settled(repo: str, branch: str, read: Gh, sha: str = "") -> bool:
     """No review run on this branch still owes a verdict: each active run of the review gate has
     finished `record verdict` (or parked) -- since v1.35.0 its `verdict` job, which holds both.
     An update now cancels only the gate's tail, and the next
-    run can carry -- the 03:58Z case: head #3073 BEHIND, verdict recorded, update held for the tail."""
+    run can carry -- the 03:58Z case: head #3073 BEHIND, verdict recorded, update held for the tail.
+    With `sha` (the PR's head), only the runs AT that head are read (`_at`)."""
     for run in active_runs(repo, read, branch):
+        if not _at(run, sha):
+            continue
         names = {_tail(j.get("name")): j for j in run_jobs(repo, int(run["id"]), read)}
         if PRE_JOB not in names:
             continue  # not the review gate
@@ -191,20 +202,30 @@ def review_settled(repo: str, branch: str, read: Gh) -> bool:
 
 
 def moved(repo: str, branch: str, sha: str, read: Gh) -> bool:
-    """An active run on this branch is at ANOTHER head than `sha`: the branch was pushed. No active
-    run, or a run that does not say its head, is not evidence of a push."""
-    return any(str(r.get("head_sha") or sha) != sha for r in active_runs(repo, read, branch))
+    """An active run on this branch is at ANOTHER head than `sha` and is not OLDER than the runs at
+    `sha`: the branch was pushed. No active run, or a run that does not say its head, is not
+    evidence of a push -- and neither is a run created BEFORE the runs at `sha` (the previous
+    head's run, cancelled by the push that made `sha` and not ended yet: reading it as a push ended
+    the wait on its first poll). A run whose age cannot be read counts as a push: the wait ending
+    early costs one runner wait, a head updated over a newer push costs a full run."""
+    runs = active_runs(repo, read, branch)
+    floor = max((str(r.get("created_at") or "") for r in runs if str(r.get("head_sha") or sha) == sha), default="")
+    return any(str(r.get("head_sha") or sha) != sha and (not r.get("created_at") or str(r["created_at"]) >= floor)
+               for r in runs)
 
 
-def review_young(repo: str, branch: str, read: Gh, now: float, young_s: float) -> tuple[bool, str]:
+def review_young(repo: str, branch: str, read: Gh, now: float, young_s: float, sha: str = "") -> tuple[bool, str]:
     """(young?, why not) for the review still owed on this branch (v1.45.0, HEAD FAIL-FAST). Young =
     no active review run has spent `young_s` in its MODEL job: an update now throws away at most
     that much review, the bound the scheduler already accepts when it parks a non-head for the head
     (`preempt_after_s`, measured in ci_kit/pr_queue.py: a full review p50 4.8 min, so 3). NOT young:
     the model job has run `young_s` or longer, its start cannot be read, or it has finished and the
     verdict is about to be recorded -- then the review is worth more than the minutes its CI burns
-    at the stale head, and the head waits for the verdict as before (`review_settled`)."""
+    at the stale head, and the head waits for the verdict as before (`review_settled`).
+    With `sha` (the PR's head), only the runs AT that head are read (`_at`)."""
     for run in active_runs(repo, read, branch):
+        if not _at(run, sha):
+            continue
         names = {_tail(j.get("name")): j for j in run_jobs(repo, int(run["id"]), read)}
         if PRE_JOB not in names:
             continue  # not the review gate

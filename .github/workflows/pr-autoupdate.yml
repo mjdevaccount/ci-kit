@@ -60,7 +60,14 @@
 # next pass not startable before 06:26:04Z). The job holds its runner and the `pr-autoupdate`
 # concurrency group for that long; a pending pass runs right after. A pass that hands on a relock
 # or a heal does NOT wait (a job's outputs reach the job that needs them only when this job ends),
-# and a new head pushed during the wait ends it at once.
+# and a new head pushed during the wait ends it at once. The wait is CLAMPED to 300 s (this job is
+# `timeout-minutes: 10`; a longer wait is a job killed mid-wait, not a longer wait).
+# WHAT THE WAIT HOLDS: this job's runner (`secure-runner`), for up to the wait. The review gate's
+# `verdict` job -- the one the wait is waiting FOR -- runs on that same pool (ci-kit
+# review-gate.yml). A caller whose secure pool gives its repo ONE runner blocks its own verdict
+# for the whole wait and then updates nothing: with max_runners 1 there, set
+# `head-verdict-wait-seconds: 0` (fail-fast itself holds no runner) or give the pool a second
+# runner. Nothing here refuses that configuration.
 # A NEW HEAD ON AN ARMED PR STARTS NO PASS unless the caller lists `synchronize` beside
 # `auto_merge_enabled` above (a consumer, 2026-11-26: a fix push at 04:43:08Z, the next pass at
 # 04:53:46Z, the branch updated by hand in between). Guard it to armed same-repo PRs, so an
@@ -182,7 +189,10 @@ on:
         description: >-
           the PR scheduler (ci_kit/pr_sched.py): a JSON object of the caller's scarce runner pool
           labels -> capacity, e.g. {"home-sealed": 1, "home-heavy": 1}. '' = off (parked work is
-          still re-run). Needs the `token` PAT to hold Actions: Read and write
+          still re-run). Needs the `token` PAT to hold Actions: Read and write. With it, head-fail-fast's
+          verdict wait (head-verdict-wait-seconds) holds THIS job's secure-runner for up to the wait while the
+          review gate's `verdict` job needs a runner from the same pool: a pool that gives this repo ONE
+          runner blocks its own verdict for the whole wait -- set head-verdict-wait-seconds to 0 there
         type: string
         default: ""
       preempt-after-minutes:
@@ -284,13 +294,19 @@ on:
         description: >-
           HEAD FAIL-FAST (v1.45.0, ci_kit/pr_sched.py review_young): with scarce-pools, a queue head BEHIND
           the base is updated at once while its review has spent under preempt-after-minutes of model time,
-          so its one full CI run is at a head that can merge; false = wait for the verdict, as before v1.45.0
+          so its one full CI run is at a head that can merge; false = wait for the verdict, as before v1.45.0.
+          Past that bound the pass waits for the verdict on its own runner (head-verdict-wait-seconds), which
+          the review gate's `verdict` job shares: see that input before enabling this on a one-runner secure pool
         type: boolean
         default: true
       head-verdict-wait-seconds:
         description: >-
           with head-fail-fast: seconds the pass's tail waits for a BEHIND queue head past the young bound to
-          record its verdict, then updates it in the same job (ci_kit/pr_autoupdate.py _await_head); 0 = off
+          record its verdict, then updates it in the same job (ci_kit/pr_autoupdate.py _await_head); 0 = off.
+          CLAMPED to 300 (a WARNING says so): this job is timeout-minutes 10, a longer wait is a killed job.
+          The wait HOLDS this job's secure-runner, and the `verdict` job it waits for runs on the same pool
+          (ci-kit review-gate.yml): where that pool gives the repo ONE runner the wait blocks its own verdict
+          for its whole length and updates nothing -- set 0 there, or give the pool a second runner
         type: number
         default: 240
       update-held:

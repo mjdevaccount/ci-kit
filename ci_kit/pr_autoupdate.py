@@ -68,6 +68,7 @@ LABEL = "conflict"
 
 HEAD_WAIT_S = 240.0  # the tail's wait for the head's verdict: one verdict job on a pool with a 200 s p90 wait
 HEAD_POLL_S = 15.0  # between two reads of that review
+HEAD_WAIT_MAX_S = 300.0  # the wait's ceiling: the job is timeout-minutes 10 and the pass itself has taken 4.5
 
 
 @dataclass(frozen=True)
@@ -446,7 +447,7 @@ def _await_head(repo: str, h: dict, skip: frozenset[int], opts: Options, summary
                 summary.append(f"#{n}: queue head, a new head was pushed {time.time() - t0:.0f}s into the wait -- "
                                "the wait ends, the pass that push starts decides")
                 return
-            if pr_sched.review_settled(repo, branch, _gh_read):
+            if pr_sched.review_settled(repo, branch, _gh_read, str(h.get("headRefOid") or "")):
                 break
             if time.time() - t0 + HEAD_POLL_S > opts.head_wait_s:
                 summary.append(f"#{n}: queue head, still behind main -- no verdict within {opts.head_wait_s:g}s of "
@@ -688,9 +689,10 @@ def _head_first(repo: str, prs: list[dict], q: pr_queue.Plan, opts: Options, sum
                        "not moved up")
         return None
     how = "verdict settled -> updated first"
-    if not pr_sched.review_settled(repo, str(h["headRefName"]), _gh_read):
+    at = str(h.get("headRefOid") or "")  # the review reads look at the runs AT this head only
+    if not pr_sched.review_settled(repo, str(h["headRefName"]), _gh_read, at):
         young, why_not = pr_sched.review_young(repo, str(h["headRefName"]), _gh_read, time.time(),
-                                               opts.preempt_after_min * 60) if opts.head_fail_fast else (False, "")
+                                               opts.preempt_after_min * 60, at) if opts.head_fail_fast else (False, "")
         if not young:
             q.awaiting = h if why_not and opts.head_wait_s > 0 else None
             summary.append(f"#{h['number']}: queue head, behind main -- its review has not recorded a verdict yet"
@@ -811,12 +813,18 @@ def unlabel_resolved(repo: str, prs: list[dict], attempted: set[int], opts: Opti
 
 def head_wait_s(fail_fast: bool) -> float:
     """The tail's verdict wait in seconds (env CI_KIT_HEAD_VERDICT_WAIT_S, default HEAD_WAIT_S): 0 with
-    head fail-fast off, and 0 -- with a WARNING, never a crashed pass -- for a value that is no number."""
+    head fail-fast off, and 0 -- with a WARNING, never a crashed pass -- for a value that is no number.
+    CLAMPED to HEAD_WAIT_MAX_S, with a WARNING: the updater job has `timeout-minutes: 10`, and a wait
+    that outlives it is a job killed mid-wait (red, its relock= / heal= consumers skipped), not a longer wait."""
     raw = os.environ.get("CI_KIT_HEAD_VERDICT_WAIT_S", "").strip()
     if not fail_fast:
         return 0.0
     try:
-        return max(0.0, float(raw)) if raw else HEAD_WAIT_S
+        want = max(0.0, float(raw)) if raw else HEAD_WAIT_S
+        if want > HEAD_WAIT_MAX_S:
+            print(f"::warning::head-verdict-wait-seconds {raw} is over the {HEAD_WAIT_MAX_S:g} s the updater job's "
+                  f"timeout leaves: the head's verdict is waited for {HEAD_WAIT_MAX_S:g} s")
+        return min(want, HEAD_WAIT_MAX_S)
     except ValueError:
         print(f"::warning::head-verdict-wait-seconds is not a number ({raw!r}): the head's verdict is not waited for")
         return 0.0
@@ -914,7 +922,9 @@ def main(argv: list[str] | None = None) -> int:
     healing: list[dict] = []
     later: list[Callable[[list[str]], None]] = []
     try:
-        # `later` only when on: off, the call is exactly main's (a caller that wraps `run` sees no change)
+        # `later` goes to `run` whenever the held pass or the verdict wait is on -- and the wait is on
+        # by DEFAULT (head fail-fast), so main hands it to every consumer; a double for `run` takes
+        # it. Only with both off is the call the five-argument one
         rc = run(args.repo, summary, relock, opts, healing, later) if opts.update_held or opts.head_wait_s > 0 else \
             run(args.repo, summary, relock, opts, healing)
     except (subprocess.CalledProcessError, ValueError, KeyError) as e:
