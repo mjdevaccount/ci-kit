@@ -40,6 +40,15 @@ release just after the window waits ~12h for it and then the queue's landing tim
 on every such release that the next morning lands. The window is a filter on runs Mend starts, so a
 repo Mend runs rarely can miss one window: 48h gives it two.
 
+A REMOTE READ IS TRIED THREE TIMES, EACH BOUNDED (v1.47.0). `git ls-remote` and the date fetch
+each ran once with a 120s limit; a connection that stalled (a consumer's nightly, 2026-11-26: one
+ssh that never answered, the next remote read fine a second later) spent the whole limit and the
+run went red as "could not look". Now each try gets 40s, so three tries fit in the old limit, a
+failed try is printed, and an answer that needed a retry is a `::warning::` on the run -- a stall
+that recovered must still be SEEN. Three failures are still exit 2 (ls-remote) or no grace (dates).
+Each date-fetch try gets its OWN bare repo: a fetch killed at its limit leaves `shallow.lock`, and a
+second fetch into that repo fails on the lock at once, whatever the remote does.
+
 EXIT. 0 every pin is the newest tag, or lags only within the grace - 1 a pin is stale, or names
 no release tag (each printed with file:line) - 2 could not look: a file missing, NO pin found in
 any file (a check that found nothing to compare has verified nothing), the remote unreachable,
@@ -57,6 +66,10 @@ import tempfile
 import time
 
 TAG = re.compile(r"refs/tags/(v\d+\.\d+\.\d+)$")
+REMOTE_TRIES = 3        # one stalled connection must not decide the verdict
+REMOTE_TRY_S = 40       # per try: three fit inside the 120s the single try had
+REMOTE_PAUSE_S = 2      # between tries: three failures in one second are one look, not three
+_sleep = time.sleep
 
 
 def name_of(remote: str) -> str:
@@ -101,18 +114,43 @@ def pins_in(text: str, name: str) -> list[tuple[int, str]]:
     return [(i, tag) for i, _, tag in sorted(out)]
 
 
+def read_remote(argv, what: str, run=None) -> tuple[subprocess.CompletedProcess | None, str]:
+    """(the answer, "") or (None, why the last try failed). Each try is bounded; a git that is not
+    there raises OSError to the caller (retrying cannot install it). `argv` is the command, or a
+    function of the try number that returns it -- for a read that must not reuse what a killed
+    try left behind."""
+    why = ""
+    for n in range(1, REMOTE_TRIES + 1):
+        if n > 1:
+            _sleep(REMOTE_PAUSE_S)
+        try:
+            r = (run or subprocess.run)(argv(n) if callable(argv) else argv,
+                                        capture_output=True, check=False, timeout=REMOTE_TRY_S)
+        except subprocess.TimeoutExpired:
+            why = f"no answer in {REMOTE_TRY_S}s"
+        else:
+            if r.returncode == 0:
+                if n > 1:
+                    print(f"::warning::ci-pin-drift: {what} answered on try {n}/{REMOTE_TRIES} "
+                          f"(the try before it: {why}) -- a remote read that needs a second look "
+                          f"is the runner's network or the host's, not this repo's pins")
+                return r, ""
+            detail = r.stderr.decode("utf-8", errors="replace").strip().splitlines()
+            why = detail[-1] if detail else "no output"
+        print(f"ci-pin-drift: {what}: try {n}/{REMOTE_TRIES} failed ({why})", file=sys.stderr)
+    return None, why
+
+
 def release_tags(remote: str) -> list[str]:
     """Every vX.Y.Z tag on `remote`, or exit 2."""
     try:
-        r = subprocess.run(["git", "ls-remote", "--tags", "--refs", remote],
-                           capture_output=True, check=False, timeout=120)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        r, why = read_remote(["git", "ls-remote", "--tags", "--refs", remote], f"git ls-remote {remote}")
+    except OSError as exc:
         print(f"ci-pin-drift: could not run git ls-remote on {remote}: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
-    if r.returncode != 0:
-        detail = r.stderr.decode("utf-8", errors="replace").strip().splitlines()
-        print(f"ci-pin-drift: git ls-remote {remote} failed "
-              f"({detail[-1] if detail else 'no output'}) -- exit 2, could not look", file=sys.stderr)
+    if r is None:
+        print(f"ci-pin-drift: git ls-remote {remote} failed {REMOTE_TRIES} time(s) "
+              f"({why}) -- exit 2, could not look", file=sys.stderr)
         raise SystemExit(2)
     tags = [m.group(1) for ln in r.stdout.decode("utf-8", errors="replace").splitlines()
             if (m := TAG.search(ln.strip()))]
@@ -131,18 +169,25 @@ def tag_dates(remote: str, tags: list[str]) -> dict[str, int]:
         return {}
     try:  # the temp dir itself (create AND cleanup) is inside: a crash here is no grace, never exit 1
         with tempfile.TemporaryDirectory(prefix="ci-pin-drift-", ignore_cleanup_errors=True) as d:
-            def g(*args: str, timeout: int = 30) -> subprocess.CompletedProcess:
-                return subprocess.run(["git", "-C", d, *args], capture_output=True, check=False,
-                                      timeout=timeout)
-            g("init", "-q", "--bare")
-            r = g("fetch", "-q", "--no-tags", "--depth=1", "--filter=blob:none", remote,
-                  *[f"+refs/tags/{t}:refs/tags/{t}" for t in tags], timeout=120)
-            if r.returncode != 0:
-                detail = r.stderr.decode("utf-8", errors="replace").strip().splitlines()
+            repos: list[str] = []
+
+            def g(repo: str, *args: str) -> subprocess.CompletedProcess:
+                return subprocess.run(["git", "-C", repo, *args], capture_output=True, check=False, timeout=30)
+
+            def fetch(n: int) -> list[str]:
+                # a FRESH repo per try: a fetch killed at its limit leaves `shallow.lock` behind, and
+                # every later fetch into that repo fails on the lock at once -- a retry that cannot work
+                repos.append(str(pathlib.Path(d) / f"try{n}"))
+                subprocess.run(["git", "init", "-q", "--bare", repos[-1]], capture_output=True, check=False,
+                               timeout=30)
+                return ["git", "-C", repos[-1], "fetch", "-q", "--no-tags", "--depth=1", "--filter=blob:none",
+                        remote, *[f"+refs/tags/{t}:refs/tags/{t}" for t in tags]]
+            r, why = read_remote(fetch, f"release dates from {remote}")
+            if r is None:
                 print(f"ci-pin-drift: could not fetch release dates from {remote} "
-                      f"({detail[-1] if detail else 'no output'}) -- no grace applied", file=sys.stderr)
+                      f"({why}) -- no grace applied", file=sys.stderr)
                 return {}
-            out = g("for-each-ref", "--format=%(refname:short) %(creatordate:unix)", "refs/tags")
+            out = g(repos[-1], "for-each-ref", "--format=%(refname:short) %(creatordate:unix)", "refs/tags")
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"ci-pin-drift: could not read release dates: {exc} -- no grace applied", file=sys.stderr)
         return {}

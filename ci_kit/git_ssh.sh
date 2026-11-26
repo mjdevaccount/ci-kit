@@ -193,7 +193,10 @@ _ci_kit_git_ssh_route() {
     _ci_kit_git_ssh_die "route: no agent socket (SSH_AUTH_SOCK='${SSH_AUTH_SOCK:-}'): the load step did not run or its agent died"
   fi
   [ -s "${CI_KIT_GIT_SSH_KNOWN_HOSTS:-}" ] || _ci_kit_git_ssh_die "route: the pinned known_hosts file is missing"
-  export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=$CI_KIT_GIT_SSH_KNOWN_HOSTS -o StrictHostKeyChecking=yes -o BatchMode=yes"
+  # a connection that stalls must END, not hold the step to its job timeout (v1.47.0; a consumer's
+  # nightly 2026-11-26: one ssh sat silent until its caller's 120s limit). 20s to connect, then a
+  # peer silent for 3 x 15s is dead. A slow transfer that is still moving is NOT cut by these.
+  export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=$CI_KIT_GIT_SSH_KNOWN_HOSTS -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
   if [ -n "$cfg" ]; then
     # one key per repo: every repo must have its alias in the config, and every agent must be alive
     [ -s "$cfg" ] || _ci_kit_git_ssh_die "route: the ssh config '$cfg' is missing"

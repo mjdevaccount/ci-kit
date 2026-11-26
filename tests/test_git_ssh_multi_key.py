@@ -72,6 +72,8 @@ def test_one_key_per_repo_routes_each_repo_to_its_own_agent(tmp_path: pathlib.Pa
         assert (tmp_path / "unnamed.txt").read_text().strip() == "https://github.com/o/public"
         cmd = (tmp_path / "sshcmd.txt").read_text()
         assert cmd.startswith(f"ssh -F {outputs['ssh-config']} ") and "StrictHostKeyChecking=yes" in cmd
+        # the per-repo-key (-F) command keeps the options that end a stalled connection
+        assert all(f"-o {o}" in cmd for o in ("ConnectTimeout=20", "ServerAliveInterval=15", "ServerAliveCountMax=3"))
         assert "PRIVATE KEY" not in (tmp_path / "install-env.txt").read_text(errors="replace")
         # what ssh itself makes of an alias: github.com, the pinned host key's name, ITS agent
         g = subprocess.run(["ssh", "-G", "-F", outputs["ssh-config"], "ci-kit.own.b.repo"],

@@ -158,6 +158,7 @@ def test_the_three_phases(tmp_path: pathlib.Path) -> None:
         cmd = (tmp_path / "sshcmd.txt").read_text()
         assert f"UserKnownHostsFile={outputs['known-hosts']} " in cmd
         assert "StrictHostKeyChecking=yes" in cmd and "BatchMode=yes" in cmd
+        assert all(f"-o {o}" in cmd for o in ("ConnectTimeout=20", "ServerAliveInterval=15", "ServerAliveCountMax=3"))
         lines = pathlib.Path(outputs["known-hosts"]).read_text().splitlines()
         pinned = {ln.split()[1]: ln.split()[2] for ln in lines}
         assert all(pinned.get(t) == v for t, v in GITHUB_KEYS.items()) and "ssh-rsa" in pinned
