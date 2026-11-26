@@ -41,6 +41,16 @@ next pass, lowest number first), and every PR a total cap (`per-pr`) so a push -
 ends in a page. The heal job writes `<!-- smart-merge:healed head=<sha> tier=<t> result=<r> -->`,
 and a page `<!-- smart-merge:paged head=<sha> why=<w> -->` (one per head).
 
+A TIER THAT CANNOT START IS NOT A TIER THAT FAILED (v1.46.0). Tier 3 on a runner that cannot run
+the CLI's sandbox (ci_kit/pr_fix.py `sandbox_check`) is the same answer for every PR, so it has its
+own result, `cannot-start` -- in the `healed` marker, in the `paged` marker's `why`, and as the
+page's TITLE ("tier 3 CANNOT START", naming the runner, never "could not fix it"). 17 tier-3
+attempts on 15 PRs (2026-11-15..26) were each recorded `failed` and paged under the title every
+honest decline carries; nothing said they were one fault. One search lists the PRs that hit it:
+`repo:<owner>/<repo> in:comments "result=cannot-start"`. A cannot-start head keeps its once-per-head
+dispatch (no retry loop against a broken runner) and does NOT count toward `heal-claude-per-pr`:
+the next head, on a runner that works, still gets tier 3.
+
 WATCHED: a dispatch with no `healed` record at its head after `stale-minutes` (the heal job never
 ran, was cancelled, or died before its report) is paged by the next pass that sees the PR still red
 or conflicting -- the pass is the scheduled watcher (a consumer runs it every 15 min), and a dark
@@ -71,6 +81,7 @@ _PAGED = re.compile(r"<!-- smart-merge:paged head=([0-9a-f]{40}) why=([a-z-]+) -
 RENOVATE = ("renovate", "renovate[bot]", "app/renovate")
 MAJOR_TITLE = re.compile(r"\bto v?\d+(\.x)?\s*(\(|$)", re.I)
 DB_LABEL = "dba"
+CANNOT_START = "cannot-start"   # ci_kit/pr_fix.py's KIND, and this record's result for it (not imported: see in_flight)
 
 Comments = Callable[[str, int], list[str]]
 Write = Callable[..., subprocess.CompletedProcess]
@@ -189,7 +200,11 @@ def decide(pr: dict, bodies: list[str], cfg: Config, claude_left: int, now: dt.d
         return ("quiet" if paged else "capped"), False, f"{cfg.per_pr} heal(s) already spent on this PR"
     if mode == "conflict" and is_renovate(pr):
         return "rebase", False, "a Renovate branch: Renovate rebuilds it (rebase checkbox), never a merge pushed onto it"
-    used = sum(1 for _, _, c, _ in heals if c == "1")
+    # a head whose tier 3 could not START spent nothing of the PR's: two of them, then a runner that
+    # works, must not read as `tier 3 spent 2/2` for the life of the PR. Once per HEAD still holds
+    # (`mine`, above), so a runner that stays broken is not retried every pass.
+    down = {h for h, _, r in marks(bodies, _HEALED) if r == CANNOT_START}
+    used = sum(1 for h, _, c, _ in heals if c == "1" and h not in down)
     tier3 = cfg.claude_per_pass > 0 and used < cfg.claude_per_pr and not claude_blocked(pr)
     if tier3 and claude_left <= 0:
         return "defer", False, f"tier 3 allowed, but this pass's {cfg.claude_per_pass} tier-3 slot(s) are taken"
@@ -211,10 +226,17 @@ def in_flight(bodies: list[str], head: str, at: dt.datetime | None, now: dt.date
     return f"; in flight, no heal record yet{age}"
 
 
-def page_text(repo: str, pr: dict, checks: str, tried: str) -> tuple[str, str]:
-    """(title, body) of the tier-4 page. Pure."""
+def page_text(repo: str, pr: dict, checks: str, tried: str, result: str = "") -> tuple[str, str]:
+    """(title, body) of the tier-4 page. Pure. A `cannot-start` is titled as the RUNNER's fault: the
+    PR number is where it was seen, not what is wrong."""
     n = pr.get("number")
-    title = f"{repo.rsplit('/', 1)[-1]} #{n}: heal ladder could not fix it"
+    name = repo.rsplit('/', 1)[-1]
+    if result == CANNOT_START:
+        return (f"{name}: heal tier 3 CANNOT START (the runner, every PR)",
+                "\n".join((f"Seen on #{n}. {tried}",
+                           "Every tier-3 heal in this repo fails this way until the sealed runner is fixed; "
+                           "each one still spends its PR's attempt at that head.")))
+    title = f"{name} #{n}: heal ladder could not fix it"
     body = "\n".join(x for x in (str(pr.get("title") or ""), f"Failing: {checks}" if checks else "",
                                  f"Tried: {tried}", "Needs a session; auto-merge stays armed.") if x)
     return title, body
@@ -406,6 +428,9 @@ def outcome(go: bool, plan_why: str, regen: str, regen_why: str, fix: str, fix_w
         return tier, push, push_why, False
     if push in ("refused", "failed"):
         return tier, push, f"tier {tier}'s change was not pushed: {push_why}", True
+    if fix == "failed" and fix_why.startswith(f"KIND={CANNOT_START}"):
+        return "claude", CANNOT_START, (f"TIER 3 CANNOT START on this runner -- not this PR's failure: {fix_why} "
+                                        f"(tier 2: {regen or 'not run'} ({regen_why or '-'}))"), True
     if fix in ("declined", "refused", "failed"):
         return "claude", fix, f"tier 2: {regen or 'not run'} ({regen_why or '-'}); tier 3 {fix}: {fix_why}", True
     if regen in ("regen", "merge"):
@@ -425,7 +450,7 @@ def report(repo: str, n: int, head: str, o: tuple[str, str, str, bool], checks: 
         if any(h == head for h, _ in marks(comments(repo, n), _PAGED)):
             lines.append("Already paged at this head.")
         else:
-            title, body = page_text(repo, {"number": n, "title": ""}, checks, what)
+            title, body = page_text(repo, {"number": n, "title": ""}, checks, what, result)
             said = page(title, body, url)
             lines.insert(1, PAGED.format(head=head, why=result))
             lines.append(f"Paged: {said}.")
@@ -480,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.push_why, args.claude == "true")
     output(result=o[1], tier=o[0])
     return 1 if report(args.repo, args.pr, args.head, o, args.checks, args.url, args.run_url, write, comments_of, page) \
-        or o[1] in ("failed",) else 0
+        or o[1] in ("failed", CANNOT_START) else 0
 
 
 if __name__ == "__main__":

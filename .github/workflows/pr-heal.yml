@@ -49,6 +49,12 @@
 #           + 8 of setup (install 4, Claude Code 2, the rest 2), each bounded below. While it runs,
 #           every pr-autoupdate pass says so: `#N: ... heal quiet: ... TIER 3 IN FLIGHT on the
 #           sealed runner (run R, M min since dispatch; holds it up to 50 min ...)`.
+#           THE RUNNER MUST BE ABLE TO SANDBOX (v1.46.0): the CLI runs every Bash command in a
+#           bubblewrap sandbox (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1, ci_kit/pr_fix.py env) and
+#           refuses to run one outside it, so the image needs `bubblewrap` + `socat` and the job
+#           must be allowed to create user namespaces (Docker's default seccomp profile is not).
+#           A runner that cannot is asked BEFORE the CLI (pr_fix.sandbox_check) and recorded
+#           `cannot-start`: the runner's fault, the same for every PR, never this PR's `failed`.
 #   push    a FRESH runner on the SECURE pool with the push token. Runs no PR code: redoes the
 #           merge, takes only the tier's files, re-checks their scope (ci_kit/pr_apply.py), commits
 #           a merge or fix commit and pushes it fast-forward. Never --force, never a rebase.
@@ -174,7 +180,7 @@ on:
         required: false
     outputs:
       result:
-        description: pushed | moved | nothing | skipped | declined | refused | failed | exhausted
+        description: pushed | moved | nothing | skipped | declined | refused | failed | cannot-start | exhausted
         value: ${{ jobs.report.outputs.result }}
 
 permissions:
