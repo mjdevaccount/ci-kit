@@ -32,6 +32,9 @@ check on the head. A required check that is ABSENT counts as neither running nor
 check that never reports cannot hold a slot forever, and an update gives the PR fresh checks.
 
 `max_in_flight = 0` is the old behaviour: every armed PR is attempted.
+
+THE HEAD HOLDS A SLOT (`reserve`, v1.45.0, applied with the queue hold): a stale head that can land
+counts against `max_in_flight` before it is in flight, so the next PR is not updated beside it.
 """
 from __future__ import annotations
 
@@ -52,6 +55,9 @@ class Plan:
     # eligible PRs past the free slots, in queue order: the caller attempts the next one when a
     # PR it picked is skipped for a running review (pr_autoupdate), so a skip does not idle the slot
     spare: list[dict] = field(default_factory=list)
+    # the queue head, left BEHIND this pass because its review is past the young bound and owes a
+    # verdict: the caller may wait for it in the pass's tail (pr_autoupdate._await_head)
+    awaiting: dict | None = None
 
 
 def check_state(rollup: list[dict] | None, required: tuple[str, ...] = ()) -> str:
@@ -130,6 +136,37 @@ def plan(armed: list[dict], max_in_flight: int, required: tuple[str, ...] = (),
     out.spare = eligible[slots:]
     for i, p in enumerate(eligible[slots:], 1):
         out.held.append((p, f"queued, position {i} (in flight: {len(out.in_flight)}/{max_in_flight})"))
+    return out
+
+
+def reserve(q: Plan, head_pr: dict | None, max_in_flight: int) -> list[dict]:
+    """THE HEAD HOLDS A SLOT (v1.45.0; the caller applies it only with the queue hold on). Returns
+    the PRs taken out of `q.update`, which go back to the front of `q.spare` and are named in `q.held`.
+
+    WHY (a consumer, 2026-11-26 05:32Z, `max-in-flight: 1`). Head #3205 was BEHIND with a check
+    running, so `plan` held it and counted it in NO slot; the one free slot went to #3206, the next
+    eligible PR. The same pass then moved the head up "ahead of the slot count" and updated BOTH:
+    the next pass read `queue: 2/1 in flight`. With the queue hold only the head can merge, so
+    #3206's run could not be the one that merged: 15.8 runner-minutes of CI and review on that head
+    (5.5 of them model review on the one sealed runner) were thrown away when #3205 landed. A stale
+    head that can land is about to be updated -- this pass or when its review records a verdict --
+    and that update is the queue's next run against main: it takes one slot now, whether it is in
+    `update` yet or still held. A DIRTY PR is
+    never taken out (its PUT pushes nothing; it is how the conflict label and page fire), and a
+    head already in flight already holds its slot."""
+    if max_in_flight <= 0 or head_pr is None or any(p is head_pr for p in q.in_flight):
+        return []
+    if (head_pr.get("mergeStateStatus") or "UNKNOWN").upper() not in _STALE_STATES:
+        return []
+    room = max(0, max_in_flight - len(q.in_flight) - 1)
+    others = [p for p in q.update if p is not head_pr and (p.get("mergeStateStatus") or "").upper() != "DIRTY"]
+    out = others[room:]
+    if not out:
+        return []
+    q.update = [p for p in q.update if not any(p is d for d in out)]
+    q.spare = out + q.spare
+    q.held += [(p, f"queued behind queue head #{head_pr['number']}, which takes the slot "
+                   f"(in flight: {len(q.in_flight)}/{max_in_flight})") for p in out]
     return out
 
 
