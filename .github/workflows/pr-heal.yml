@@ -49,7 +49,7 @@
 #           + 8 of setup (install 4, Claude Code 2, the rest 2), each bounded below. While it runs,
 #           every pr-autoupdate pass says so: `#N: ... heal quiet: ... TIER 3 IN FLIGHT on the
 #           sealed runner (run R, M min since dispatch; holds it up to 50 min ...)`.
-#           THE RUNNER MUST BE ABLE TO SANDBOX (v1.45.0): the CLI runs every Bash command in a
+#           THE RUNNER MUST BE ABLE TO SANDBOX (v1.46.0): the CLI runs every Bash command in a
 #           bubblewrap sandbox (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1, ci_kit/pr_fix.py env) and
 #           refuses to run one outside it, so the image needs `bubblewrap` + `socat` and the job
 #           must be allowed to create user namespaces (Docker's default seccomp profile is not).

@@ -41,7 +41,7 @@ next pass, lowest number first), and every PR a total cap (`per-pr`) so a push -
 ends in a page. The heal job writes `<!-- smart-merge:healed head=<sha> tier=<t> result=<r> -->`,
 and a page `<!-- smart-merge:paged head=<sha> why=<w> -->` (one per head).
 
-A TIER THAT CANNOT START IS NOT A TIER THAT FAILED (v1.45.0). Tier 3 on a runner that cannot run
+A TIER THAT CANNOT START IS NOT A TIER THAT FAILED (v1.46.0). Tier 3 on a runner that cannot run
 the CLI's sandbox (ci_kit/pr_fix.py `sandbox_check`) is the same answer for every PR, so it has its
 own result, `cannot-start` -- in the `healed` marker, in the `paged` marker's `why`, and as the
 page's TITLE ("tier 3 CANNOT START", naming the runner, never "could not fix it"). 17 tier-3

@@ -23,7 +23,7 @@ refusal by fence. Structured output: {action: fixed | declined, summary, reason}
 
 Outputs `state` = fixed | declined | refused | failed, and `why`.
 
-CANNOT START IS NOT A FAILED FIX (v1.45.0). The env scrub below makes the CLI run every Bash command
+CANNOT START IS NOT A FAILED FIX (v1.46.0). The env scrub below makes the CLI run every Bash command
 in a bubblewrap sandbox, and refuse to run one outside it. A runner that cannot build that sandbox
 (no bwrap, no socat, a container whose seccomp profile refuses user namespaces) fails EVERY tier-3
 heal the same way, whatever the PR: 17 attempts on 15 PRs, 2026-11-15..26, each recorded and paged
