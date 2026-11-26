@@ -9,6 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
 from conftest import git, run_tool, write
 
 from ci_kit import pin_drift
@@ -347,6 +348,12 @@ def _scripted(*steps):
 
 
 _STALL = subprocess.TimeoutExpired(cmd="git", timeout=pin_drift.REMOTE_TRY_S)
+
+
+@pytest.fixture(autouse=True)
+def _no_pause(monkeypatch) -> None:
+    """In-process tries do not wait between themselves (the pause is asserted where it matters)."""
+    monkeypatch.setattr(pin_drift, "_sleep", lambda s: None)
 _TAGS = b"aaaa\trefs/tags/v1.0.0\nbbbb\trefs/tags/v1.1.0\n"
 
 
@@ -419,3 +426,44 @@ def test_the_ssh_route_ends_a_stalled_connection() -> None:
     (line,) = [ln for ln in text.splitlines() if ln.strip().startswith('export GIT_SSH_COMMAND="ssh ')]
     for opt in ("ConnectTimeout=20", "ServerAliveInterval=15", "ServerAliveCountMax=3", "BatchMode=yes"):
         assert f"-o {opt}" in line, opt
+
+
+def test_tries_are_spaced_and_the_first_is_not_delayed(monkeypatch) -> None:
+    waits: list[float] = []
+    monkeypatch.setattr(pin_drift, "_sleep", waits.append)
+    run, _ = _scripted(_Answer(1, stderr=b"fatal: a\n"), _Answer(1, stderr=b"fatal: b\n"), _Answer(0, _TAGS))
+    assert pin_drift.read_remote(["git", "x"], "x", run)[0] is not None
+    assert waits == [pin_drift.REMOTE_PAUSE_S] * 2
+
+
+def test_three_failed_reads_say_why_and_how_many_must_fire(monkeypatch, capsys) -> None:
+    def run(argv, **kw):
+        return _Answer(128, stderr=b"fatal: the last reason\n")
+    monkeypatch.setattr(pin_drift.subprocess, "run", run)
+    try:
+        pin_drift.release_tags("anything")
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("three failed reads must be exit 2")
+    assert "failed 3 time(s) (fatal: the last reason) -- exit 2, could not look" in capsys.readouterr().err
+
+
+def test_a_date_fetch_killed_mid_transfer_does_not_poison_the_next_try_must_fire(new_repo, monkeypatch) -> None:
+    """A fetch killed at its limit leaves `shallow.lock` in its repo; git then refuses every later
+    fetch into it. The stand-in does exactly that to the FIRST fetch (lock written, then the
+    timeout), and every other call is real git against a real remote."""
+    remote = _remote(new_repo, "v1.0.0", "v1.1.0")
+    real, fetches = subprocess.run, []
+
+    def run(argv, **kw):
+        if "fetch" in argv:
+            fetches.append(argv[2])
+            if len(fetches) == 1:
+                (Path(argv[2]) / "shallow.lock").write_text("")
+                raise _STALL
+        return real(argv, **kw)
+    monkeypatch.setattr(pin_drift.subprocess, "run", run)
+    dates = pin_drift.tag_dates(str(remote), ["v1.0.0", "v1.1.0"])
+    assert set(dates) == {"v1.0.0", "v1.1.0"} and all(v > 0 for v in dates.values())
+    assert len(fetches) == 2 and fetches[0] != fetches[1], "the retry reused the killed try's repo"
