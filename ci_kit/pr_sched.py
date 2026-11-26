@@ -57,6 +57,7 @@ DEFERRED_JOB = "review deferred"   # the review gate's job (a STEP of `verdict` 
 RECORD_JOB = "record verdict"      # the review gate's job (a STEP of `verdict` since v1.35.0) that writes the record
 VERDICT_JOB = "verdict"            # the review gate's aggregate: completed = record written and any park red
 PRE_JOB = "review"                 # the review gate's first job (the name an outside auth audit reads)
+MODEL_JOB = "model review"         # the review gate's sealed-pool job: the only part of a review that costs
 MAX_ATTEMPT = 4                    # a run re-run this often is never parked again (no starving)
 
 RENOVATE = ("renovate", "renovate[bot]", "app/renovate")  # the bot's logins (pr_renovate.py, out_of_queue)
@@ -187,6 +188,37 @@ def review_settled(repo: str, branch: str, read: Gh) -> bool:
         if not done:
             return False
     return True
+
+
+def moved(repo: str, branch: str, sha: str, read: Gh) -> bool:
+    """An active run on this branch is at ANOTHER head than `sha`: the branch was pushed. No active
+    run, or a run that does not say its head, is not evidence of a push."""
+    return any(str(r.get("head_sha") or sha) != sha for r in active_runs(repo, read, branch))
+
+
+def review_young(repo: str, branch: str, read: Gh, now: float, young_s: float) -> tuple[bool, str]:
+    """(young?, why not) for the review still owed on this branch (v1.45.0, HEAD FAIL-FAST). Young =
+    no active review run has spent `young_s` in its MODEL job: an update now throws away at most
+    that much review, the bound the scheduler already accepts when it parks a non-head for the head
+    (`preempt_after_s`, measured in ci_kit/pr_queue.py: a full review p50 4.8 min, so 3). NOT young:
+    the model job has run `young_s` or longer, its start cannot be read, or it has finished and the
+    verdict is about to be recorded -- then the review is worth more than the minutes its CI burns
+    at the stale head, and the head waits for the verdict as before (`review_settled`)."""
+    for run in active_runs(repo, read, branch):
+        names = {_tail(j.get("name")): j for j in run_jobs(repo, int(run["id"]), read)}
+        if PRE_JOB not in names:
+            continue  # not the review gate
+        model = names.get(MODEL_JOB) or {}
+        status = str(model.get("status") or "")
+        if status == "completed" and model.get("conclusion") != "skipped":
+            return False, "its model review has finished and the verdict is being recorded"
+        if status == "in_progress":
+            started = _ts(model.get("started_at"))
+            if started is None:
+                return False, "its model review is running and its start could not be read"
+            if now - started >= young_s:
+                return False, f"its model review has run {(now - started) / 60:.1f} min"
+    return True, ""
 
 
 # ── acting ────────────────────────────────────────────────────────────────────────────────────

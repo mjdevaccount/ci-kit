@@ -5,7 +5,7 @@
 #
 #   on:
 #     push: { branches: [main] }
-#     pull_request_target: { types: [auto_merge_enabled] }   # arming starts a pass (v1.32.0)
+#     pull_request_target: { types: [auto_merge_enabled, synchronize] }   # arming (v1.32.0) and a NEW HEAD (v1.45.0) each start a pass
 #     workflow_run:                                 # a held PR is reconsidered when its checks finish
 #       workflows: [CI, review-gate]                # only workflows that can finish LAST on a PR head
 #       types: [completed]
@@ -46,6 +46,33 @@
 # throw its CI away (measured: every unlanded train in a day died "stale: main moved"). Bounded by
 # `train-stale-minutes` (set it to the train's `stale-minutes`): a red, BEHIND/DIRTY or older train
 # releases the lane and its update hold, named in the summary (`hold: lane RELEASED ...`).
+#
+# HEAD FAIL-FAST (v1.45.0, `head-fail-fast`, default on; with `scarce-pools`). The queue head is
+# the one PR whose CI is about to be paid for, so a head BEHIND main is updated AT ONCE while its
+# review is still young (under `preempt-after-minutes` of model time; ci_kit/pr_sched.py
+# `review_young`), not when the verdict records: the update's push cancels the run at the stale head
+# and the ONE full CI run and the one review happen at a head that can merge. Past that bound it
+# waits for the verdict (a review that has cost minutes is carried, not thrown away) -- and THIS
+# pass waits with it, in its tail, after `relock=` / `heal=` are written: up to `head-verdict-wait-seconds`
+# (240), reading the review every 15 s, and updates the head the moment the verdict is on record.
+# The pass that would otherwise do it is a new job behind the gate's tail job and one more runner
+# wait (a consumer's #3209, 2026-11-26: verdict on record 06:24:12Z, hand update 06:25:20Z, the
+# next pass not startable before 06:26:04Z). The job holds its runner and the `pr-autoupdate`
+# concurrency group for that long; a pending pass runs right after. A pass that hands on a relock
+# or a heal does NOT wait (a job's outputs reach the job that needs them only when this job ends),
+# and a new head pushed during the wait ends it at once.
+# A NEW HEAD ON AN ARMED PR STARTS NO PASS unless the caller lists `synchronize` beside
+# `auto_merge_enabled` above (a consumer, 2026-11-26: a fix push at 04:43:08Z, the next pass at
+# 04:53:46Z, the branch updated by hand in between). Guard it to armed same-repo PRs, so an
+# unarmed PR's pushes start nothing:
+#   if: github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository
+#       && (github.event.action != 'synchronize' || github.event.pull_request.auto_merge != null))
+#
+# THE HEAD HOLDS A SLOT (v1.45.0, with `queue-hold`; ci_kit/pr_queue.py `reserve`). A stale head
+# that can land takes one of the `max-in-flight` slots whether this pass updates it or it still
+# waits for its verdict. Before, `max-in-flight: 1` updated the head AND the next PR in one pass
+# (the same consumer, 05:32Z: `queue: 2/1 in flight`), and under the hold the second run could
+# never be the one that merged. Off without the hold, and while a merge train is open.
 #
 # The secret NAMES are the caller's: this workflow declares `token` and `ntfy-url` and the caller
 # maps its own repository secrets onto them (`secrets: inherit` works only if the caller's secrets
@@ -253,6 +280,19 @@ on:
         description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- README "Generic names"
         type: string
         default: ""
+      head-fail-fast:
+        description: >-
+          HEAD FAIL-FAST (v1.45.0, ci_kit/pr_sched.py review_young): with scarce-pools, a queue head BEHIND
+          the base is updated at once while its review has spent under preempt-after-minutes of model time,
+          so its one full CI run is at a head that can merge; false = wait for the verdict, as before v1.45.0
+        type: boolean
+        default: true
+      head-verdict-wait-seconds:
+        description: >-
+          with head-fail-fast: seconds the pass's tail waits for a BEHIND queue head past the young bound to
+          record its verdict, then updates it in the same job (ci_kit/pr_autoupdate.py _await_head); 0 = off
+        type: number
+        default: 240
       update-held:
         description: also merge the base into HELD PRs (open, not armed, BEHIND, mergeable, no check running or failing, not a bot's) on schedule / workflow_dispatch passes only, last, once no armed PR is on its way to current, in the queue's free slots (ci_kit/pr_held.py)
         type: boolean
@@ -340,8 +380,14 @@ jobs:
       CI_KIT_BASE_RETRY_BOT_AUTHORS: ${{ (inputs.base-retry-bot-authors != 'renovate' || (inputs.base-retry-cap > 0 && inputs.max-in-flight > 0)) && inputs.base-retry-bot-authors || '' }}
       CI_KIT_BASE_RETRY_MAX_PER_PASS: ${{ inputs.base-retry-max-per-pass }}
       CI_KIT_UPDATE_HELD: ${{ inputs.update-held }}
+      # an env var, never a flag (the older-@v1-tool reason above)
+      CI_KIT_HEAD_FAIL_FAST: ${{ inputs.head-fail-fast }}
+      CI_KIT_HEAD_VERDICT_WAIT_S: ${{ inputs.head-verdict-wait-seconds }}
       CI_KIT_EVENT: ${{ github.event_name }}
-      CI_KIT_BEFORE: ${{ github.event.before }}
+      # a PUSH's previous sha only. `github.event.before` exists on `pull_request_target: synchronize`
+      # too, where it is the PR's PREVIOUS HEAD: read as main's previous sha it would let the
+      # out-of-queue check compare the queue head against its own old head (review of v1.45.0, R1)
+      CI_KIT_BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
       CI_KIT_SHA: ${{ github.sha }}
     steps:
       # THE TOKEN (v1.37.0): the App or the PAT, staged by token-source; an empty one is still RED
