@@ -599,7 +599,7 @@ jobs:
           fetch-depth: 0
 
       # the reviewer's first move is proving a guard's red path, which needs the real toolchain
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@v10.4.0
         if: steps.admit.outputs.defer != 'true'
         with:
           python-version: ${{ inputs.python-version }}

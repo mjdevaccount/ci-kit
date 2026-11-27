@@ -258,7 +258,7 @@ jobs:
           MODE: ${{ inputs.mode }}
           BASE: ${{ needs.plan.outputs.base }}
         run: python3 -m ci_kit.pr_regen prepare --mode "$MODE" --base "$BASE" --state-file "$RUNNER_TEMP/regen.json"
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@v10.4.0
         if: steps.prepare.outputs.state == 'regen'
         with:
           python-version: ${{ inputs.python-version }}
@@ -365,7 +365,7 @@ jobs:
           MODE: ${{ inputs.mode }}
           BASE: ${{ needs.plan.outputs.base }}
         run: python3 -m ci_kit.pr_fix prepare --mode "$MODE" --base "$BASE" --state-file "$RUNNER_TEMP/fix.json"
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@v10.4.0
         with:
           python-version: ${{ inputs.python-version }}
           enable-cache: true
