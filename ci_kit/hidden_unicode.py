@@ -44,7 +44,7 @@ suffix (`TEXT_SUFFIXES`) is refused as `--binary-suffix`, so a UTF-16 `.md` cann
 
 Exit 0 clean, 1 findings, 2 could not look (git failed, no text file read, a file it cannot decode).
 
-  ci-hidden-unicode [--root DIR] [--binary-suffix .EXT ...] [--selftest]
+  ci-hidden-unicode [--root DIR] [--binary-suffix .EXT ...] [--renovate] [--selftest]
 """
 
 from __future__ import annotations
@@ -94,8 +94,61 @@ RANGES: tuple[tuple[int, int, str], ...] = (
     (0xE0000, 0xE007F, "tag character"),
     (0xE0100, 0xE01EF, "variation selector supplement"),
 )
-_HIDDEN = re.compile("[" + "".join(f"{re.escape(chr(a))}-{re.escape(chr(b))}" for a, b, _ in RANGES) + "]")
+def _compile(ranges: Sequence[tuple[int, int, str]]) -> re.Pattern[str]:
+    return re.compile("[" + "".join(f"{re.escape(chr(a))}-{re.escape(chr(b))}" for a, b, _ in ranges) + "]")
+
+
+BASE_RANGES = RANGES
+_HIDDEN = _compile(RANGES)
 _BOM = chr(0xFEFF)
+
+#: `--renovate` (v1.49.0, moved from trade-data): ALSO refuse what Renovate's dependency dashboard
+#: warns about. Renovate's `hiddenUnicodeCharactersRegex` (renovatebot/renovate lib/util/regex.ts,
+#: read at 3412de84cead; applied by lib/util/unicode.ts to every file it READS) holds NBSP and the
+#: Unicode spaces, which the default set calls text. trade-data's dashboard warning outlived its gate
+#: for twelve days on one raw NBSP in a translate table. Opt-in: a repo with prose NBSPs that does
+#: not run Renovate keeps the default. Bump the pin when Renovate's regex changes.
+RENOVATE_RANGES: tuple[tuple[int, int, str], ...] = (
+    (0x00A0, 0x00A0, "no-break space (Renovate)"),
+    (0x1680, 0x1680, "Ogham space mark (Renovate)"),
+    (0x2000, 0x200A, "Unicode space other than U+0020 (Renovate)"),
+    (0x2028, 0x2029, "line / paragraph separator (Renovate)"),
+    (0x202F, 0x202F, "narrow no-break space (Renovate)"),
+    (0x205F, 0x205F, "medium mathematical space (Renovate)"),
+    (0x3000, 0x3000, "ideographic space (Renovate)"),
+)
+#: Renovate's regex as code points: the selftest refuses a `--renovate` set that misses any.
+RENOVATE: tuple[int, ...] = (
+    0x00A0, 0x1680, *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
+    0x200B, 0x200C, 0xFEFF, 0x200E, 0x200F, *range(0x202A, 0x202F), 0x00AD,
+)
+
+
+def use_ranges(renovate: bool) -> None:
+    """Select the refused set for this process: the default, or the default plus Renovate's."""
+    global RANGES, _HIDDEN
+    RANGES = tuple(sorted(BASE_RANGES + RENOVATE_RANGES)) if renovate else BASE_RANGES
+    _HIDDEN = _compile(RANGES)
+
+
+_SUPERSET = _compile(tuple(sorted(BASE_RANGES + RENOVATE_RANGES)))
+
+
+def json_escaped(text: str, *, renovate: bool = True) -> str:
+    """JSON `text` with every refused character written as its JSON escape, for a writer that dumps
+    with ensure_ascii=False, so what it writes passes this gate. JSON ONLY: an astral character
+    becomes a UTF-16 surrogate pair, which a Python literal would keep as two lone surrogates.
+
+    Its OWN pattern, never the process's `use_ranges` state: the default escapes the `--renovate`
+    superset, so the output passes the gate in either mode whoever called `use_ranges` first."""
+    def esc(m: re.Match[str]) -> str:
+        cp = ord(m.group())
+        if cp <= 0xFFFF:
+            return f"\\u{cp:04x}"
+        cp -= 0x10000
+        return f"\\u{0xD800 + (cp >> 10):04x}\\u{0xDC00 + (cp & 0x3FF):04x}"
+    return (_SUPERSET if renovate else _compile(BASE_RANGES)).sub(esc, text)
+
 
 #: Skipped unread. A suffix earns a place here by being a binary format; a text format never does.
 BINARY_SUFFIXES = frozenset({
@@ -298,6 +351,26 @@ def _predicate_fails() -> list[str]:
     fails += [f"FALSE POSITIVE on {label}: {findings_in(t)}" for label, t in good.items() if findings_in(t)]
     if findings_in("a" + chr(0x2028) + "b\nc" + chr(0x200B)) != [(2, 2, 0x200B)]:
         fails.append("line/column mis-reported (U+2028 must not count as a line break)")
+    return fails + _renovate_fails()
+
+
+def _renovate_fails() -> list[str]:
+    """`--renovate` both ways: every pinned Renovate code point fires with it, NBSP is text without
+    it, and the JSON escape leaves nothing behind for either set."""
+    global RANGES, _HIDDEN
+    fails: list[str] = []
+    before = RANGES, _HIDDEN   # restored as found: a caller (or a mutation test) may have set them
+    try:
+        use_ranges(True)
+        fails += [f"--renovate MISSED U+{cp:04X}" for cp in RENOVATE if not findings_in("a" + chr(cp) + "b")]
+        tag = "a" + chr(0xA0) + chr(0xE0041) + "b"
+        if findings_in(json_escaped(tag)) or json_escaped(tag) != "a\\u00a0\\udb40\\udc41b":
+            fails.append(f"--renovate json_escaped left a refused character: {json_escaped(tag)!r}")
+        use_ranges(False)
+        if findings_in("a" + chr(0xA0) + "b"):
+            fails.append("NBSP was refused WITHOUT --renovate (use_ranges(False) did not restore the default)")
+    finally:
+        RANGES, _HIDDEN = before
     return fails
 
 
@@ -345,13 +418,22 @@ def _repo_fails(tmp: pathlib.Path) -> list[str]:
 
 
 def selftest() -> list[str]:
-    """Both directions: the predicate on text built from code points, then the CLI's three exits."""
-    fails = _predicate_fails()
-    with tempfile.TemporaryDirectory() as d:
-        try:
-            fails += _repo_fails(pathlib.Path(d))
-        except (OSError, subprocess.CalledProcessError) as exc:
-            fails.append(f"could not build the selftest repos: {type(exc).__name__}: {exc}")
+    """Both directions: the predicate on text built from code points, then the CLI's three exits.
+    Always from the DEFAULT set, restored after: an in-process `use_ranges(True)` must not turn the
+    default set's own NBSP-is-text proof into a false failure."""
+    global RANGES, _HIDDEN
+    before = RANGES, _HIDDEN
+    if RANGES is not BASE_RANGES:   # only a use_ranges(True) is undone; a patched _HIDDEN is the
+        use_ranges(False)           # mutation the selftest exists to catch, so it is left in place
+    try:
+        fails = _predicate_fails()
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                fails += _repo_fails(pathlib.Path(d))
+            except (OSError, subprocess.CalledProcessError) as exc:
+                fails.append(f"could not build the selftest repos: {type(exc).__name__}: {exc}")
+    finally:
+        RANGES, _HIDDEN = before
     return fails
 
 
@@ -373,11 +455,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--root", type=pathlib.Path, default=None)
     ap.add_argument("--binary-suffix", type=_suffix, action="append", default=[], metavar=".EXT",
                     help="one more suffix to skip unread as binary (repeatable; text formats refused)")
+    ap.add_argument("--renovate", action="store_true",
+                    help="also refuse every character Renovate's dashboard warns about (NBSP, Unicode spaces)")
     ap.add_argument("--selftest", action="store_true", help="prove the gate fires and stays quiet")
     args = ap.parse_args(argv)
     env_root = os.environ.get("CI_KIT_ROOT")  # same order as the kit's other gates
     root = args.root or (pathlib.Path(env_root) if env_root else None)
     flags = ["--selftest"] if args.selftest else []
+    if not args.selftest:  # the selftest proves both sets itself, from the default (see selftest)
+        use_ranges(args.renovate)
     return _gate(flags, root.resolve() if root else None, BINARY_SUFFIXES | frozenset(args.binary_suffix))
 
 
