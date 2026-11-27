@@ -13,6 +13,7 @@ wait for docker digests turns this red.
 from __future__ import annotations
 
 import fnmatch
+import functools
 import pathlib
 import re
 
@@ -20,26 +21,43 @@ import json5
 
 PRESET = pathlib.Path(__file__).resolve().parent.parent / "renovate" / "default.json5"
 MATCHERS = {"matchManagers", "matchDatasources", "matchPackageNames", "matchUpdateTypes",
-            "matchCurrentValue", "matchSourceUrls", "matchRepositories"}
+            "matchCurrentValue", "matchNewValue", "matchSourceUrls", "matchRepositories"}
+# Renovate CONCATENATES these down the rule list (`mergeable: true`, lib/config/options/index.ts)
+MERGEABLE = {"prBodyNotes", "addLabels"}
+# value matchers -> the dep field they read; a dep WITHOUT the field fails the rule, as in Renovate
+# (lib/util/package-rules/*.ts: `if (!currentValue) return false`)
+VALUE_FIELDS = {"matchCurrentValue": "currentValue", "matchNewValue": "newValue",
+                "matchRepositories": "repository", "matchSourceUrls": "sourceUrl"}
 
 
-def _name_matches(patterns: list[str], name: str) -> bool:
-    for p in patterns:
-        if p.startswith("/") and p.rstrip("i").endswith("/"):
-            flags = re.I if p.endswith("/i") else 0
-            if re.search(p[1:p.rstrip("i").rfind("/")], name, flags):
-                return True
-        elif fnmatch.fnmatchcase(name, p.replace("**", "*")):
-            return True
-    return False
+def _one(p: str, value: str) -> bool:
+    """Renovate getRegexOrGlobPredicate: `/re/` or `/re/i`, else a glob; a leading `!` negates."""
+    neg = p.startswith("!")
+    body = p[1:] if neg else p
+    if body.startswith("/") and body.rstrip("i").endswith("/") and len(body.rstrip("i")) > 1:
+        flags = re.I if body.endswith("/i") else 0
+        return bool(re.search(body[1:body.rstrip("i").rfind("/")], value, flags)) != neg
+    return fnmatch.fnmatchcase(value, body.replace("**", "*")) != neg
+
+
+def _name_matches(patterns: list[str] | str, name: str) -> bool:
+    """Renovate matchRegexOrGlobList: some positive matches (if any), and no negative does."""
+    pats = [patterns] if isinstance(patterns, str) else patterns
+    pos = [p for p in pats if not p.startswith("!")]
+    if pos and not any(_one(p, name) for p in pos):
+        return False
+    return all(_one(p, name) for p in pats if p.startswith("!"))
+
+
+@functools.lru_cache(maxsize=1)
+def _preset() -> dict:
+    return json5.loads(PRESET.read_text(encoding="utf-8"))
 
 
 def _resolve(dep: dict) -> dict:
-    preset = json5.loads(PRESET.read_text(encoding="utf-8"))
+    preset = _preset()
     cfg = {k: preset[k] for k in ("minimumReleaseAge", "schedule") if k in preset}
     for rule in preset["packageRules"]:
-        if "matchSourceUrls" in rule or "matchRepositories" in rule or "matchCurrentValue" in rule:
-            continue  # a docker image on cgr.dev has none of these here
         if "matchManagers" in rule and dep["manager"] not in rule["matchManagers"]:
             continue
         if "matchDatasources" in rule and dep["datasource"] not in rule["matchDatasources"]:
@@ -48,7 +66,12 @@ def _resolve(dep: dict) -> dict:
             continue
         if "matchPackageNames" in rule and not _name_matches(rule["matchPackageNames"], dep["packageName"]):
             continue
-        cfg.update({k: v for k, v in rule.items() if k not in MATCHERS and k != "description"})
+        if any(m in rule and not (dep.get(f) and _name_matches(rule[m], dep[f])) for m, f in VALUE_FIELDS.items()):
+            continue
+        for k, v in rule.items():
+            if k in MATCHERS or k == "description":
+                continue
+            cfg[k] = [*cfg.get(k, []), *v] if k in MERGEABLE else v
     return cfg
 
 

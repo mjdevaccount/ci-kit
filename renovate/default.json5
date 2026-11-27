@@ -458,11 +458,20 @@
     // written plan, weeks after GA, is the opposite of one -- with it, the approved PR would sit
     // pending again for the next re-push. The gate, checked 2026-11-26: TimescaleDB 2.32.1 (the
     // newest release) builds against PG 15-18 only (CMakeLists.txt at the tag; PG19 is on main,
-    // 8078c3520 "Add PG 19.0 to ci", unreleased) and timescaledb-ha has no pg19 tag; pgvector
-    // tests 19 on main; the pgai repo is ARCHIVED (last extension release 0.11.2, 2025-10). Later
-    // rules (pgbouncer patch, postgres 17 cap) never match a major, so this one stands.
+    // 8078c3520 "Add PG 19.0 to ci", unreleased) and timescaledb-ha has no pg19 tag (Docker Hub
+    // tags?name=pg19: count 0); pgvector tests 19 on main; the pgai repo is ARCHIVED (last
+    // extension release 0.11.2, 2025-10). mcp scripts/renovate_liveness.py watches the hold from
+    // outside: every "Pending Approval" line's age, and the gate turning true (that tag appearing).
+    // Later rules (pgbouncer patch, postgres 17 cap) never match a major, so these stand.
+    //
+    // ONE APPROVAL = ONE DECISION. Approval is per BRANCH, and the "database images" group would
+    // put every db image's major on one: ticking a pgbouncer major would have meant approving a
+    // pg_upgrade. So the hold ungroups (groupName null: one branch per image), and only the
+    // SERVER images -- postgres and timescaledb-ha, the two that ARE a cluster major and that the
+    // consumer's pg_dump client must track -- are re-grouped, with the pg_upgrade gate. prBodyNotes
+    // is MERGEABLE in Renovate (lib/config/options/index.ts), so a server major carries both notes.
     {
-      description: "database-image MAJOR: held for Dependency Dashboard approval (gate: every extension released for the new major + a written upgrade plan)",
+      description: "database-image MAJOR: held for Dependency Dashboard approval, one branch per image",
       matchPackageNames: [
         "timescale/timescaledb-ha",
         "postgres",
@@ -474,10 +483,49 @@
       dependencyDashboardApproval: true,
       automerge: false,
       minimumReleaseAge: null,
-      commitMessageSuffix: "(held for dba: extension support + upgrade plan)",
+      groupName: null,
+      commitMessageSuffix: "(held for dba approval)",
       labels: ["deps", "dba", "major"],
       prBodyNotes: [
-        "**Database-image MAJOR -- a pg_upgrade, never a merge-and-deploy.** Approved from the Dependency Dashboard; Renovate will not merge it (ci-kit renovate/default.json5, database-image major rule). Before this PR moves: (1) every extension the cluster loads (timescaledb, pgvector, ai/pgai, ...) has a RELEASED build for the new major, and a `timescale/timescaledb-ha` tag exists for it; (2) a written upgrade plan exists -- the pg_upgrade drill, rollback and ANALYZE steps (the PG17 -> 18 runbook is trade-infra docs/DB-DISK-MIGRATION.md); (3) the coupled images move WITH the server, never ahead of it: the backup sidecar's pg_dump client (infra/backup/Dockerfile) and CI/test service containers track the PRODUCTION major.",
+        "**Database-image MAJOR -- approved from the Dependency Dashboard, never merged by Renovate** (ci-kit renovate/default.json5, database-image major rule). Read the release notes for config and protocol changes, and move it only once the server it fronts supports it.",
+      ],
+    },
+    {
+      description: "database SERVER major (postgres, timescaledb-ha): one pg_upgrade decision, gate = every extension released for the new major + a written upgrade plan",
+      matchPackageNames: ["timescale/timescaledb-ha", "postgres"],
+      matchUpdateTypes: ["major"],
+      groupName: "database server images",
+      groupSlug: "database-server-images",
+      commitMessageSuffix: "(held for dba: extension support + upgrade plan)",
+      prBodyNotes: [
+        "**A pg_upgrade, never a merge-and-deploy.** Before this PR moves: (1) every extension the cluster loads (timescaledb, pgvector, ai/pgai, ...) has a RELEASED build for the new major, and a `timescale/timescaledb-ha` tag exists for it; (2) a written upgrade plan exists -- the pg_upgrade drill, rollback and ANALYZE steps (in trade-infra the PG17 -> 18 runbook is docs/DB-DISK-MIGRATION.md); (3) the coupled images move WITH the server, never ahead of it: the consumer's backup pg_dump client image and its CI/test service containers track the PRODUCTION major (in trade-infra: infra/backup/Dockerfile).",
+      ],
+    },
+    // ---- a TimescaleDB EXTENSION major is the same hold (2026-11-26) ---------------------------
+    // The versioning regex above maps only the POSTGRES major to `major`: ts2 -> ts3 lands in the
+    // `patch` slot, so matchUpdateTypes ["major"] never sees it, and it would get the plain
+    // "database images" group -- yet it is an ALTER EXTENSION timescaledb on the live cluster and
+    // a data-format change. Matched by VALUE instead (matchCurrentValue / matchNewValue, both
+    // regex-or-glob with `!` negation, lib/util/package-rules/{current,new}-value.ts): the
+    // current tag on ts2 and the new one not. It names ts2 because no regex can compare the two
+    // fields; the PR note says to move it to the next major in the change that adopts it, and a
+    // test pins it to the series the estate runs (pg18.7-ts2.32.1-all, 11-26). Side effect, by
+    // the versioning: once a ts3 tag exists it is the highest `patch`, so ts2.x bumps stop being
+    // offered until it is approved -- the dashboard line says why.
+    {
+      description: "TimescaleDB EXTENSION major (ts2 -> ts3+): held for Dependency Dashboard approval",
+      matchPackageNames: ["timescale/timescaledb-ha"],
+      matchCurrentValue: "/-ts2\\./",
+      matchNewValue: "!/-ts2\\./",
+      dependencyDashboardApproval: true,
+      automerge: false,
+      minimumReleaseAge: null,
+      groupName: "timescaledb extension major",
+      groupSlug: "timescaledb-extension-major",
+      commitMessageSuffix: "(held for dba: ALTER EXTENSION plan)",
+      labels: ["deps", "dba", "major"],
+      prBodyNotes: [
+        "**TimescaleDB EXTENSION major -- an ALTER EXTENSION timescaledb on the live cluster, never a merge-and-deploy** (ci-kit renovate/default.json5, TimescaleDB extension major rule). Before this PR moves: the extension's upgrade notes are read, a written plan exists (ALTER EXTENSION, rollback = restore, continuous aggregates and compression checked), and the same change moves that ci-kit rule from ts2 to the new major.",
       ],
     },
 
