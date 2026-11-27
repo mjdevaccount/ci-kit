@@ -15,7 +15,7 @@ PRESET = pathlib.Path(__file__).resolve().parent.parent / "renovate" / "default.
 # every repo whose default branch runs ci-kit's pr-autoupdate with max-in-flight (the serial queue)
 QUEUE_REPOS = {f"mjdevaccount/{r}" for r in (
     "trade-data", "trade-infra", "trade-ui", "edge-host", "home-host", "TradingEdge.Scraper",
-    "claude-plugins", "local-mcp", "mattpc-llm-stack", "cred-broker", "edge-ci", "ci-kit")}
+    "claude-plugins", "local-mcp", "mattpc-llm-stack", "cred-broker", "ci-kit")}  # edge-ci archived 2026-11-27
 
 
 def _cfg() -> dict:
