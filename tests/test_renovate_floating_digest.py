@@ -21,13 +21,15 @@ import json5
 
 PRESET = pathlib.Path(__file__).resolve().parent.parent / "renovate" / "default.json5"
 MATCHERS = {"matchManagers", "matchDatasources", "matchPackageNames", "matchUpdateTypes",
-            "matchCurrentValue", "matchNewValue", "matchSourceUrls", "matchRepositories"}
+            "matchCurrentValue", "matchNewValue", "matchSourceUrls", "matchRepositories",
+            "matchDepTypes", "matchFileNames"}
 # Renovate CONCATENATES these down the rule list (`mergeable: true`, lib/config/options/index.ts)
 MERGEABLE = {"prBodyNotes", "addLabels"}
 # value matchers -> the dep field they read; a dep WITHOUT the field fails the rule, as in Renovate
 # (lib/util/package-rules/*.ts: `if (!currentValue) return false`)
 VALUE_FIELDS = {"matchCurrentValue": "currentValue", "matchNewValue": "newValue",
-                "matchRepositories": "repository", "matchSourceUrls": "sourceUrl"}
+                "matchRepositories": "repository", "matchSourceUrls": "sourceUrl",
+                "matchDepTypes": "depType", "matchFileNames": "packageFile"}
 
 
 def _one(p: str, value: str) -> bool:
