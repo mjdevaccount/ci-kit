@@ -111,7 +111,7 @@ def count_by_dir(rels: Iterable[str], dirs: Iterable[str]) -> dict[str, int]:
     out = dict.fromkeys(dirs, 0)
     for rel in rels:
         for d in out:
-            if rel == d or rel.startswith(d.rstrip("/") + "/"):
+            if d in (".", "") or rel == d or rel.startswith(d.rstrip("/") + "/"):
                 out[d] += 1
     return out
 

@@ -35,6 +35,22 @@ from collections import Counter
 from collections.abc import Iterable
 
 
+def kept_header(path: pathlib.Path, default: str) -> str:
+    """The baseline's OWN leading `#` block when it has one, else `default` (v1.49.0).
+
+    A gate moved into the kit keeps the caller's baseline file, whose header carries the caller's
+    history (when it was armed, why its scope grew). A `--write` must not replace that with the
+    kit's generic prose, so the header a re-freeze writes is the one already there."""
+    if not path.is_file():
+        return default
+    lines: list[str] = []
+    for ln in path.read_text(encoding="utf-8").splitlines():
+        if not ln.lstrip().startswith("#"):
+            break
+        lines.append(ln)
+    return "".join(f"{ln}\n" for ln in lines) if lines else default
+
+
 class RatchetSet:
     """A frozen set of grandfathered keys; anything new fails."""
 

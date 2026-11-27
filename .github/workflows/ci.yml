@@ -109,6 +109,39 @@ jobs:
         with:
           tool: ci-env-reads
           args: --selftest
+      # v1.49.0, moved from trade-data: each selftest through the action as callers get it (the
+      # bad/good/blind exits are tests/test_<tool>_must_fire.py), and ci-blind-parse ON this repo,
+      # whose gates are its subject (ci_kit/astread.py and ci_kit/sql hold the parse handlers).
+      - name: line-cap selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-line-cap
+          args: --selftest
+      - name: function-clones selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-function-clones
+          args: --selftest
+      - name: blind-parse selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-blind-parse
+          args: --selftest
+      - name: blind-parse gate on ci-kit itself (no gate here answers a parse failure quietly)
+        uses: ./
+        with:
+          tool: ci-blind-parse
+          args: --dir ci_kit:20
+      - name: quarantine selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-quarantine
+          args: --selftest
+      - name: hidden-unicode selftest (through the action; both sets)
+        uses: ./
+        with:
+          tool: ci-hidden-unicode
+          args: --selftest
       - name: dup-code gate on ci-kit itself (through the action; baseline ci/jscpd-baseline.json)
         uses: ./
         with:

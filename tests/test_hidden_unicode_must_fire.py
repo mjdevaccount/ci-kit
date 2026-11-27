@@ -206,3 +206,27 @@ def test_selftest_dies_when_unreadable_files_are_skipped(monkeypatch) -> None:
 def test_cli_selftest_exit_codes(new_repo) -> None:
     res = run_tool("hidden_unicode", new_repo(), "--selftest")
     assert res.returncode == 0 and "selftest OK" in res.stdout, res.stdout + res.stderr
+
+
+@pytest.mark.parametrize("cp", hu.RENOVATE)
+def test_renovate_flags_every_pinned_renovate_code_point(new_repo, cp: int) -> None:
+    """--renovate (v1.49.0, moved from trade-data): what Renovate's dashboard warns about fails
+    here first. Without the flag NBSP and the Unicode spaces stay text (other callers' prose)."""
+    r = _add(new_repo(), {"docs/a.md": "a" + chr(cp) + "b" + NL})
+    assert run_tool("hidden_unicode", r, "--renovate").returncode == 1
+    default = run_tool("hidden_unicode", r).returncode
+    assert default == (1 if any(a <= cp <= b for a, b, _ in hu.BASE_RANGES) else 0)
+
+
+def test_selftest_dies_when_renovate_drops_a_pinned_point(monkeypatch) -> None:
+    monkeypatch.setattr(hu, "RENOVATE_RANGES", hu.RENOVATE_RANGES[1:])
+    assert any("--renovate MISSED U+00A0" in f for f in hu.selftest())
+
+
+def test_json_escaped_output_passes_the_renovate_set() -> None:
+    try:
+        hu.use_ranges(True)
+        text = "x" + chr(0xA0) + chr(0x200B) + chr(0xE0041) + "y"
+        assert hu.findings_in(text) and not hu.findings_in(hu.json_escaped(text))
+    finally:
+        hu.use_ranges(False)

@@ -15,7 +15,9 @@ not mistaken for broken code) and exit 2 on a file it cannot decode -- never a s
 
 from __future__ import annotations
 
+import argparse
 import collections
+import os
 import pathlib
 import re
 import sys
@@ -80,6 +82,59 @@ def repo_on_path(root: pathlib.Path, marker: str) -> None:
     trade-data gates (lint_llm_surfaces, lint_watched_surfaces) each carried this."""
     if (root / marker).is_file() and str(root) not in sys.path:
         sys.path.insert(0, str(root))
+
+
+def gate_root(arg: pathlib.Path | None) -> pathlib.Path:
+    """The checkout a gate reads: `--root`, else `$CI_KIT_ROOT`, else the git toplevel of cwd
+    (exit 2 outside a checkout). v1.49.0: the order every kit gate already spelled by hand."""
+    env = os.environ.get("CI_KIT_ROOT")
+    return (arg or (pathlib.Path(env) if env else None) or discover.repo_root()).resolve()
+
+
+def dir_floors(values: Sequence[str], *, gate: str, default: int = 1) -> dict[str, int]:
+    """`--dir DIR[:FLOOR]` values as {dir: floor}, each dir its OWN scan floor (v1.49.0).
+
+    PER DIR, because a total hides a directory the scan read nothing from: `service/` alone clears
+    any total floor whether `sources/` was read or not (trade-data row 33, 2026-10-03). No `--dir`
+    at all is exit 2: a gate told to rule nothing has verified nothing."""
+    out: dict[str, int] = {}
+    for v in values:
+        d, sep, n = v.rpartition(":") if ":" in v else (v, "", "")
+        d = d.strip().strip("/") or "."
+        if sep and not n.strip().isdigit():
+            print(f"{gate}: --dir {v!r}: the floor after ':' must be a whole number", file=sys.stderr)
+            raise SystemExit(2)
+        out[d] = int(n) if sep else default
+    if not out:
+        print(f"{gate}: no --dir given -- a gate that rules no directory cannot look", file=sys.stderr)
+        raise SystemExit(2)
+    return out
+
+
+def gate_parser(prog: str, doc: str | None, *, baseline: str | None = None,
+                dir_meta: str = "DIR[:FLOOR]") -> argparse.ArgumentParser:
+    """The flags every python-tree gate shares (v1.49.0): `@FILE` (one argument per line), `--root`,
+    `--dir` (repeatable, see `dir_floors`), `--selftest`; with a default `baseline` path also
+    `--baseline` and `--write-baseline` (alias `--write`, the spelling the source repo shipped)."""
+    ap = argparse.ArgumentParser(prog=prog, fromfile_prefix_chars="@",
+                                 description=(doc or "").split("\n", 1)[0])
+    ap.add_argument("--root", type=pathlib.Path, default=None)
+    ap.add_argument("--dir", action="append", default=[], metavar=dir_meta)
+    ap.add_argument("--selftest", action="store_true")
+    if baseline is not None:
+        ap.add_argument("--baseline", type=pathlib.Path, default=pathlib.Path(baseline))
+        ap.add_argument("--write-baseline", "--write", action="store_true", dest="write")
+    return ap
+
+
+def selftest_exit(gate: str, selftest: Callable[[], list[str]]) -> int:
+    """`--selftest` for a gate whose CLI parses its own flags: 0 passed, 2 failed (never 1)."""
+    return check(["--selftest"], gate=gate, scan=list, selftest=selftest, selftest_fail=2)
+
+
+def under(root: pathlib.Path, p: pathlib.Path) -> pathlib.Path:
+    """A baseline path as given on the command line, relative to the gated checkout's root."""
+    return p if p.is_absolute() else root / p
 
 
 def count_sites(root: pathlib.Path, scan_dirs: Sequence[str], exempt: Iterable[str],
@@ -165,6 +220,7 @@ def run(argv: Sequence[str], *, gate: str, scan: Callable[[], Mapping[str, int] 
     discover.require_scanned(scanned(), gate=gate, dirs=scan_dirs, floor=floor)
     is_set = isinstance(ratchet, RatchetSet)
     if any(f in argv for f in write_flags):
+        ratchet.path.parent.mkdir(parents=True, exist_ok=True)
         n = ratchet.write(set(current) if is_set else current)  # type: ignore[arg-type]
         print(written(current) if written else _written(gate, n, current, is_set=is_set))
         return 0

@@ -152,7 +152,7 @@ def rehashed_only(old: str, new: str, before: str) -> bool:
         for p in pins(old):
             if p.name in moved and p.name in now:
                 expected = rewrite(expected, p, now[p.name])
-    except (ValueError, SyntaxError):
+    except (ValueError, SyntaxError):  # blind-ok: False = NOT a pure rehash, so the push is refused
         return False
     return expected == new
 
@@ -187,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
                 r = subprocess.run(["git", "show", f"{a.since}:{f}"], capture_output=True, text=True, encoding="utf-8")
                 before = r.stdout if r.returncode == 0 else ""      # a file new since then: every pin moved
             said = rehash(Path(f), before=before)
-        except (ValueError, SyntaxError, OSError) as e:
+        except (ValueError, SyntaxError, OSError) as e:  # blind-ok: printed and rc=1, never a quiet pass
             print(f"{GATE}: {f}: {e}", file=sys.stderr)
             rc = 1
             continue

@@ -197,7 +197,7 @@ def pinned(root: Path, files: list[str], base: str) -> list[str]:
         try:
             if bumped(text, r.stdout if r.returncode == 0 else ""):
                 out.append(f)
-        except (ValueError, SyntaxError):
+        except (ValueError, SyntaxError):  # blind-ok: an unreadable file is LISTED, the loud direction
             out.append(f)          # unreadable: pin_rehash itself fails loudly, never a quiet skip
     return out
 
