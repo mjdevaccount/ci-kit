@@ -13,8 +13,8 @@ engine, a fails-green action major, an annotation pin outside CI files -- keeps 
 from __future__ import annotations
 
 import pytest
-from test_renovate_floating_digest import _resolve
 from test_renovate_first_party_rules import KIT_WINDOW
+from test_renovate_floating_digest import _resolve
 
 WF = ".github/workflows/ci.yml"
 
