@@ -198,7 +198,7 @@ jobs:
           python3 -m ci_kit.pr_relock prepare --event "$EVENT" --head-repo "$HEAD_REPO" --repo "$GITHUB_REPOSITORY"
           --ref "$HEAD_REF" --branch-prefix "$PREFIX" --lockfiles "$LOCKFILES" --base "$BASE"
           --state-file "$RUNNER_TEMP/relock.json"
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@v10.4.0
         if: steps.prepare.outputs.uv == 'true'
         with:
           python-version: ${{ inputs.python-version }}
