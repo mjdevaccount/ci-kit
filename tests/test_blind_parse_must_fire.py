@@ -41,3 +41,15 @@ def test_a_dir_under_its_floor_is_2(new_repo) -> None:
 def test_an_unparseable_file_is_2(new_repo) -> None:
     _, r = run(new_repo, "blind_parse", {"scripts/l.py": LOUD, "scripts/x.py": "def (:\n"}, "--dir", "scripts")
     assert r.returncode == 2 and "scripts/x.py" in r.stdout + r.stderr, r.stdout + r.stderr
+
+
+NESTED = ("import ast\n\ndef scan(src, other):\n    try:\n        return ast.parse(src)\n"
+          "    except SyntaxError:\n        try:\n            ast.parse(other)\n"
+          "        except SyntaxError:\n            # blind-ok: the fallback source is optional\n"
+          "            pass\n        return []\n")
+
+
+def test_a_nested_waiver_does_not_excuse_the_outer_handler(new_repo) -> None:
+    _, r = run(new_repo, "blind_parse", {"scripts/n.py": NESTED}, "--dir", "scripts")
+    assert r.returncode == 1 and "scripts/n.py:6:" in r.stdout, r.stdout + r.stderr
+    assert "scripts/n.py:9:" not in r.stdout, "the inner handler's own waiver was not honoured"

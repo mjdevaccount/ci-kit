@@ -131,17 +131,24 @@ def use_ranges(renovate: bool) -> None:
     _HIDDEN = _compile(RANGES)
 
 
-def json_escaped(text: str) -> str:
+_SUPERSET = _compile(tuple(sorted(BASE_RANGES + RENOVATE_RANGES)))
+
+
+def json_escaped(text: str, *, renovate: bool = True) -> str:
     """JSON `text` with every refused character written as its JSON escape, for a writer that dumps
     with ensure_ascii=False, so what it writes passes this gate. JSON ONLY: an astral character
-    becomes a UTF-16 surrogate pair, which a Python literal would keep as two lone surrogates."""
+    becomes a UTF-16 surrogate pair, which a Python literal would keep as two lone surrogates.
+
+    Its OWN pattern, never the process's `use_ranges` state: the default escapes the `--renovate`
+    superset, so the output passes the gate in either mode whoever called `use_ranges` first."""
     def esc(m: re.Match[str]) -> str:
         cp = ord(m.group())
         if cp <= 0xFFFF:
             return f"\\u{cp:04x}"
         cp -= 0x10000
         return f"\\u{0xD800 + (cp >> 10):04x}\\u{0xDC00 + (cp & 0x3FF):04x}"
-    return _HIDDEN.sub(esc, text)
+    return (_SUPERSET if renovate else _compile(BASE_RANGES)).sub(esc, text)
+
 
 #: Skipped unread. A suffix earns a place here by being a binary format; a text format never does.
 BINARY_SUFFIXES = frozenset({
@@ -411,13 +418,22 @@ def _repo_fails(tmp: pathlib.Path) -> list[str]:
 
 
 def selftest() -> list[str]:
-    """Both directions: the predicate on text built from code points, then the CLI's three exits."""
-    fails = _predicate_fails()
-    with tempfile.TemporaryDirectory() as d:
-        try:
-            fails += _repo_fails(pathlib.Path(d))
-        except (OSError, subprocess.CalledProcessError) as exc:
-            fails.append(f"could not build the selftest repos: {type(exc).__name__}: {exc}")
+    """Both directions: the predicate on text built from code points, then the CLI's three exits.
+    Always from the DEFAULT set, restored after: an in-process `use_ranges(True)` must not turn the
+    default set's own NBSP-is-text proof into a false failure."""
+    global RANGES, _HIDDEN
+    before = RANGES, _HIDDEN
+    if RANGES is not BASE_RANGES:   # only a use_ranges(True) is undone; a patched _HIDDEN is the
+        use_ranges(False)           # mutation the selftest exists to catch, so it is left in place
+    try:
+        fails = _predicate_fails()
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                fails += _repo_fails(pathlib.Path(d))
+            except (OSError, subprocess.CalledProcessError) as exc:
+                fails.append(f"could not build the selftest repos: {type(exc).__name__}: {exc}")
+    finally:
+        RANGES, _HIDDEN = before
     return fails
 
 
@@ -446,7 +462,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     env_root = os.environ.get("CI_KIT_ROOT")  # same order as the kit's other gates
     root = args.root or (pathlib.Path(env_root) if env_root else None)
     flags = ["--selftest"] if args.selftest else []
-    if not args.selftest:  # the selftest proves both sets itself, starting from the default
+    if not args.selftest:  # the selftest proves both sets itself, from the default (see selftest)
         use_ranges(args.renovate)
     return _gate(flags, root.resolve() if root else None, BINARY_SUFFIXES | frozenset(args.binary_suffix))
 

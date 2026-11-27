@@ -60,7 +60,10 @@ def over_cap(lengths: Mapping[str, int], cap: int) -> dict[str, int]:
 
 
 def unruled_dirs(paths: Sequence[str], ruled: Sequence[str], unruled: Mapping[str, str]) -> list[str]:
-    """Top-level dirs of `paths` neither ruled nor excused (`.` = a repo-root file)."""
+    """Top-level dirs of `paths` neither ruled nor excused (`.` = a repo-root file). A ruled `.`
+    covers every directory."""
+    if "." in ruled:
+        return []
     tops = {p.split("/", 1)[0] if "/" in p else "." for p in paths}
     return sorted(t for t in tops if t not in ruled and t not in unruled)
 
@@ -73,7 +76,7 @@ def _unruled(values: Sequence[str]) -> dict[str, str]:
             print(f"{GATE}: --unruled {v!r} needs DIR:WHY with a reason (>= 8 chars) -- an excuse "
                   f"nobody had to write is how a directory goes dark", file=sys.stderr)
             raise SystemExit(2)
-        out[d.strip().strip("/") or "."] = why.strip()
+        out[site_lint.norm_dir(d)] = why.strip()
     return out
 
 

@@ -98,7 +98,14 @@ def swallow_kind(handler: ast.ExceptHandler, noreturn: frozenset[str] = NORETURN
 
 
 def _waiver_reason(handler: ast.ExceptHandler, lines: list[str]) -> str | None:
-    for raw in lines[handler.lineno - 1:handler.end_lineno or handler.lineno]:
+    """The handler's own waiver. Lines of a NESTED handler are skipped: its waiver excuses that
+    handler, and read here it would silently excuse the outer one too."""
+    nested = {ln for n in ast.walk(handler) if isinstance(n, ast.ExceptHandler) and n is not handler
+              for ln in range(n.lineno, (n.end_lineno or n.lineno) + 1)}
+    for no in range(handler.lineno, (handler.end_lineno or handler.lineno) + 1):
+        raw = lines[no - 1] if no - 1 < len(lines) else ""
+        if no in nested:
+            continue
         if WAIVER in raw:
             return raw.split(WAIVER, 1)[1].lstrip(": ").strip()
     return None

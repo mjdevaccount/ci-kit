@@ -137,11 +137,6 @@ jobs:
         with:
           tool: ci-quarantine
           args: --selftest
-      - name: hidden-unicode selftest (through the action; both sets)
-        uses: ./
-        with:
-          tool: ci-hidden-unicode
-          args: --selftest
       - name: dup-code gate on ci-kit itself (through the action; baseline ci/jscpd-baseline.json)
         uses: ./
         with:

@@ -230,3 +230,21 @@ def test_json_escaped_output_passes_the_renovate_set() -> None:
         assert hu.findings_in(text) and not hu.findings_in(hu.json_escaped(text))
     finally:
         hu.use_ranges(False)
+
+
+def test_the_selftest_is_immune_to_an_in_process_use_ranges() -> None:
+    """A library caller that picked the Renovate set must not turn `--selftest` red, and the
+    selftest must hand the caller's choice back untouched."""
+    try:
+        hu.use_ranges(True)
+        assert hu.main(["--selftest"]) == 0
+        assert hu.findings_in("a" + chr(0xA0) + "b"), "the caller's --renovate choice was not restored"
+    finally:
+        hu.use_ranges(False)
+
+
+def test_json_escaped_does_not_depend_on_use_ranges() -> None:
+    text = "a" + chr(0xA0) + chr(0x200B) + "b"
+    hu.use_ranges(False)
+    assert hu.json_escaped(text) == "a\\u00a0\\u200bb"
+    assert hu.json_escaped(text, renovate=False) == "a" + chr(0xA0) + "\\u200bb"

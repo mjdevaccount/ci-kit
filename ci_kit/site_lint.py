@@ -100,9 +100,10 @@ def dir_floors(values: Sequence[str], *, gate: str, default: int = 1) -> dict[st
     out: dict[str, int] = {}
     for v in values:
         d, sep, n = v.rpartition(":") if ":" in v else (v, "", "")
-        d = d.strip().strip("/") or "."
-        if sep and not n.strip().isdigit():
-            print(f"{gate}: --dir {v!r}: the floor after ':' must be a whole number", file=sys.stderr)
+        d = norm_dir(d)
+        if sep and not (n.strip().isdigit() and int(n) >= 1):
+            print(f"{gate}: --dir {v!r}: the floor after ':' must be a whole number >= 1 -- a floor "
+                  f"of 0 is a directory the gate may read nothing from and still pass", file=sys.stderr)
             raise SystemExit(2)
         out[d] = int(n) if sep else default
     if not out:
@@ -111,12 +112,29 @@ def dir_floors(values: Sequence[str], *, gate: str, default: int = 1) -> dict[st
     return out
 
 
+def norm_dir(d: str) -> str:
+    """A repo-relative dir as `discover` spells it: `/` separators, no `./`, no trailing `/`; `.` = root."""
+    d = d.strip().replace(chr(92), "/")
+    while d.startswith("./"):
+        d = d[2:]
+    return d.strip("/") or "."
+
+
+class _ArgsFileParser(argparse.ArgumentParser):
+    """`@FILE` reads one argument per line; a blank line or a `#` comment line is skipped, so an
+    args file can say WHY a flag is there (argparse's default reads both as an argument)."""
+
+    def convert_arg_line_to_args(self, arg_line: str) -> list[str]:
+        s = arg_line.strip()
+        return [] if not s or s.startswith("#") else [s]
+
+
 def gate_parser(prog: str, doc: str | None, *, baseline: str | None = None,
                 dir_meta: str = "DIR[:FLOOR]") -> argparse.ArgumentParser:
     """The flags every python-tree gate shares (v1.49.0): `@FILE` (one argument per line), `--root`,
     `--dir` (repeatable, see `dir_floors`), `--selftest`; with a default `baseline` path also
     `--baseline` and `--write-baseline` (alias `--write`, the spelling the source repo shipped)."""
-    ap = argparse.ArgumentParser(prog=prog, fromfile_prefix_chars="@",
+    ap = _ArgsFileParser(prog=prog, fromfile_prefix_chars="@",
                                  description=(doc or "").split("\n", 1)[0])
     ap.add_argument("--root", type=pathlib.Path, default=None)
     ap.add_argument("--dir", action="append", default=[], metavar=dir_meta)
