@@ -89,7 +89,9 @@ def test_each_kit_release_is_one_pr_across_its_depnames_must_fire() -> None:
         assert r["schedule"] == KIT_WINDOW and r["minimumReleaseAge"] is None
         # no later group re-splits it: one naming the kit, or one with no package filter on a kit's manager
         assert not [x for x in _rules()[i + 1:] if x not in _kit_groups() and x.get("groupName") is not None
-                    and (kit in str(x) or (not any(k in x for k in NAME_MATCHERS)
+                    # naming = a MATCHER names it; prose (prBodyNotes citing "ci-kit renovate/...") is not
+                    and (kit in str({k: v for k, v in x.items() if k.startswith("match")})
+                         or (not any(k in x for k in NAME_MATCHERS)
                                            and (not x.get("matchManagers") or set(x["matchManagers"]) & KIT_MANAGERS)))]
 
 
