@@ -34,13 +34,17 @@ class _Done:
 
 def fake_gh(calls: list[tuple], *, classic: tuple[int, str, str] = (0, '{"strict": true}', ""),
             rules: tuple[int, str] = (0, "[]"), runs: list[dict] | None = None, cancel: tuple[int, str] = (0, ""),
-            workflows: tuple[int, list] = (0, []), behind_by: int | None = 3):
+            workflows: tuple[int, list] = (0, []), behind_by: int | None = 3, train_runs: int | None = 1):
     def gh(*a: str, check: bool = True) -> _Done:
         calls.append(a)
         if a[1].endswith("/protection/required_status_checks"):
             return _Done(*classic)
         if "/rules/branches/" in a[1]:
             return _Done(rules[0], rules[1], "" if not rules[0] else "HTTP 403")
+        if a[1].startswith("repos/o/r/actions/workflows/") and "/runs?" in a[1]:
+            if train_runs is None:
+                return _Done(1, "", "HTTP 502")
+            return _Done(0, json.dumps({"total_count": train_runs, "workflow_runs": []}))
         if a[1].startswith("repos/o/r/actions/workflows"):
             return _Done(workflows[0], json.dumps({"workflows": workflows[1]}), "HTTP 502" if workflows[0] else "")
         if "/compare/" in a[1]:
@@ -123,6 +127,10 @@ def test_a_merge_train_reads_behind_heads_so_they_are_never_cancelled() -> None:
         assert cancelled(calls) == []
     calls = []
     assert sweep(fake_gh(calls, runs=[run(11)]), [pr(1)], train=True) == 0
+    assert cancelled(calls) == []
+    calls = []  # a run count that cannot be read = a train too
+    unread = fake_gh(calls, runs=[run(11)], workflows=(0, [{"name": "merge-train", "path": "x"}]), train_runs=None)
+    assert sweep(unread, [pr(1)]) == 0
     assert cancelled(calls) == []
     # ...while a DIRTY head on the same trained repo is (the train never takes a conflicting PR)
     calls = []
@@ -300,3 +308,16 @@ def test_an_unreadable_workflow_list_says_the_behind_rule_was_skipped() -> None:
 
 DR_SWEEP = dr.Canceller.sweep
 DR_SUPERSEDED = dr.Canceller.superseded
+
+
+def test_a_reusable_merge_train_definition_that_never_ran_is_no_train() -> None:
+    # ci-kit 2026-11-27: its own merge-train.yml is `on: workflow_call` only, so it never runs; read as
+    # a train it switched the BEHIND rule off and #142 ran its full CI 31 min behind main
+    calls: list[tuple] = []
+    summary: list[str] = []
+    defn = fake_gh(calls, runs=[run(11)], train_runs=0,
+                   workflows=(0, [{"id": 7, "name": "merge-train", "path": ".github/workflows/merge-train.yml"}]))
+    assert sweep(defn, [pr(1)], summary) == 0
+    assert cancelled(calls) == ["11"]
+    assert any(c[1] == "repos/o/r/actions/workflows/7/runs?per_page=1" for c in calls)
+    assert any("never ran here" in s and "BEHIND rule applies" in s for s in summary)
