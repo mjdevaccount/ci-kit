@@ -282,6 +282,47 @@
       matchUpdateTypes: ["major"],
       automerge: true,
     },
+    // ---- CI-ONLY TOOLING: no age wait, no weekend, majors included (2026-11-26) -------------
+    // ci-kit#139 (Renovate validator 44 -> 45: the `# renovate: datasource=npm depName=renovate`
+    // pin in ci.yml, a tool nothing but the `renovate config` job runs) sat behind
+    // `renovate/stability-days`, then went CONFLICTED behind main, and was superseded by a hand
+    // PR (#144). The operator: "why are we waiting on this and not just getting it done?" The 3-day
+    // age wait is yank protection for something that SHIPS -- an image, a lockfile a service
+    // imports. A CI tool ships nothing: it is exercised by the very PR that bumps it, a broken
+    // one turns that PR red, and the every-check gate (header) refuses it. Waiting buys nothing
+    // the PR's own run does not already prove, and the wait is what let the branch rot. So CI
+    // tooling lands on green, any day (KIT_WINDOW: one PR a day per group, not one per release --
+    // the first-party rules' Mend-run lesson below), majors included.
+    // SCOPE, both rules: the `uses:` pins (depType action / reusable workflow -- NOT the docker
+    // `container:`/`services:` images the same manager reads, which track a PRODUCTION major and
+    // keep every rule below, the database-major hold first) and the `# renovate:` annotation pins
+    // in a workflow or ci-kit's own gate binaries (ci_kit/*.py: oasdiff, jscpd, gitleaks -- each
+    // with a must-fire selftest, and a sha256 table no bump moves, so its PR is red until a
+    // session moves the hashes). NOT here: first-party kits (their own rules, below) and the
+    // review gate's engine (`anthropics/claude-code-action` is held by name below; its CLI
+    // `@anthropic-ai/claude-code` keeps the default: a gate graded by the edited copy is read
+    // first). The fails-green exception BELOW still holds paths-filter / gitleaks-action majors
+    // for a human (it comes AFTER these rules, so its `automerge: false` wins); these rules lift
+    // only their wait. tests/test_renovate_ci_tooling.py pins scope, order and the db-major hold.
+    {
+      description: "CI-only tooling: an action / reusable-workflow `uses:` pin lands on green, no age wait",
+      matchManagers: ["github-actions"],
+      matchDepTypes: ["action", "workflow"],
+      matchPackageNames: ["!/^mjdevaccount\\//i", "!anthropics/claude-code-action"],
+      minimumReleaseAge: null,
+      schedule: ["* 0-11 * * *"],
+      automerge: true,
+    },
+    {
+      description: "CI-only tooling: a `# renovate:` annotation pin in a workflow or ci-kit's gates lands on green, no age wait",
+      matchManagers: ["custom.regex"],
+      matchFileNames: [".github/workflows/**", "ci_kit/**"],
+      matchPackageNames: ["!/^mjdevaccount\\//i", "!@anthropic-ai/claude-code"],
+      minimumReleaseAge: null,
+      schedule: ["* 0-11 * * *"],
+      automerge: true,
+    },
+
     // ...except an action that DECIDES WHETHER OTHER CHECKS RUN (a broken paths-filter skips
     // the unit job, and a skipped step is a real green), or that IS a guard (a gitleaks that
     // scans nothing passes). Their failure looks exactly like success, so a human reads them.
@@ -292,6 +333,7 @@
       automerge: false,
       labels: ["deps", "major", "fails-green"],
     },
+
 
     // ---- grouping: one PR per ecosystem per week, not forty -------------------------------
     { matchManagers: ["github-actions"], matchUpdateTypes: ["minor", "patch", "digest", "pinDigest"], groupName: "github actions" },
