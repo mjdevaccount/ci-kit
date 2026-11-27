@@ -16,8 +16,12 @@ THE BAR IS TWO-SIDED: the run cannot merge, AND nothing else reads its result. T
     checks are green at its head -- "being behind main is exactly what the train fixes" -- so a
     BEHIND head's run is how a PR becomes a rider (session review of this module, finding 1: a
     cancel there leaves the train `checks pending` forever on a busy main). A repo has a train
-    when the caller set `train-workflow`, or any of its workflows is named/pathed `merge-train`;
-    a workflow list that cannot be read counts as a train (skip, never guess). BEHIND is then
+    when the caller set `train-workflow`, or a workflow named/pathed `merge-train` HAS RUN there
+    (v1.48.0: a reusable-only definition -- ci-kit's own `merge-train.yml`, `on: workflow_call` --
+    can never run and is no train; reading it as one switched the rule off in ci-kit itself, where
+    #142 ran its whole CI on a head 31 min behind main). A train caller always has runs (its cron
+    backstop fires hourly). A workflow list or run count that cannot be read counts as a train
+    (skip, never guess). BEHIND is then
     re-proven as a GIT fact before any cancel: `compare/{base}...{head}` must say `behind_by > 0`
     (mergeStateStatus is GitHub's cached view, read at the start of the pass).
 Never touched: `pull_request_target` / `push` / `schedule` / `workflow_run` runs (the queue's own
@@ -96,8 +100,22 @@ def has_train(repo: str, gh: Gh, summary: list[str] | None = None) -> bool:
         if summary is not None:
             summary.append("doomed runs: BEHIND rule skipped -- could not list the workflows to rule out a merge train")
         return True
-    return any(TRAIN_MARK in str(w.get("name") or "").lower() or TRAIN_MARK in str(w.get("path") or "").lower()
-               for w in got.get("workflows") or [])
+    named = [w for w in got.get("workflows") or []
+             if TRAIN_MARK in str(w.get("name") or "").lower() or TRAIN_MARK in str(w.get("path") or "").lower()]
+    for w in named:
+        ref = w.get("id") or str(w.get("path") or "").rsplit("/", 1)[-1]
+        ran = _json(gh("api", f"repos/{repo}/actions/workflows/{ref}/runs?per_page=1", check=False), {})
+        if not isinstance(ran, dict):
+            if summary is not None:
+                summary.append(f"doomed runs: BEHIND rule skipped -- could not read whether {w.get('path') or ref} "
+                               "has ever run (a merge train)")
+            return True
+        if int(ran.get("total_count") or 0) > 0:
+            return True
+    if named and summary is not None:
+        summary.append("doomed runs: " + ", ".join(str(w.get("path") or w.get("name")) for w in named)
+                       + " never ran here (a reusable definition, not a train): the BEHIND rule applies")
+    return False
 
 
 def doomed(prs: list[dict], behind: bool, base: str | None = None) -> list[tuple[dict, str]]:
