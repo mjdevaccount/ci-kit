@@ -438,6 +438,48 @@
       matchPackageNames: ["timescale/timescaledb-ha"],
       versioning: "regex:^pg(?<major>\\d+)\\.(?<minor>\\d+)-ts(?<patch>\\d+)\\.(?<build>\\d+)\\.(?<revision>\\d+)-(?<compatibility>.+)$",
     },
+    // ---- a database-image MAJOR is HELD FOR APPROVAL, by name (2026-11-26) --------------------
+    // A Postgres major is a pg_upgrade of a stateful cluster, not a tag bump. Until now nothing
+    // said that: a consumer's "update database images to v19" (langfuse-pg 18.6 -> 19.0, the
+    // backup sidecar's pg_dump client 18 -> 19) and edge-platform's CI service container
+    // (postgres 18 -> 19) sat in "Pending Status Checks" from 2026-11-20 -- the dashboard section
+    // that reads "a wait that will end". It would not: the docker datasource takes the release
+    // timestamp from Docker Hub's `tag_last_pushed` (renovate lib/modules/datasource/docker/
+    // index.ts, releaseTimestampNote), and docker-library re-pushes its floating tags every few
+    // days (11-26: `19` pushed 11-26, `19-alpine` 11-23, `18-alpine` 11-21), so the 3-day age
+    // wait re-armed under every rebuild -- the python base-image rule's class. Had it ever ended,
+    // the PR it opened would have been held only by `automerge: false`, with nothing naming why.
+    // Now the hold is a NAMED STATE: dependencyDashboardApproval puts the update under the
+    // dashboard's "Pending Approval" with no branch and no PR (docs/usage/key-concepts/
+    // dashboard.md, "Require approval for major updates"), and the suffix names the gate on the
+    // dashboard line itself. Ticking the box is the dba's act, AFTER the gate below is met; it
+    // opens a PR that still never merges itself. The age wait is lifted for the same reason as
+    // the python rule: it is yank protection for an UNATTENDED merge, and an approval behind a
+    // written plan, weeks after GA, is the opposite of one -- with it, the approved PR would sit
+    // pending again for the next re-push. The gate, checked 2026-11-26: TimescaleDB 2.32.1 (the
+    // newest release) builds against PG 15-18 only (CMakeLists.txt at the tag; PG19 is on main,
+    // 8078c3520 "Add PG 19.0 to ci", unreleased) and timescaledb-ha has no pg19 tag; pgvector
+    // tests 19 on main; the pgai repo is ARCHIVED (last extension release 0.11.2, 2025-10). Later
+    // rules (pgbouncer patch, postgres 17 cap) never match a major, so this one stands.
+    {
+      description: "database-image MAJOR: held for Dependency Dashboard approval (gate: every extension released for the new major + a written upgrade plan)",
+      matchPackageNames: [
+        "timescale/timescaledb-ha",
+        "postgres",
+        "edoburu/pgbouncer",
+        "timescale/pgai-vectorizer-worker",
+        "woblerr/pgbackrest_exporter",
+      ],
+      matchUpdateTypes: ["major"],
+      dependencyDashboardApproval: true,
+      automerge: false,
+      minimumReleaseAge: null,
+      commitMessageSuffix: "(held for dba: extension support + upgrade plan)",
+      labels: ["deps", "dba", "major"],
+      prBodyNotes: [
+        "**Database-image MAJOR -- a pg_upgrade, never a merge-and-deploy.** Approved from the Dependency Dashboard; Renovate will not merge it (ci-kit renovate/default.json5, database-image major rule). Before this PR moves: (1) every extension the cluster loads (timescaledb, pgvector, ai/pgai, ...) has a RELEASED build for the new major, and a `timescale/timescaledb-ha` tag exists for it; (2) a written upgrade plan exists -- the pg_upgrade drill, rollback and ANALYZE steps (the PG17 -> 18 runbook is trade-infra docs/DB-DISK-MIGRATION.md); (3) the coupled images move WITH the server, never ahead of it: the backup sidecar's pg_dump client (infra/backup/Dockerfile) and CI/test service containers track the PRODUCTION major.",
+      ],
+    },
 
     // ---- single-operator self-drive (2026-10-23) ---------------------------------------------
     // These come LAST on purpose: in Renovate a later matching rule wins, so each one below
