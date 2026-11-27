@@ -513,7 +513,7 @@ _SELF_FILES = {
     "f.sh": f"N=1 <#\nGW='{NET}1'\n",   # `<#` opens nothing outside PowerShell
     # a comment opener before a NON-LF line break shelters nothing (CR, form feed, U+2028)
     "k.sh": f"# note\rGW={NET}1\r\n# note\fGW={NET}1\n",
-    "k.js": f"// note const h = '{NET}1'\n",
+    "k.js": f"// note\u2028const h = '{NET}1'\n",
     # `--` / `*` / `#` are comments only where the file kind says so
     "m.sh": f"docker run \\\n  --add-host=gw:{NET}1 \\\n  img\n",
     "m.c": f"#define HOST \"{NET}1\"\n",

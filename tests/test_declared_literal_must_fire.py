@@ -125,7 +125,7 @@ def test_a_binary_is_still_read(new_repo) -> None:
 
 
 @pytest.mark.parametrize("body", [f"# note\rGW={NET}1\r" + NL, f"# note\fGW={NET}1" + NL,
-                                  f"# note GW={NET}1" + NL, f"# note\x85GW={NET}1" + NL])
+                                  f"# note\u2028GW={NET}1" + NL, f"# note\x85GW={NET}1" + NL])
 def test_a_comment_opener_shelters_nothing_after_a_non_lf_break(new_repo, body: str) -> None:
     r = _repo(new_repo, {"a.sh": "x=1" + NL + body})
     res = _run(r, *RULE)
@@ -133,7 +133,7 @@ def test_a_comment_opener_shelters_nothing_after_a_non_lf_break(new_repo, body: 
 
 
 def test_js_comment_then_line_separator(new_repo) -> None:
-    r = _repo(new_repo, {"k.js": f"// note const h = '{NET}1'" + NL})
+    r = _repo(new_repo, {"k.js": f"// note\u2028const h = '{NET}1'" + NL})
     assert _hits(_run(r, *RULE).stdout) == {"k.js:1"}
 
 
