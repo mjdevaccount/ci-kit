@@ -43,6 +43,24 @@
   schedule: ["* * * * 6", "* 0-17 * * 0"],
   // No day-0 releases: a broken or hijacked publish is usually yanked within hours.
   minimumReleaseAge: "3 days",
+  // THE timestamp-optional WARN IS DEMOTED TO INFO (2026-11-26). Renovate logs "Some release(s)
+  // / upgrade(s) did not have a releaseTimestamp, but as we're running with
+  // minimumReleaseAgeBehaviour=timestamp-optional, proceeding" ONCE per run whenever a rule here
+  // set timestamp-optional and a candidate had no timestamp
+  // (lookup/filter-checks.ts, update/branch/status-checks.ts) -- i.e. every run of every repo
+  // with a non-Docker-Hub image (the registry rule in packageRules). It names no package and
+  // reports only what this file chose, so it sat in two consumers' Repository Problems
+  // permanently, beside the WARNs that DO mean something (a skipped pip-compile lock, hidden
+  // unicode). Remapping is Renovate's documented remedy (minimum-release-age.md,
+  // "timestamp-optional warning"); the line stays in Mend's log at info. Anchored to those two
+  // messages only: the timestamp-REQUIRED hold (a debug line) and every other WARN are
+  // untouched (tests/test_renovate_release_timestamp.py).
+  logLevelRemap: [
+    {
+      matchMessage: "/^Some (release|upgrade)\\(s\\) did not have a releaseTimestamp, but as we're running with minimumReleaseAgeBehaviour=timestamp-optional, proceeding/",
+      newLogLevel: "info",
+    },
+  ],
   internalChecksFilter: "strict",
   prConcurrentLimit: 15,
   prHourlyLimit: 0,
@@ -550,7 +568,7 @@
       automerge: false,
       labels: ["deps", "held-deploy", "stateful"],
     },
-    // ---- ghcr.io images: no release timestamp, so no END to the age wait (2026-11-11) ---------
+    // ---- images NOT on Docker Hub (ghcr.io first): no release timestamp, so no END to the age wait --
     // Renovate reads no release timestamp from ghcr.io, and minimumReleaseAgeBehaviour's default
     // (timestamp-required) treats that as "not old enough" FOREVER: the update sits under the
     // Dependency Dashboard's "Pending Status Checks" with no branch, no PR and nothing red.
@@ -561,10 +579,44 @@
     // not the package, so the next ghcr image does not wait a week to be noticed.
     // What is given up: the 3-day age guard for ghcr images. CI still gates every merge, the
     // weekend window still applies, and a wait that cannot end guarded nothing.
+    // EVERY REGISTRY THAT IS NOT DOCKER HUB, not ghcr alone (2026-11-26). Renovate's docker
+    // datasource reads a release timestamp from Docker Hub ONLY (minimum-release-age.md,
+    // "Which registries support release timestamps?": "(not Docker Hub)" is unsupported, renovate#38656; ghcr
+    // #39064, quay #38572, all open), so quay.io, lscr.io, registry.k8s.io and mcr.microsoft.com
+    // were in the same hold the ghcr rule lifted -- and a WORSE one: inside a group with any
+    // releasable member, Renovate DROPS the pending upgrade (updates/generate.ts, "Branch is not
+    // pending, removing pending upgrades"), so it is not even listed under Pending Status Checks,
+    // only as `[Updates: ...]` under Detected Dependencies. Measured 11-26: a consumer's
+    // quay.io blackbox-exporter v0.29.0 -> v0.29.1 (released 10-21) and registry.k8s.io pause
+    // 3.10.2 in no branch; another consumer bumped the same blackbox by hand (10-31) and its
+    // quay.io postgres-exporter v0.21.1 (11-18) is in no branch. The host test is Docker's own
+    // (a first path segment with "." or ":", or localhost); Docker Hub spelled with its host
+    // (docker.io/, index.docker.io/, registry-1.docker.io/) keeps the age gate.
+    // TIMESTAMP-OPTIONAL, NOT minimumReleaseAge: null: identical today (no timestamp = no wait),
+    // but a registry that starts publishing timestamps re-arms the 3-day wait by itself, with no
+    // edit here. Its one cost is the dashboard WARN, which `logLevelRemap` (top) demotes.
     {
       matchDatasources: ["docker"],
-      matchPackageNames: ["ghcr.io/**"],
+      matchPackageNames: [
+        "/^(localhost|[^/]*[.:][^/]*)\\//",
+        "!docker.io/**",
+        "!index.docker.io/**",
+        "!registry-1.docker.io/**",
+      ],
       minimumReleaseAgeBehaviour: "timestamp-optional",
+    },
+    // LINUXSERVER IMAGES NEVER MOVED (2026-11-26). Their tags are `v1.15.1-ls178`, and docker
+    // versioning reads everything after the first hyphen as a COMPATIBILITY suffix and proposes
+    // only tags with the SAME suffix (versioning/docker/readme.md). Every linuxserver build bumps
+    // `-lsNNN`, so no candidate ever matched: a consumer's lscr.io speedtest-tracker sat on
+    // v1.15.1-ls178 with no `[Updates: ...]` at all, which the registry rule above cannot fix.
+    // Version = semver + the ls build as `build` (Renovate's own regex-versioning readme example
+    // for ghcr.io/linuxserver/tautulli). A tag of another shape (`latest`, a date) is NOT valid
+    // under this regex and is skipped -- none is pinned today; such an image needs its own rule.
+    {
+      matchDatasources: ["docker"],
+      matchPackageNames: ["lscr.io/linuxserver/**", "ghcr.io/linuxserver/**", "linuxserver/**", "docker.io/linuxserver/**"],
+      versioning: "regex:^v?(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-ls(?<build>\\d+)$",
     },
     // Windmill server (compose) and workers (worker.Dockerfile FROM) MUST share one version, so
     // one group spans both managers. Held for a held-deploy; its ghcr age wait is the rule above.
