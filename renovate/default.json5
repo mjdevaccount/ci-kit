@@ -515,6 +515,19 @@
       ],
       minimumReleaseAgeBehaviour: "timestamp-optional",
     },
+    // LINUXSERVER IMAGES NEVER MOVED (2026-11-26). Their tags are `v1.15.1-ls178`, and docker
+    // versioning reads everything after the first hyphen as a COMPATIBILITY suffix and proposes
+    // only tags with the SAME suffix (versioning/docker/readme.md). Every linuxserver build bumps
+    // `-lsNNN`, so no candidate ever matched: a consumer's lscr.io speedtest-tracker sat on
+    // v1.15.1-ls178 with no `[Updates: ...]` at all, which the registry rule above cannot fix.
+    // Version = semver + the ls build as `build` (Renovate's own regex-versioning readme example
+    // for ghcr.io/linuxserver/tautulli). A tag of another shape (`latest`, a date) is NOT valid
+    // under this regex and is skipped -- none is pinned today; such an image needs its own rule.
+    {
+      matchDatasources: ["docker"],
+      matchPackageNames: ["lscr.io/linuxserver/**", "ghcr.io/linuxserver/**", "linuxserver/**", "docker.io/linuxserver/**"],
+      versioning: "regex:^v?(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-ls(?<build>\\d+)$",
+    },
     // Windmill server (compose) and workers (worker.Dockerfile FROM) MUST share one version, so
     // one group spans both managers. Held for a held-deploy; its ghcr age wait is the rule above.
     {

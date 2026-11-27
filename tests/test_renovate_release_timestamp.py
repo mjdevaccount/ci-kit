@@ -22,8 +22,10 @@ import json5
 PRESET = pathlib.Path(__file__).resolve().parent.parent / "renovate" / "default.json5"
 
 # Verbatim from Renovate's source (lib/workers/repository/process/lookup/filter-checks.ts and
-# lib/workers/repository/update/branch/status-checks.ts, main 2026-11-26). If upstream rewords
-# them the remap stops matching and the WARN comes back on the dashboard: re-read and re-pin.
+# lib/workers/repository/update/branch/status-checks.ts, main 2026-11-26). THIS PIN IS A HAND
+# RE-CHECK, not a live one: the test reads its own copy, so it stays green if upstream rewords a
+# message. That fails SAFE -- the remap stops matching and the WARN reappears on the dashboard
+# (visible, never hidden) -- and the fix is to re-read those two files and re-pin here.
 WARN_LOOKUP = ("Some release(s) did not have a releaseTimestamp, but as we're running with "
                "minimumReleaseAgeBehaviour=timestamp-optional, proceeding. See debug logs for "
                "more information")
@@ -135,3 +137,39 @@ def test_the_timestamp_optional_warn_is_demoted() -> None:
 def test_no_other_message_is_remapped() -> None:
     hit = [m for m in NOT_REMAPPED if _remapped(m) is not None]
     assert not hit, f"remap reaches a message that must stay visible: {hit}"
+
+
+def _versioning(datasource: str, name: str) -> str:
+    preset = json5.loads(PRESET.read_text(encoding="utf-8"))
+    out = "docker" if datasource == "docker" else "default"
+    for rule in preset["packageRules"]:
+        if "versioning" not in rule:
+            continue
+        if "matchDatasources" in rule and datasource not in rule["matchDatasources"]:
+            continue
+        if "matchPackageNames" in rule and not _names_match(rule["matchPackageNames"], name):
+            continue
+        out = rule["versioning"]
+    return out
+
+
+def _regex_key(versioning: str, tag: str) -> tuple[int, ...] | None:
+    assert versioning.startswith("regex:"), versioning
+    m = re.match(versioning[len("regex:"):].replace("(?<", "(?P<"), tag)
+    if not m:
+        return None
+    g = m.groupdict()
+    return tuple(int(g.get(k) or 0) for k in ("major", "minor", "patch", "build"))
+
+
+def test_linuxserver_ls_suffix_is_a_build_number_not_a_compatibility() -> None:
+    # docker versioning treats `-ls178` as a compatibility suffix, so `-ls179` is never proposed
+    for name in ["lscr.io/linuxserver/speedtest-tracker", "ghcr.io/linuxserver/tautulli",
+                 "linuxserver/plex"]:
+        v = _versioning("docker", name)
+        cur, new_build, new_patch = (_regex_key(v, t) for t in
+                                     ("v1.15.1-ls178", "v1.15.1-ls179", "v1.15.2-ls180"))
+        assert cur and new_build and new_patch, (name, v)
+        assert cur < new_build < new_patch, (name, cur, new_build, new_patch)
+    # and the rule reaches no other image
+    assert _versioning("docker", "quay.io/prometheus/blackbox-exporter") == "docker"
