@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@v10.4.0
       - run: uv sync --frozen --all-extras   # the sql extra: ci_kit.sql needs sqlglot
       # The README's rule: `version` in pyproject.toml moves with each vX.Y.Z tag. Nothing checked
       # it, so v1.6.1, v1.7.0 and v1.7.1 were all cut from commits that still said 1.6.0. A tag is
@@ -217,7 +217,7 @@ jobs:
       MERGE_TRAIN_LIVE: "1"
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@v10.4.0
       - run: uv sync --frozen --all-extras
       - run: uv run pytest -q -p no:cacheprovider -rs tests/test_merge_train_live_github.py
 
@@ -238,7 +238,7 @@ jobs:
       - name: renovate-config-validator --strict on the preset and this repo's renovate.json
         env:
           # renovate: datasource=npm depName=renovate
-          RENOVATE_VERSION: 44.255.1
+          RENOVATE_VERSION: 44.258.3
         run: npx --yes --package "renovate@${RENOVATE_VERSION}" -- renovate-config-validator --strict --no-global renovate/default.json5 renovate.json
 
   gitleaks:
