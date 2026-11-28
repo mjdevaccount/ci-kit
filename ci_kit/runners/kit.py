@@ -17,6 +17,7 @@ one thing whose edits move runners.
     source_hash: raw            # raw (default) | canonical -- see `source_hash` in render.py
     out_dir: generated          # where renders go, relative to --root (default ".")
     alloc_jq: generated/alloc.jq  # optional: --write copies the kit's allocator here, --check diffs it
+    scripts_dir: generated/sh     # optional: --write copies the supervisor's scripts here (scripts.py)
     blocks:
       runners:                  # the capacity file's block key
         required: true
@@ -40,13 +41,15 @@ one thing whose edits move runners.
     renders:                    # extra GENERATED files keyed on the same source_sha256 (optional)
       expected-config:
         output: monitoring/runner-config.yml   # relative to --root (--out-dir: its basename there)
-        template: |             # string.Template: ${source_sha256}, ${config}; $$ is a literal $
+        template: |             # string.Template: ${source_sha256}, ${config}, ${scripts_sha256}; $$ = $
           # GENERATED from ${config} -- DO NOT EDIT
           expected_source_sha256: "${source_sha256}"
 
 `renders` is how a consumer of the hash that is NOT a supervisor -- an alert rule holding every
 installed supervisor's published hash to main's, a dashboard variable -- is generated from the
 SAME text as the JSONs, so it cannot name a different hash. --check holds each to a fresh render.
+`${scripts_sha256}` names the packaged scripts (scripts.py): an alert can hold the implementation
+a supervisor publishes to the one this ci-kit ships.
 
 Python callers build a `Kit` directly and may add `rules`: callables `(cfg, kit) -> [finding]`
 run after every built-in check passes -- the extension point for an invariant a declaration cannot
@@ -73,10 +76,11 @@ from ci_kit.runners.supervisor import (
 )
 
 HASH_MODES = ("raw", "canonical")
-_KIT_KEYS = {"generated", "write_command", "source_hash", "out_dir", "alloc_jq", "blocks", "share_duties",
-             "renders", "supervisor"}
-# what a `renders` template may name: the hash every JSON carries, and the capacity file's name
-RENDER_VARS = ("source_sha256", "config")
+_KIT_KEYS = {"generated", "write_command", "source_hash", "out_dir", "alloc_jq", "scripts_dir", "blocks",
+             "share_duties", "renders", "supervisor"}
+# what a `renders` template may name: the hash every JSON carries, the capacity file's name, and
+# the packaged scripts' hash (scripts.py)
+RENDER_VARS = ("source_sha256", "config", "scripts_sha256")
 _BLOCK_KEYS = {"required", "instance", "prefix", "isolation", "label", "variable", "output", "one_job_per_boot",
                "supervisor"}
 _BLOCK_KEY = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -136,6 +140,7 @@ class Kit:
     source_hash: str = "raw"
     out_dir: str = "."
     alloc_jq: str | None = None
+    scripts_dir: str | None = None
     share_duties: Mapping[str, Duty] = field(default_factory=dict)
     renders: tuple[Render, ...] = ()
     rules: tuple[Rule, ...] = ()
@@ -176,6 +181,16 @@ def _kit_problems(kit: Kit) -> list[str]:
         p.append("out_dir must be a non-empty string")
     if kit.alloc_jq is not None and (not isinstance(kit.alloc_jq, str) or not kit.alloc_jq):
         p.append("alloc_jq must be a non-empty string")
+    if kit.scripts_dir is not None:
+        if not isinstance(kit.scripts_dir, str) or not kit.scripts_dir:
+            p.append("scripts_dir must be a non-empty string")
+        else:
+            # the package's alone (--check refuses any other file there): never the renders' dir
+            sd = pathlib.PurePosixPath(kit.scripts_dir)
+            if sd == pathlib.PurePosixPath(kit.out_dir if isinstance(kit.out_dir, str) else ""):
+                p.append("scripts_dir must be its own directory, not out_dir")
+            if isinstance(kit.alloc_jq, str) and pathlib.PurePosixPath(kit.alloc_jq).parent == sd:
+                p.append("alloc_jq must not be inside scripts_dir")
     for b in kit.blocks:
         if not _BLOCK_KEY.match(b.key) or b.key in _RESERVED:
             p.append(f"blocks.{b.key}: a block key is lower_snake_case and not host/guests")
@@ -280,7 +295,8 @@ def kit_from_dict(d: Any) -> Kit:
     if p:
         raise KitError("; ".join(p))
     blocks = tuple(Block(key=str(k), **{**b, "supervisor": wiring.get(str(k))}) for k, b in blocks_in.items())
-    opt = {k: d[k] for k in ("generated", "write_command", "source_hash", "out_dir", "alloc_jq") if k in d}
+    opt = {k: d[k] for k in ("generated", "write_command", "source_hash", "out_dir", "alloc_jq", "scripts_dir")
+           if k in d}
     return Kit(blocks=blocks, share_duties={str(n): Duty(**x) for n, x in duties_in.items()},
                renders=tuple(Render(name=str(n), **x) for n, x in renders_in.items()), supervisor=sup, **opt)
 

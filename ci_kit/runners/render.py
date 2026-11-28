@@ -24,6 +24,7 @@ import pathlib
 
 from ci_kit.runners.budget import pools, vm_budget
 from ci_kit.runners.kit import Kit
+from ci_kit.runners.scripts import script_findings, scripts_sha256
 from ci_kit.runners.supervisor import supervisor_doc
 
 
@@ -77,12 +78,12 @@ def extras(cfg: dict, text: str, kit: Kit, *, root: pathlib.Path, config_name: s
     relative to `root`, or, with `flat_dir` (--out-dir), that directory plus each output's name."""
     sha = source_hash(cfg, text, kit.source_hash)
     return {(flat_dir / pathlib.PurePosixPath(r.output).name if flat_dir is not None else root / r.output):
-            r.text(source_sha256=sha, config=config_name) for r in kit.renders}
+            r.text(source_sha256=sha, config=config_name, scripts_sha256=scripts_sha256()) for r in kit.renders}
 
 
 def freshness(cfg: dict, text: str, kit: Kit, *, root: pathlib.Path, out_dir: pathlib.Path,
               config_name: str, flat_dir: pathlib.Path | None = None) -> list[str]:
-    """Stale or orphaned renders, a stale allocator copy, and unmet share duties (file valid)."""
+    """Stale or orphaned renders, stale allocator or script copies, and unmet share duties (file valid)."""
     from ci_kit.runners.alloc import JQ_PATH
 
     findings = []
@@ -112,4 +113,6 @@ def freshness(cfg: dict, text: str, kit: Kit, *, root: pathlib.Path, out_dir: pa
         path = root / kit.alloc_jq
         if not path.exists() or path.read_bytes() != JQ_PATH.read_bytes():
             findings.append(f"{kit.alloc_jq} is not ci-kit's allocator: run {kit.write_command}")
+    if kit.scripts_dir:
+        findings += script_findings(root / kit.scripts_dir, kit.scripts_dir.rstrip("/"), kit.write_command)
     return findings

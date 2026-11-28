@@ -1,2 +1,3 @@
 ci_kit/runners/alloc.jq text eol=lf
+ci_kit/runners/sh/** text eol=lf
 tests/fixtures/runners/** -text

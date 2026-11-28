@@ -156,6 +156,17 @@ BAD = {
     "two blocks one state_dir": _edit("blocks.secure_runners.supervisor.state_dir", "/etc/ci"),
     "two blocks one prom_file": _edit("blocks.secure_runners.supervisor.prom_file", "ci_runner.prom"),
     "two blocks one image": _edit("blocks.secure_runners.supervisor.image", "ci-runner-a:local"),
+    # FULL matches, no looser than the supervisor's run-time shape check: each of these passed a
+    # prefix match and would have reached a host script (the supervisor then refuses the render)
+    "work_root is /": _edit("supervisor.work_root", "/"),
+    "path with a trailing newline": _edit("supervisor.run_dir", "/run/ci\n"),
+    "owner with a trailing newline": _edit("supervisor.owner", "octo\n"),
+    "registry upstream with a shell tail": _edit("supervisor.registry_cache.upstream", "https://registry.example; true"),
+    "registry upstream with a space": _edit("supervisor.registry_cache.upstream", "https://registry.example/a b"),
+    "registry addr by hostname": _edit("supervisor.registry_cache.addr", "localhost:5000"),
+    "registry image with a space": _edit("supervisor.registry_cache.image", "registry.example/cache:1 x"),
+    "env value with a newline": _edit("supervisor.runner_env", {"X": "1\nY=2"}),
+    "cache set value with a CR": _edit("supervisor.caches.pip.set", {"PIP_X": "y\r"}),
 }
 
 

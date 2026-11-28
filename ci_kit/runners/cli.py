@@ -6,8 +6,8 @@
     ci-runners --alloc < tick.json               # one admission verdict (alloc.jq's twin) on stdin's input
     ci-runners --selftest                        # both directions on built inputs
 
-`--root` (default: `$CI_KIT_ROOT`, else the git toplevel) anchors the kit's `out_dir`, `alloc_jq`
-and share-duty docs; `--out-dir` overrides the kit's `out_dir`. Exit 0 clean, 1 findings or stale
+`--root` (default: `$CI_KIT_ROOT`, else the git toplevel) anchors the kit's `out_dir`, `alloc_jq`,
+`scripts_dir` and share-duty docs; `--out-dir` overrides the kit's `out_dir`. Exit 0 clean, 1 findings or stale
 renders, 2 could not look (unreadable or unparsable files, a malformed kit, a missing extra).
 """
 
@@ -24,6 +24,7 @@ from ci_kit.runners.budget import pools
 from ci_kit.runners.kit import KitError, load_kit
 from ci_kit.runners.render import extras, freshness, outputs, render
 from ci_kit.runners.schema import validate
+from ci_kit.runners.scripts import scripts_sha256, write_scripts
 
 PROG = "ci-runners"
 
@@ -91,6 +92,9 @@ def _run(a: argparse.Namespace, kit, cfg: dict, text: str, root: pathlib.Path) -
             (root / kit.alloc_jq).parent.mkdir(parents=True, exist_ok=True)
             (root / kit.alloc_jq).write_bytes(JQ_PATH.read_bytes())
             print(f"{PROG}: wrote {kit.alloc_jq} (ci-kit's allocator)")
+        if kit.scripts_dir:
+            written = write_scripts(root / kit.scripts_dir)
+            print(f"{PROG}: wrote {len(written)} scripts to {kit.scripts_dir} (scripts_sha256 {scripts_sha256()})")
         return 0
     findings = freshness(cfg, text, kit, root=root, out_dir=out_dir, config_name=name, flat_dir=a.out_dir)
     counts = ", ".join(f"{b}: {len(pools(cfg, kit, b))} pools" for b in kit.keys if b in cfg)

@@ -1,6 +1,6 @@
 # Self-hosted runner capacity (`ci-runners`, `runners` extra)
 
-`ci_kit/runners/` (v1.51.0, `renders` v1.52.0, `supervisor` v1.54.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
+`ci_kit/runners/` (v1.51.0, `renders` v1.52.0, `supervisor` v1.54.0, scripts v1.55.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
 runner CAPACITY as a library: the capacity file's schema, the host / guest / runner-VM budget
 invariants (measured `peak_mb` against real RAM, floors, ceilings, the live room), one JSON render
 per runner block for a supervisor to read with jq, and the runtime admission rule (`alloc.jq`,
@@ -32,8 +32,9 @@ What the domain decides once. These are its extension points:
 | `share_duties.<reserve>` | a guest that `shares` a host reserve runs inside it, so the reserve's other owner must yield: `--check` requires `doc` to carry `text` |
 | `out_dir`, `generated`, `write_command` | where renders go (relative to `--root`), the banner they carry, the command a stale finding names |
 | `alloc_jq` | a path: `--write` copies ci-kit's `alloc.jq` there, `--check` flags a copy that drifted |
-| `renders.<name>` (v1.52.0) | an extra GENERATED file keyed on the same hash as the JSONs: `output` (relative to `--root`) and a `template` ([`string.Template`](https://docs.python.org/3/library/string.html#template-strings): `${source_sha256}`, `${config}`; `$$` is a literal `$`). For a consumer of the hash that is not a supervisor, such as an alert rule that holds every installed supervisor's published hash to main's. `--check` holds it to a fresh render; an unknown placeholder or a bare `$` is a malformed kit (exit 2). With `--out-dir` it is written under its file name there, so a shadow run can diff it too |
-| `supervisor` + `blocks.<key>.supervisor` (v1.54.0) | a supervisor's own WIRING, so the host script holds no domain constants: the GitHub `owner`, `metric_prefix`, `conf_dir` / `run_dir` / `prom_dir`, the installed `alloc_jq`, the container `labels` (`repo`, `keep`, `canary`), `work_root`, `runner_env`, bounded shared `caches` and an optional pull-through `registry_cache`; per block its `state_dir`, `dockerfile`, `image`, `prom_file`, `busy_limit_s` / `idle_limit_s` / `stray_limit_s`, `network`, the `caches` it mounts and whether it runs the `registry_cache`. A wired block's render gains ONE key, `supervisor`, with every path resolved and `foreign_vmids` (every other block's VM: an instance that finds its own VM there must refuse). A kit without it renders byte-identically to before. Shapes are checked (absolute paths, docker label keys, env names, `host:port`, https upstream) and two instances may not share a state dir, metrics file or image tag. Full shape: `ci_kit/runners/supervisor.py` |
+| `scripts_dir` (v1.55.0) | a directory: `--write` copies the supervisor's packaged scripts there (`ci_kit/runners/sh/`: `runs.sh`, the demand reader; `github-auth.sh`, the App-token credential), `--check` flags a missing or drifted copy and any file the package does not ship (the directory is the package's alone). See [The scripts](#the-scripts) |
+| `renders.<name>` (v1.52.0) | an extra GENERATED file keyed on the same hash as the JSONs: `output` (relative to `--root`) and a `template` ([`string.Template`](https://docs.python.org/3/library/string.html#template-strings): `${source_sha256}`, `${config}`, `${scripts_sha256}` (v1.55.0); `$$` is a literal `$`). For a consumer of the hash that is not a supervisor, such as an alert rule that holds every installed supervisor's published hash to main's. `--check` holds it to a fresh render; an unknown placeholder or a bare `$` is a malformed kit (exit 2). With `--out-dir` it is written under its file name there, so a shadow run can diff it too |
+| `supervisor` + `blocks.<key>.supervisor` (v1.54.0) | a supervisor's own WIRING, so the host script holds no domain constants: the GitHub `owner`, `metric_prefix`, `conf_dir` / `run_dir` / `prom_dir`, the installed `alloc_jq`, the container `labels` (`repo`, `keep`, `canary`), `work_root`, `runner_env`, bounded shared `caches` and an optional pull-through `registry_cache`; per block its `state_dir`, `dockerfile`, `image`, `prom_file`, `busy_limit_s` / `idle_limit_s` / `stray_limit_s`, `network`, the `caches` it mounts and whether it runs the `registry_cache`. A wired block's render gains ONE key, `supervisor`, with every path resolved and `foreign_vmids` (every other block's VM: an instance that finds its own VM there must refuse). A kit without it renders byte-identically to before. Shapes are checked as FULL matches, no looser than the supervisor's own run-time check (absolute paths other than `/`, docker label keys, env names with one-line values, `ip:port`, an https upstream of host, port and path) and two instances may not share a state dir, metrics file or image tag. Full shape: `ci_kit/runners/supervisor.py` |
 | `source_hash` | `raw` (default) or `canonical`, below |
 | `Kit(rules=...)` (Python) | callables `(cfg, kit) -> [finding]` run after every built-in check passes |
 
@@ -55,6 +56,22 @@ The Python API (`ci_kit.runners`): `validate` returns every way the capacity fil
 the committed renders are current;
 `allocate` is the admission rule. pyyaml is needed only to READ the YAML files; every function
 takes parsed data.
+
+## The scripts
+
+A runner host runs bash, jq and curl, not ci-kit, so the supervisor's shell ships as package data
+and is COPIED into the consumer's tree (`scripts_dir`), then installed from there. Each is
+SOURCED by a supervisor, never run, and reads its inputs from the environment it is sourced in:
+
+| script | the caller provides | it provides |
+|---|---|---|
+| `runs.sh` | `OWNER`, `gh_get <path>` (body on stdout) | `open_runs`, `runs_read`, `recent_merge`, `job_demand`, `memo_get`: every non-terminal run, every page up to `RUN_PAGES`, what lies past it counted (`UNREAD`), runs a status filter dropped merged back (`LAG`) |
+| `github-auth.sh` | `CI_RUNNER_CONF`, `CI_RUNNER_RUN`, `OWNER`, `CI_RUNNER_METRIC_PREFIX`, optional `CI_RUNNER_AUTH_HINT`, an `emit` function | `gh_auth` (a GitHub App installation token, cached and minted under flock; the PAT on any failure, LOUDLY), `gh_auth_fresh`, `gh_auth_emit` (`<prefix>github_auth{mode}`, `<prefix>github_app_configured`, the token's expiry) |
+
+`scripts_sha256` (`ci_kit.runners.scripts`) names the set: sha256 over the `sha256sum` manifest
+of every script sorted by name, 12 hex characters. A host recomputes it from the installed copies
+with `LC_ALL=C sha256sum -t -- <names, sorted> | sha256sum | cut -c1-12`, so a supervisor can publish
+what it runs and a `renders` template holds that to what the kit pins.
 
 ## Admission
 
