@@ -4,11 +4,14 @@
     ci-runners --write --config ci/runners.yml --kit ci/runners-kit.yml   # regenerate every render
     ci-runners --write ... --out-dir /tmp/r      # render elsewhere (shadow a hand-rolled renderer, then diff)
     ci-runners --alloc < tick.json               # one admission verdict (alloc.jq's twin) on stdin's input
+    ci-runners --verify-prom x.prom --render r.json   # did a tick publish every series its alerts read?
     ci-runners --selftest                        # both directions on built inputs
 
 `--root` (default: `$CI_KIT_ROOT`, else the git toplevel) anchors the kit's `out_dir`, `alloc_jq`,
 `scripts_dir` and share-duty docs; `--out-dir` overrides the kit's `out_dir`. Exit 0 clean, 1 findings or stale
 renders, 2 could not look (unreadable or unparsable files, a malformed kit, a missing extra).
+`--verify-prom` reads one supervisor `.prom` against the render it was installed with
+(`ci_kit.runners.verify_prom`): 0 every requirement met, 1 one is not, 2 could not check.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from ci_kit.runners.kit import KitError, load_kit
 from ci_kit.runners.render import extras, freshness, outputs, render
 from ci_kit.runners.schema import validate
 from ci_kit.runners.scripts import scripts_sha256, write_scripts
+from ci_kit.runners.verify_prom import VerifyError, verify_files
 
 PROG = "ci-runners"
 
@@ -39,6 +43,8 @@ def _parser() -> argparse.ArgumentParser:
     mode = ap.add_mutually_exclusive_group(required=True)
     for m in ("--check", "--write", "--alloc", "--selftest"):
         mode.add_argument(m, action="store_true")
+    mode.add_argument("--verify-prom", type=pathlib.Path, metavar="PROM", help="a supervisor's .prom file")
+    ap.add_argument("--render", type=pathlib.Path, help="with --verify-prom: the render that supervisor reads")
     ap.add_argument("--config", type=pathlib.Path, help="the capacity file (runners.yml)")
     ap.add_argument("--kit", type=pathlib.Path, help="the kit: blocks, renders, share duties")
     ap.add_argument("--root", type=pathlib.Path, default=None)
@@ -54,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
         return site_lint.selftest_exit(PROG, selftest)
     if a.alloc:
         return _alloc()
+    if a.verify_prom is not None:
+        return _verify_prom(a.verify_prom, a.render)
     if a.config is None or a.kit is None:
         return _blind("--check and --write need --config and --kit")
     try:
@@ -117,6 +125,18 @@ def _alloc() -> int:
         kind = "refused" if isinstance(e, AllocError) else "unreadable input"
         return _blind(f"{kind}: {e}")
     return 0
+
+
+def _verify_prom(prom: pathlib.Path, render: pathlib.Path | None) -> int:
+    if render is None:
+        return _blind("--verify-prom needs --render")
+    try:
+        findings, notes = verify_files(prom, render)
+    except VerifyError as e:
+        return _blind(str(e))
+    for n in notes:
+        print(f"{PROG}: NOTE {n}", file=sys.stderr)
+    return _report(findings)
 
 
 if __name__ == "__main__":
