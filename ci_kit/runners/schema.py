@@ -29,6 +29,8 @@ def validate(cfg: dict, kit: Kit) -> list[str]:
         return f + [f"missing top-level key {k!r}" for k in sorted(required - set(cfg or {}))]
     if not isinstance(cfg, dict):
         return f
+    if not any(b in cfg for b in kit.keys):
+        return [f"no runner block: the file declares none of {', '.join(kit.keys)}, so nothing is checked"]
     f = _guests(cfg, kit)
     if f:
         return f

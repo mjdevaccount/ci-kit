@@ -131,6 +131,10 @@ def _kit_problems(kit: Kit) -> list[str]:
         p.append("blocks: at least one runner block is required")
     if kit.source_hash not in HASH_MODES:
         p.append(f"source_hash must be one of {', '.join(HASH_MODES)}")
+    if not isinstance(kit.out_dir, str) or not kit.out_dir:
+        p.append("out_dir must be a non-empty string")
+    if kit.alloc_jq is not None and (not isinstance(kit.alloc_jq, str) or not kit.alloc_jq):
+        p.append("alloc_jq must be a non-empty string")
     for b in kit.blocks:
         if not _BLOCK_KEY.match(b.key) or b.key in _RESERVED:
             p.append(f"blocks.{b.key}: a block key is lower_snake_case and not host/guests")

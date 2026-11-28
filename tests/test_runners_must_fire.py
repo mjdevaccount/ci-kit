@@ -8,6 +8,7 @@ golden/runners.yml; any byte this library renders differently fails here.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import pathlib
 import shutil
@@ -54,8 +55,24 @@ def test_refuses(name):
     assert refused(name), f"{name}: accepted, should be rejected"
 
 
-def test_live_room_refusal_names_the_live_room():
-    assert any("never fits the live room" in x for x in refused("peak over the live room"))
+# a refusal for the WRONG reason proves nothing about the rule it is named for
+MUST_SAY = {
+    "peak over the live room": "never fits the live room",
+    "sealed max_total 2": "max_total must be 1: one job per boot",
+    "sealed vm always on": "must be state on_demand",
+}
+
+
+@pytest.mark.parametrize("name", sorted(MUST_SAY))
+def test_a_refusal_names_its_rule(name):
+    assert any(MUST_SAY[name] in x for x in refused(name)), refused(name)
+
+
+def test_a_file_with_no_runner_block_is_refused():
+    cfg = good()
+    cfg.pop("runners")
+    kit = Kit(blocks=tuple(dataclasses.replace(b, required=False) for b in DEMO_KIT.blocks))
+    assert any("no runner block" in x for x in validate(cfg, kit))
 
 
 def test_selftest_passes():
@@ -88,6 +105,8 @@ def test_a_python_rule_runs_only_after_the_built_ins_pass():
     lambda d: d["blocks"].update(host={**d["blocks"]["runners"], "prefix": "h-", "label": "h", "instance": "h",
                                        "output": "h.json"}),
     lambda d: d["share_duties"]["drill"].pop("text"),
+    lambda d: d.update(out_dir=5),
+    lambda d: d.update(alloc_jq=["x"]),
 ])
 def test_a_malformed_kit_is_refused(edit):
     d = yaml.safe_load((GOLDEN / "kit.yml").read_text(encoding="utf-8"))
@@ -175,7 +194,7 @@ def test_out_dir_renders_elsewhere(tmp_path):
         assert (out / name).read_bytes() == (GOLDEN / "expected" / name).read_bytes()
 
 
-@pytest.mark.parametrize("how", ["no-kit", "bad-yaml", "bad-kit", "missing-config"])
+@pytest.mark.parametrize("how", ["no-kit", "bad-yaml", "bad-kit", "missing-config", "list-for-a-name"])
 def test_could_not_look_is_exit_2(tmp_path, how):
     root = _copy(tmp_path)
     if how == "no-kit":
@@ -183,6 +202,9 @@ def test_could_not_look_is_exit_2(tmp_path, how):
         return
     if how == "bad-yaml":
         (root / "runners.yml").write_text("host: [unclosed\n", encoding="utf-8")
+    elif how == "list-for-a-name":
+        p = root / "runners.yml"
+        p.write_text(p.read_text(encoding="utf-8").replace("vm: pool-a", "vm: [pool-a]", 1), encoding="utf-8")
     elif how == "bad-kit":
         (root / "kit.yml").write_text("blocks: {}\n", encoding="utf-8")
     else:
@@ -200,6 +222,9 @@ def test_alloc_cli(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["pools"][0]["start"] == 1
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({**doc, "mem_budget_mb": None})))
     assert main(["--alloc"]) == 2
+    for bad in ("null", "[]", json.dumps({**doc, "peaks": []})):
+        monkeypatch.setattr("sys.stdin", io.StringIO(bad))
+        assert main(["--alloc"]) == 2, bad
 
 
 def test_kit_round_trip_from_dataclasses():

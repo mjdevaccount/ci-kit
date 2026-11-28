@@ -33,7 +33,15 @@ def _jq() -> str:
 def _jq_many(docs: list[dict]) -> list[dict]:
     out = subprocess.run([_jq(), "-c", "-f", str(JQ_PATH)], input="\n".join(json.dumps(d) for d in docs),
                          capture_output=True, text=True, check=True).stdout
-    return [json.loads(line) for line in out.splitlines() if line.strip()]
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def _text(verdict: dict) -> str:
+    return json.dumps(verdict, separators=(",", ":"))
+
+
+def _starts(doc: dict) -> int:
+    return sum(p["start"] for p in allocate(doc)["pools"])
 
 
 def _doc(total, *pools, mem=10**9, peaks=None, **extra):
@@ -68,6 +76,9 @@ HAND = {
                                                  mem=3000, peaks={"a": 500, "b": 2000}),
     "floor short of memory": _doc(4, ("a", 3, 4, 0, 0, 0, 0, 0), mem=2500, peaks={"a": 1000}),
     "no pools": _doc(3, mem=100, peaks={}),
+    "backfill grants a small pool beside the held head": _doc(
+        5, ("big", 0, 2, 0, 0, 0, 1, 400), ("mid", 0, 2, 1, 1, 0, 0, 0), ("small", 0, 4, 0, 0, 0, 3, 50),
+        mem=6000, peaks={"big": 4000, "mid": 4000, "small": 500}),
 }
 
 
@@ -80,10 +91,29 @@ def _materialise(d: dict) -> dict:
     return d
 
 
+def _backfill_shaped(rng: random.Random) -> dict:
+    """A starved head that cannot fit, a pool above its floor as big as the head (so the backfill
+    room is the free memory), and a small pool queued: the shape where backfill GRANTS starts."""
+    hp = rng.choice([3000, 4000, 6000])
+    busy = rng.randint(2, 3)
+    peaks = {"h": hp, "m": rng.choice([hp, hp + 1000, hp - 1000]), "s": rng.choice([256, 512, 1024])}
+    pools = [{"repo": "h", "min": 0, "max": 2, "running": 0, "busy": 0, "idle": 0,
+              "queued": rng.randint(1, 3), "oldest": rng.choice([300, 900, 4000])},
+             {"repo": "m", "min": rng.choice([0, 0, 1]), "max": 3, "running": busy, "busy": busy, "idle": 0,
+              "queued": rng.choice([0, 1]), "oldest": rng.choice([0, 30])},
+             {"repo": "s", "min": 0, "max": rng.randint(1, 5), "running": rng.randint(0, 1), "busy": 0,
+              "idle": 0, "queued": rng.randint(1, 6), "oldest": rng.choice([10, 60, 200])}]
+    budget = busy * peaks["m"] + hp - rng.choice([100, 500, 1500])
+    return {"max_total": rng.randint(4, 9), "mem_budget_mb": budget, "peaks": peaks, "pools": pools}
+
+
 def _random_docs(n: int, seed: int = 20261127) -> list[dict]:
     rng = random.Random(seed)
     docs = []
     for _ in range(n):
+        if rng.random() < 0.15:
+            docs.append(_backfill_shaped(rng))
+            continue
         names = rng.sample(["a", "b", "c", "d", "e", "f"], rng.randint(1, 5))
         pools, peaks = [], {}
         for r in names:
@@ -118,20 +148,30 @@ def _random_docs(n: int, seed: int = 20261127) -> list[dict]:
 def test_hand_shapes_agree():
     docs = [_materialise(d) for d in HAND.values()]
     for name, want, doc in zip(HAND, _jq_many(docs), docs, strict=True):
-        assert allocate(doc) == want, name
+        assert _text(allocate(doc)) == want, name
 
 
 def test_random_matrix_agrees():
     docs = _random_docs(3000)
     got = _jq_many(docs)
     assert len(got) == len(docs)
-    drained = sum(1 for g in got if g["drain"])
+    drained = sum(1 for g in got if json.loads(g)["drain"])
     assert drained > 50, "the matrix must exercise the drain, or the parity proves little"
+    backfilled = sum(1 for d in docs if _starts(d) > _starts({**d, "backfill": False}))
+    assert backfilled > 50, "the matrix must exercise backfill GRANTS, not only the drain"
     for i, (doc, want) in enumerate(zip(docs, got, strict=True)):
-        assert allocate(doc) == want, (i, doc)
+        assert _text(allocate(doc)) == want, (i, doc)
+
+
+def test_the_backfill_hand_case_grants():
+    doc = _materialise(HAND["backfill grants a small pool beside the held head"])
+    assert _starts(doc) == 3 and _starts({**doc, "backfill": False}) == 0
 
 
 @pytest.mark.parametrize("doc", [
+    None,
+    [],
+    {"max_total": 2, "mem_budget_mb": 100, "peaks": [], "pools": [{"repo": "a"}]},
     {"max_total": 2, "peaks": {}, "pools": []},
     {"max_total": 2, "mem_budget_mb": 100, "pools": []},
     {"max_total": 2, "mem_budget_mb": 100, "peaks": {"a": 0},

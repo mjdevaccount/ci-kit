@@ -28,9 +28,9 @@ def good() -> dict:
     return {
         "host": {"name": "h", "threads": 8, "ram_mb": 16384, "cpu_overcommit": 1.0,
                  "reserves_mb": {"hypervisor": 2048}},
-        "guests": {"obs": {"vmid": 100, "cores": 2, "ram_mb": 4096},
-                   "ci": {"vmid": 110, "cores": 4, "ram_mb": 8192},
-                   "later": {"vmid": 120, "cores": 2, "ram_mb": 2048, "planned": True}},
+        "guests": {"obs": {"vmid": 900, "cores": 2, "ram_mb": 4096},
+                   "ci": {"vmid": 910, "cores": 4, "ram_mb": 8192},
+                   "later": {"vmid": 920, "cores": 2, "ram_mb": 2048, "planned": True}},
         "runners": {"vm": "ci", "max_total": 4, "cpu_overcommit": 2.0, "memory_overcommit": 1.0,
                     "vm_reserve_mb": 1024,
                     "defaults": {"cpus": 2, "memory_mb": 2048, "pids": 1024, "labels": ["self-hosted", "ci"]},
@@ -58,7 +58,7 @@ def good_sealed() -> dict:
     """good_secure() plus a sealed block on a third, on_demand guest."""
     cfg = good_secure()
     cfg["host"].update(threads=10, ram_mb=20480)  # room for the third guest
-    cfg["guests"]["sealed"] = {"vmid": 112, "cores": 1, "ram_mb": 1024, "state": "on_demand"}
+    cfg["guests"]["sealed"] = {"vmid": 912, "cores": 1, "ram_mb": 1024, "state": "on_demand"}
     cfg["sealed_runners"] = {
         "vm": "sealed", "max_total": 1, "cpu_overcommit": 1.0, "memory_overcommit": 1.0,
         "vm_reserve_mb": 256,
@@ -73,7 +73,7 @@ def shared_reserve() -> dict:
     # host RAM grows by the reserve ONLY: the guest fits only if it is not summed beside it
     cfg["host"].update(ram_mb=16384 + 1024, cpu_overcommit=1.125)
     cfg["host"]["reserves_mb"]["drill"] = 1024
-    cfg["guests"]["seal"] = {"vmid": 112, "cores": 1, "ram_mb": 1024, "state": "on_demand", "shares": "drill"}
+    cfg["guests"]["seal"] = {"vmid": 912, "cores": 1, "ram_mb": 1024, "state": "on_demand", "shares": "drill"}
     return cfg
 
 
@@ -130,7 +130,7 @@ ACCEPTS: dict[str, Callable[[], list[str]]] = {
     "good file: disabled pool skipped, order kept": _a(good, lambda c: [p["repo"] for p in _out(c)["pools"]] == ["a", "b"],
                                                        "disabled pool rendered or order lost"),
     "good file: planned guest not rendered, runner_vm": _a(
-        good, lambda c: "later" not in _out(c)["guests"] and _out(c)["runner_vm"] == {"name": "ci", "vmid": 110},
+        good, lambda c: "later" not in _out(c)["guests"] and _out(c)["runner_vm"] == {"name": "ci", "vmid": 910},
         "planned guest rendered or runner_vm wrong"),
     "running guest renders no state": _a(good, lambda c: "state" not in _out(c)["guests"]["obs"],
                                          "a running guest rendered a state key"),
@@ -147,7 +147,7 @@ ACCEPTS: dict[str, Callable[[], list[str]]] = {
     # obs 2c + a retired 8c would break the core budget unless the retired one is out of the sum
     "unbudgeted stopped guest is out of the sums": _a(
         lambda: _with(good, lambda c: c["guests"].update(
-            retired={"vmid": 130, "cores": 8, "ram_mb": 8192, "state": "stopped", "budgeted": False})),
+            retired={"vmid": 930, "cores": 8, "ram_mb": 8192, "state": "stopped", "budgeted": False})),
         lambda c: _out(c)["guests"]["retired"].get("budgeted") is False, "an unbudgeted stopped guest"),
     "peak_mb rendered": _a(good, lambda c: _out(c)["pools"][0].get("peak_mb") == 2048, "peak_mb not rendered"),
     "young_mb defaults to peak_mb": _a(good, lambda c: _out(c)["pools"][0].get("young_mb") == 2048,
@@ -179,13 +179,13 @@ ACCEPTS: dict[str, Callable[[], list[str]]] = {
         lambda c: (_out(c)["instance"], _out(c)["prefix"], _out(c)["isolation"]) == ("shared", "ci-", "socket")
         and (_out(c, "secure_runners")["instance"], _out(c, "secure_runners")["prefix"],
              _out(c, "secure_runners")["isolation"]) == ("secure", "sec-", "secure")
-        and _out(c, "secure_runners")["runner_vm"] == {"name": "later", "vmid": 120}
+        and _out(c, "secure_runners")["runner_vm"] == {"name": "later", "vmid": 920}
         and _out(c, "secure_runners")["max_total"] == 2, "secure render"),
     "sealed block: one job, its own vm and label": _a(
         good_sealed,
         lambda c: (_out(c, "sealed_runners")["instance"], _out(c, "sealed_runners")["prefix"],
                    _out(c, "sealed_runners")["isolation"], _out(c, "sealed_runners")["max_total"]) == ("sealed", "seal-", "sealed", 1)
-        and _out(c, "sealed_runners")["runner_vm"] == {"name": "sealed", "vmid": 112}
+        and _out(c, "sealed_runners")["runner_vm"] == {"name": "sealed", "vmid": 912}
         and _out(c, "sealed_runners")["pools"][0]["labels"] == ["self-hosted", "ci-sealed"], "sealed render"),
 }
 
@@ -233,10 +233,10 @@ REFUSALS: dict[str, tuple[Callable[[], dict], Callable[[dict], object]]] = {
     "budgeted not bool": (good, lambda c: c["guests"]["obs"].update(state="stopped", budgeted="no")),
     # budgeted defaults to true: a stopped guest still counts unless it says otherwise
     "stopped guest still counts": (good, lambda c: c["guests"].update(
-        retired={"vmid": 130, "cores": 8, "ram_mb": 8192, "state": "stopped"})),
+        retired={"vmid": 930, "cores": 8, "ram_mb": 8192, "state": "stopped"})),
     "vm is not a guest": (good, lambda c: c["runners"].update(vm="nope")),
     "vm is only planned": (good, lambda c: c["runners"].update(vm="later")),
-    "duplicate vmid": (good, lambda c: c["guests"]["obs"].update(vmid=110)),
+    "duplicate vmid": (good, lambda c: c["guests"]["obs"].update(vmid=910)),
     "unknown guest state": (good, lambda c: c["guests"]["obs"].update(state="paused")),
     "labels without self-hosted": (good, lambda c: P(c).update(labels=["ci"])),
     "enabled not bool": (good, lambda c: P(c).update(enabled="yes")),
@@ -260,7 +260,7 @@ REFUSALS: dict[str, tuple[Callable[[], dict], Callable[[dict], object]]] = {
     "shares while always on": (shared_reserve, lambda c: c["guests"]["seal"].update(state="running")),
     "bigger than its reserve": (shared_reserve, lambda c: c["guests"]["seal"].update(ram_mb=2048)),
     "two guests share one reserve": (shared_reserve, lambda c: c["guests"].update(
-        seal2={"vmid": 113, "cores": 1, "ram_mb": 512, "state": "on_demand", "shares": "drill"})),
+        seal2={"vmid": 913, "cores": 1, "ram_mb": 512, "state": "on_demand", "shares": "drill"})),
     # the trust tiers: a label that crosses an isolation boundary, or two blocks on one VM
     "secure pool carries ci": (good_secure, lambda c: S(c)["pools"]["a"].update(labels=["self-hosted", "ci-secure", "ci"])),
     "secure pool without ci-secure": (good_secure, lambda c: S(c)["defaults"].update(labels=["self-hosted"])),
@@ -282,7 +282,7 @@ REFUSALS: dict[str, tuple[Callable[[], dict], Callable[[dict], object]]] = {
         labels=["self-hosted", "ci-secure", "ci-sealed"])),
     "sealed block on the secure vm": (good_sealed, lambda c: L(c).update(vm="later")),
     "sealed block on the shared vm": (good_sealed, lambda c: L(c).update(vm="ci")),
-    "sealed max_total 2": (good_sealed, lambda c: (L(c).update(max_total=2), c["guests"]["sealed"].update(cores=2))),
+    "sealed max_total 2": (good_sealed, lambda c: (L(c).update(max_total=2), c["guests"]["sealed"].update(cores=2, ram_mb=2048))),
     "sealed vm always on": (good_sealed, lambda c: c["guests"]["sealed"].pop("state")),
 }
 

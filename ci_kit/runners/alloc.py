@@ -55,6 +55,8 @@ def _could_fit(p: dict, floor_mb, floor_n, fit, total) -> bool:
 
 def allocate(doc: dict) -> dict:
     """One allocator run: `{free, free_mb, drain, head, committed_mb, pools: [...]}`."""
+    if not isinstance(doc, dict):
+        raise AllocError(f"input must be an object, not {type(doc).__name__}")
     total = doc.get("max_total")
     budget = _alt(doc.get("mem_budget_mb"), None)
     if budget is None:
@@ -62,6 +64,8 @@ def allocate(doc: dict) -> dict:
     peaks = _alt(doc.get("peaks"), None)
     if peaks is None:
         raise AllocError("peaks missing")
+    if not isinstance(peaks, dict) or not isinstance(doc.get("pools"), list):
+        raise AllocError("peaks must be an object and pools a list")
     prev = _alt(doc.get("prev_head"), None)
     starve = _alt(doc.get("starve_s"), {})
     live = _alt(doc.get("live_free_mb"), None)

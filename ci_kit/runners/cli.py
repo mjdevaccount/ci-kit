@@ -66,6 +66,13 @@ def main(argv: list[str] | None = None) -> int:
         cfg = yaml.safe_load(text) or {}
     except (OSError, yaml.YAMLError, KitError, TypeError) as e:
         return _blind(f"{type(e).__name__}: {e}")
+    try:
+        return _run(a, kit, cfg, text, root)
+    except (TypeError, AttributeError, KeyError, OSError) as e:
+        return _blind(f"{type(e).__name__}: {e}")
+
+
+def _run(a: argparse.Namespace, kit, cfg: dict, text: str, root: pathlib.Path) -> int:
     out_dir = a.out_dir if a.out_dir is not None else root / kit.out_dir
     name = a.config.name
     findings = [f"{name}: {x}" for x in validate(cfg, kit)]
@@ -77,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             path.write_text(render(cfg, text, block, kit), encoding="utf-8", newline="\n")
             print(f"{PROG}: wrote {path} ({len(pools(cfg, kit, block))} pools)")
         if kit.alloc_jq:
+            (root / kit.alloc_jq).parent.mkdir(parents=True, exist_ok=True)
             (root / kit.alloc_jq).write_bytes(JQ_PATH.read_bytes())
             print(f"{PROG}: wrote {kit.alloc_jq} (ci-kit's allocator)")
         return 0
