@@ -382,8 +382,8 @@ def _behind(repo: str, p: dict, read: Gh) -> int:
     """How many base commits the head lacks. A NON-strict base never reports BEHIND, so CLEAN there
     does not mean "tested against today's main": after one land the next CLEAN one would merge on a
     base its checks never saw (reviewer, 2026-11-28; trade-infra and local-mcp are strict:false)."""
-    r = read("api", f"repos/{repo}/compare/{p.get('baseRefName') or 'main'}...{p['headRefOid']}",
-             "--jq", ".behind_by")
+    r = read("api", f"repos/{repo}/compare/{p.get('baseRefName') or 'main'}...{p['headRefOid']}?per_page=1",
+             "--jq", ".behind_by")  # the shape doomed_runs.Canceller._behind reads; per_page=1: no commit list
     return int((r.stdout or "").strip())
 
 

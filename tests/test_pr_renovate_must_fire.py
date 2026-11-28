@@ -134,7 +134,7 @@ class World:
             oid = path.split("head_sha=")[1].split("&")[0]
             return subprocess.CompletedProcess(a, 0, json.dumps(self.running.get(oid, [])), "")
         if "/compare/" in path:  # pr_renovate._behind: the --jq .behind_by
-            return subprocess.CompletedProcess(a, 0, str(self.behind.get(path.rsplit("...", 1)[1], 0)), "")
+            return subprocess.CompletedProcess(a, 0, str(self.behind.get(path.rsplit("...", 1)[1].split("?")[0], 0)), "")
         if path.endswith("/status"):
             return subprocess.CompletedProcess(a, 0, json.dumps({"statuses": []}), "")
         return subprocess.CompletedProcess(a, 0, json.dumps({"default_branch": "main"}), "")
@@ -464,3 +464,28 @@ def test_only_a_strictly_green_head_is_landed_must_not_fire(monkeypatch: pytest.
                        required=required)
     assert world.landed() == [], summary
     assert pr_renovate.idle_landable(_pr(977, merge="CLEAN", statusCheckRollup=GREEN), ("gate",))   # the green direction
+
+
+def test_a_refused_update_of_a_behind_clean_head_is_a_red_run_must_fire(monkeypatch: pytest.MonkeyPatch,
+                                                                        capsys: pytest.CaptureFixture) -> None:
+    # reviewer R3 (2026-11-28): the update path was stubbed to "updated" only. dies to: land_idle swallowing
+    # an update-branch refusal (the PR would sit green, behind and unmerged with a green run)
+    world = World({978: (ON, None)}, behind={f"{978:040d}": 2})
+    prs = [_pr(978, merge="CLEAN", statusCheckRollup=GREEN)]
+    for var in ("GITHUB_RUN_ID", "GITHUB_SERVER_URL", "GITHUB_REPOSITORY"):
+        monkeypatch.delenv(var, raising=False)
+    rc, summary = _run(monkeypatch, prs, world, hold=False)
+    assert rc == 0   # the stub: updated
+    monkeypatch.setattr(pr_autoupdate, "_put_kind", lambda repo, p: ("error", "HTTP 403: not accessible"))
+    summary2: list[str] = []
+    rc = pr_autoupdate.run("o/r", summary2, [], pr_autoupdate.Options(max_in_flight=1, hold=False))
+    assert rc == 1 and world.landed() == [] and "could not be updated" in capsys.readouterr().out
+    assert any("update failed" in s for s in summary2), summary2
+
+
+def test_put_kind_maps_the_queues_own_put_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    # reviewer R3: the real _put_kind (stubbed in _run). dies to: a closed/merged PR read as an error
+    monkeypatch.setattr(pr_autoupdate, "_put", lambda repo, p: (pr_autoupdate.Outcome("error", "x"), "merged"))
+    assert pr_autoupdate._put_kind("o/r", {})[0] == "current"
+    monkeypatch.setattr(pr_autoupdate, "_put", lambda repo, p: (pr_autoupdate.Outcome("error", "HTTP 403"), ""))
+    assert pr_autoupdate._put_kind("o/r", {}) == ("error", "HTTP 403")
