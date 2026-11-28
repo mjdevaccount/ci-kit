@@ -27,14 +27,14 @@ an argument you pass.
 
 ## What's inside
 
-| | Capability | What it gives you |
-|---|---|---|
-| 🔎 | **[Gates](docs/README.md#gates)** | 30+ checks across docs, secrets, code shape, structure, SQL and supply chain: doc references that went dead, secrets on a command line, invisible Unicode, new code clones, modules no test reaches, SQL outside the repository layer, OpenAPI breaking changes, and more. |
-| 📉 | **[Shrink-only ratchets](docs/architecture.md#shrink-only-baselines)** | Adopt a gate on a messy codebase today. The current debt is frozen in a baseline that can only shrink, so nothing new gets in while the old debt is paid down. |
-| 🚂 | **[PR operations](docs/pr-ops/README.md)** | A serial PR queue, a merge train that tests N armed PRs once and lands them as N commits with bisect-on-red, and a heal ladder that fixes a red or conflicted PR cheapest-first, from a rerun up to a sandboxed agent. It works with strict branch protection, on a personal account, without a paid merge-queue service. |
-| 🤖 | **[Pre-merge review gate](docs/review-gate.md)** | A model code review that runs as a **required check**, so auto-merge waits for the verdict instead of racing it. Two transports (an API key, or a Claude Code subscription over MCP), a tiering policy, and a verdict carried over an unchanged diff. |
-| 🖥 | **[Runner capacity](docs/runners.md)** | Self-hosted runner sizing as a library: schema-checked capacity files, host, guest and runner memory budgets against measured peaks, one JSON render per runner block, and the admission rule a supervisor runs. |
-| 🧱 | **[Library](docs/library.md)** | The parsers, discovery, site-lint and ratchet primitives the gates are built on, for writing your own gate with the same exit contract. |
+| Capability | What it gives you |
+|---|---|
+| **[Gates](docs/README.md#gates)** | 30+ checks across docs, secrets, code shape, structure, SQL and supply chain: doc references that went dead, secrets on a command line, invisible Unicode, new code clones, modules no test reaches, SQL outside the repository layer, OpenAPI breaking changes, and more. |
+| **[Shrink-only ratchets](docs/architecture.md#shrink-only-baselines)** | Adopt a gate on a messy codebase today. The current debt is frozen in a baseline that can only shrink, so nothing new gets in while the old debt is paid down. |
+| **[PR operations](docs/pr-ops/README.md)** | A serial PR queue, a merge train that tests N armed PRs once and lands them as N commits with bisect-on-red, and a heal ladder that fixes a red or conflicted PR cheapest-first, from a rerun up to a sandboxed agent. It works with strict branch protection, on a personal account, without a paid merge-queue service. |
+| **[Pre-merge review gate](docs/review-gate.md)** | A model code review that runs as a **required check**, so auto-merge waits for the verdict instead of racing it. Two transports (an API key, or a Claude Code subscription over MCP), a tiering policy, and a verdict carried over an unchanged diff. |
+| **[Runner capacity](docs/runners.md)** | Self-hosted runner sizing as a library: schema-checked capacity files, host, guest and runner memory budgets against measured peaks, one JSON render per runner block, and the admission rule a supervisor runs. |
+| **[Library](docs/library.md)** | The parsers, discovery, site-lint and ratchet primitives the gates are built on, for writing your own gate with the same exit contract. |
 
 Also included: a shared **[Renovate preset](renovate/default.json5)** (one line in a consumer's
 `renovate.json`), and **[15 reusable workflows](docs/reusable-workflows.md)**, each documented
