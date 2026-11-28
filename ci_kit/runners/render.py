@@ -24,6 +24,7 @@ import pathlib
 
 from ci_kit.runners.budget import pools, vm_budget
 from ci_kit.runners.kit import Kit
+from ci_kit.runners.supervisor import supervisor_doc
 
 
 def source_hash(cfg: dict, source_text: str, mode: str = "raw") -> str:
@@ -57,6 +58,10 @@ def render(cfg: dict, source_text: str, block: str, kit: Kit) -> str:
         **({"backfill": False} if r.get("backfill") is False else {}),
         **({"redecide": False} if r.get("redecide") is False else {}),
         "pools": pools(cfg, kit, block),
+        # rendered only when the kit wires this block's supervisor: a kit without it renders as before
+        **({"supervisor": supervisor_doc(kit.supervisor, meta.supervisor, meta.instance, [
+            cfg["guests"][cfg[k]["vm"]]["vmid"] for k in kit.keys if k in cfg and k != block])}
+           if meta.supervisor is not None and kit.supervisor is not None else {}),
     }
     return json.dumps(doc, indent=2, sort_keys=False) + "\n"
 

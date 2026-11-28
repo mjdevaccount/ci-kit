@@ -36,6 +36,7 @@ one thing whose edits move runners.
         one_job_per_boot: true  # max_total must be 1 and the vm must be state on_demand
     share_duties:               # reserve -> the doc that builds its other owner and the text it must carry
       drill: {doc: docs/DRILL.md, text: "take the sealed hold first"}
+    supervisor: {...}           # optional: the supervisors' own wiring -- supervisor.py
     renders:                    # extra GENERATED files keyed on the same source_sha256 (optional)
       expected-config:
         output: monitoring/runner-config.yml   # relative to --root (--out-dir: its basename there)
@@ -62,13 +63,22 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ci_kit.runners._checks import _unknown
+from ci_kit.runners.supervisor import (
+    BlockSupervisor,
+    Supervisor,
+    block_problems,
+    block_supervisor_from_dict,
+    supervisor_from_dict,
+    supervisor_problems,
+)
 
 HASH_MODES = ("raw", "canonical")
 _KIT_KEYS = {"generated", "write_command", "source_hash", "out_dir", "alloc_jq", "blocks", "share_duties",
-             "renders"}
+             "renders", "supervisor"}
 # what a `renders` template may name: the hash every JSON carries, and the capacity file's name
 RENDER_VARS = ("source_sha256", "config")
-_BLOCK_KEYS = {"required", "instance", "prefix", "isolation", "label", "variable", "output", "one_job_per_boot"}
+_BLOCK_KEYS = {"required", "instance", "prefix", "isolation", "label", "variable", "output", "one_job_per_boot",
+               "supervisor"}
 _BLOCK_KEY = re.compile(r"^[a-z][a-z0-9_]*$")
 _LABEL = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _VARIABLE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -94,6 +104,8 @@ class Block:
     output: str
     required: bool = False
     one_job_per_boot: bool = False
+    # this instance's own supervisor wiring (supervisor.py); None = the render carries none
+    supervisor: BlockSupervisor | None = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +139,8 @@ class Kit:
     share_duties: Mapping[str, Duty] = field(default_factory=dict)
     renders: tuple[Render, ...] = ()
     rules: tuple[Rule, ...] = ()
+    # the wiring every supervisor instance shares (supervisor.py); None = renders carry none
+    supervisor: Supervisor | None = None
 
     def __post_init__(self) -> None:
         problems = _kit_problems(self)
@@ -183,7 +197,20 @@ def _kit_problems(kit: Kit) -> list[str]:
     for name, d in kit.share_duties.items():
         if not (isinstance(d, Duty) and d.doc and d.text):
             p.append(f"share_duties.{name} needs a doc and the text it must carry")
-    return p + _render_problems(kit)
+    return p + _render_problems(kit) + _supervisor_problems(kit)
+
+
+def _supervisor_problems(kit: Kit) -> list[str]:
+    p = supervisor_problems(kit.supervisor) if kit.supervisor is not None else []
+    wired = [b for b in kit.blocks if b.supervisor is not None]
+    for b in wired:
+        p += block_problems(b.key, b.supervisor, kit.supervisor)
+    # two instances sharing a state dir, a metrics file or an image tag overwrite each other's
+    for k in ("state_dir", "prom_file", "image"):
+        vals = [getattr(b.supervisor, k) for b in wired]
+        if len(set(vals)) != len(vals):
+            p.append(f"blocks: every supervisor needs its own {k}")
+    return p
 
 
 def _render_problems(kit: Kit) -> list[str]:
@@ -219,11 +246,21 @@ def kit_from_dict(d: Any) -> Kit:
     blocks_in = d.get("blocks")
     if not isinstance(blocks_in, dict) or not blocks_in:
         raise KitError("blocks: at least one runner block is required")
+    wiring: dict[str, BlockSupervisor] = {}
     for key, b in blocks_in.items():
         p += _unknown(f"blocks.{key}", b, _BLOCK_KEYS)
         if isinstance(b, dict):
             missing = sorted({"instance", "prefix", "isolation", "label", "variable", "output"} - set(b))
             p += [f"blocks.{key}: missing {k!r}" for k in missing]
+            if "supervisor" in b:
+                ws, wp = block_supervisor_from_dict(str(key), b["supervisor"])
+                p += wp
+                if ws is not None:
+                    wiring[str(key)] = ws
+    sup = None
+    if d.get("supervisor") is not None:
+        sup, sp = supervisor_from_dict(d["supervisor"])
+        p += sp
     duties_in = d.get("share_duties") or {}
     if not isinstance(duties_in, dict):
         p.append("share_duties: must be a mapping")
@@ -242,10 +279,10 @@ def kit_from_dict(d: Any) -> Kit:
             p += [f"renders.{name}: missing {k!r}" for k in sorted({"output", "template"} - set(x))]
     if p:
         raise KitError("; ".join(p))
-    blocks = tuple(Block(key=str(k), **b) for k, b in blocks_in.items())
+    blocks = tuple(Block(key=str(k), **{**b, "supervisor": wiring.get(str(k))}) for k, b in blocks_in.items())
     opt = {k: d[k] for k in ("generated", "write_command", "source_hash", "out_dir", "alloc_jq") if k in d}
     return Kit(blocks=blocks, share_duties={str(n): Duty(**x) for n, x in duties_in.items()},
-               renders=tuple(Render(name=str(n), **x) for n, x in renders_in.items()), **opt)
+               renders=tuple(Render(name=str(n), **x) for n, x in renders_in.items()), supervisor=sup, **opt)
 
 
 def load_kit(path: pathlib.Path) -> Kit:
