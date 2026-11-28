@@ -44,7 +44,16 @@ SHIPPED_LABELS = ("home-secure", "home-sealed")
 CATCH = ['emit "edge_ci_github_auth 1"', "GH_AUTH_RUN=/run/edge-ci", 'OWNER="${EDGE_CI_OWNER:-x}"',
          "GH_AUTH_OWNER=mjdevaccount", "LIB=/usr/local/lib/edge", "# three trade-data pools", "see home-host docs",
          "INSTANCE=home", "--label home.repo=x"]
+# keyed by path under tests/ (a same-named file elsewhere gets nothing), and each token removed only
+# where it stands alone: a shipped label with a suffix glued on (-ops, .x) is still a hit
 EXEMPT = {"_runners.py": SHIPPED_LABELS, pathlib.Path(__file__).name: (*_ESTATE, *CATCH, *SHIPPED_LABELS)}
+
+
+def _unexempt(rel: str, line: str) -> str:
+    """`line` with every token exempt for the file at `rel` (posix, under tests/) removed, whole only."""
+    for token in EXEMPT.get(rel, ()):
+        line = re.sub(rf"(?<![\w.-]){re.escape(token)}(?![\w.-])", "", line)
+    return line
 
 
 def runner_tests(root: pathlib.Path = TESTS) -> list[pathlib.Path]:
@@ -57,11 +66,10 @@ def estate_hits(root: pathlib.Path = TESTS) -> list[str]:
     """`path:line: text` for every estate-shaped name in the runner tests, the listed exemptions removed."""
     hits = []
     for p in runner_tests(root):
+        rel = p.relative_to(root).as_posix()
         for i, line in enumerate(p.read_bytes().decode("utf-8").splitlines(), 1):
-            for token in EXEMPT.get(p.name, ()):
-                line = line.replace(token, "")
-            if ESTATE.search(line):
-                hits.append(f"{p.relative_to(root).as_posix()}:{i}: {line.strip()}")
+            if ESTATE.search(_unexempt(rel, line)):
+                hits.append(f"{rel}:{i}: {line.strip()}")
     return hits
 
 
@@ -96,7 +104,7 @@ def test_the_shipped_label_exemption_is_still_needed():
 
 def test_the_runner_test_scan_catches_a_planted_name(tmp_path):
     """MUST-FIRE: an estate name in a runners fixture or test is a hit; a shipped label is exempt only in
-    _runners.py; a test outside the runners' scope is not read."""
+    tests/_runners.py itself, and only standing alone; a test outside the runners' scope is not read."""
     # the planted text is built from this module's own exempt tokens, so it names nothing here
     label, name = f"X = '{SHIPPED_LABELS[0]}'\n", CATCH[7] + "\n"
     (tmp_path / "fixtures" / "runners").mkdir(parents=True)
@@ -106,6 +114,16 @@ def test_the_runner_test_scan_catches_a_planted_name(tmp_path):
     (tmp_path / "test_other.py").write_text(name, encoding="utf-8")
     assert {p.name for p in runner_tests(tmp_path)} == {"kit.yml", "_runners.py", "test_runners_x.py"}
     assert [h.split(":")[0] for h in estate_hits(tmp_path)] == ["fixtures/runners/kit.yml", "test_runners_x.py"]
+    # review 889 F1: an exemption is the FILE's, not its basename's, and a token's, not a substring's
+    deep = tmp_path / "fixtures" / "runners" / "deep"
+    deep.mkdir()
+    (deep / pathlib.Path(__file__).name).write_text(CATCH[3] + "\n", encoding="utf-8")
+    (deep / "_runners.py").write_text(label, encoding="utf-8")
+    (tmp_path / "_runners.py").write_text(f"X = '{SHIPPED_LABELS[0]}-ops'\nY = '{SHIPPED_LABELS[1]}.x'\n",
+                                          encoding="utf-8")
+    assert [h.split(": ", 1)[0] for h in estate_hits(tmp_path)] == [
+        "_runners.py:1", "_runners.py:2", "fixtures/runners/deep/_runners.py:1",
+        f"fixtures/runners/deep/{pathlib.Path(__file__).name}:1", "fixtures/runners/kit.yml:1", "test_runners_x.py:1"]
 
 
 @pytest.mark.parametrize("line", CATCH)
