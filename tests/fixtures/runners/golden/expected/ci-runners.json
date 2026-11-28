@@ -1,6 +1,6 @@
 {
   "_generated": "by scripts/ci_runners.py from ci/runners.yml -- DO NOT EDIT; run --write",
-  "source_sha256": "fcc2d506a622",
+  "source_sha256": "32c85949fa2d",
   "guests": {
     "mon": {
       "vmid": 201,
@@ -39,8 +39,8 @@
       "slack": 1000
     }
   },
-  "instance": "home",
-  "prefix": "home-",
+  "instance": "shared",
+  "prefix": "ci-",
   "isolation": "socket",
   "runner_vm": {
     "name": "pool-a",
@@ -63,7 +63,7 @@
       "pids": 2048,
       "labels": [
         "self-hosted",
-        "home"
+        "ci"
       ],
       "peak_mb": 700,
       "young_mb": 700
@@ -79,7 +79,7 @@
       "pids": 2048,
       "labels": [
         "self-hosted",
-        "home"
+        "ci"
       ],
       "peak_mb": 700,
       "young_mb": 350
@@ -95,7 +95,7 @@
       "pids": 2048,
       "labels": [
         "self-hosted",
-        "home"
+        "ci"
       ],
       "peak_mb": 2000,
       "young_mb": 1200
@@ -111,7 +111,7 @@
       "pids": 2048,
       "labels": [
         "self-hosted",
-        "home-big"
+        "ci-big"
       ],
       "peak_mb": 3500,
       "young_mb": 3500,
@@ -128,7 +128,7 @@
       "pids": 2048,
       "labels": [
         "self-hosted",
-        "home-main"
+        "ci-main"
       ],
       "peak_mb": 600,
       "young_mb": 300
@@ -144,7 +144,7 @@
       "pids": 2048,
       "labels": [
         "self-hosted",
-        "home"
+        "ci"
       ],
       "peak_mb": 2400,
       "young_mb": 2400
@@ -160,7 +160,7 @@
       "pids": 2048,
       "labels": [
         "self-hosted",
-        "home-light"
+        "ci-light"
       ],
       "peak_mb": 700,
       "young_mb": 700

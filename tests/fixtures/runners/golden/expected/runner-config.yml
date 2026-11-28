@@ -5,4 +5,4 @@ groups:
     rules:
       - record: runner_config_expected_info
         expr: vector(1)
-        labels: { source_sha256: "fcc2d506a622" }
+        labels: { source_sha256: "32c85949fa2d" }

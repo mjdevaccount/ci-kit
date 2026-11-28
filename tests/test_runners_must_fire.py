@@ -3,7 +3,9 @@
 THE GOLDEN TEST is the live-safety contract: a supervisor reinstalls whenever its render's
 `source_sha256` changes, so the library must render BYTE-IDENTICAL JSON to the hand-rolled renderer
 it replaces. tests/fixtures/runners/golden/expected/ was rendered by that original renderer from
-golden/runners.yml; any byte this library renders differently fails here.
+golden/runners.yml, then its pool names were made neutral by ONE substitution applied to the input
+and the output alike (and the raw hash recomputed), never by this library; any byte this library
+renders differently fails here.
 """
 
 from __future__ import annotations
@@ -99,8 +101,8 @@ def test_a_python_rule_runs_only_after_the_built_ins_pass():
     lambda d: d.update(blocks={}),
     lambda d: d.update(nope=1),
     lambda d: d.update(source_hash="md5"),
-    lambda d: d["blocks"]["secure_runners"].update(prefix="home-"),   # two instances, one prefix
-    lambda d: d["blocks"]["secure_runners"].update(label="home"),     # two blocks, one tier
+    lambda d: d["blocks"]["secure_runners"].update(prefix="ci-"),     # two instances, one prefix
+    lambda d: d["blocks"]["secure_runners"].update(label="ci"),       # two blocks, one tier
     lambda d: d["blocks"]["runners"].pop("variable"),
     lambda d: d["blocks"]["runners"].update(variable="ci-runner"),
     lambda d: d["blocks"].update(host={**d["blocks"]["runners"], "prefix": "h-", "label": "h", "instance": "h",
