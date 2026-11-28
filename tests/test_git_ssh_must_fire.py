@@ -157,6 +157,8 @@ def test_the_three_phases(tmp_path: pathlib.Path) -> None:
         assert (tmp_path / "unnamed.txt").read_text().strip() == "https://github.com/o/public"
         cmd = (tmp_path / "sshcmd.txt").read_text()
         assert f"UserKnownHostsFile={outputs['known-hosts']} " in cmd
+        # a connection that never came up is retried, nothing else (ssh_retry.sh, v1.50.1)
+        assert cmd.startswith("bash ") and "/ci_kit/ssh_retry.sh -o UserKnownHostsFile=" in cmd
         assert "StrictHostKeyChecking=yes" in cmd and "BatchMode=yes" in cmd
         assert all(f"-o {o}" in cmd for o in ("ConnectTimeout=20", "ServerAliveInterval=15", "ServerAliveCountMax=3"))
         lines = pathlib.Path(outputs["known-hosts"]).read_text().splitlines()

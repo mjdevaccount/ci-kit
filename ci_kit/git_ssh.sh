@@ -196,6 +196,13 @@ _ci_kit_git_ssh_route() {
   # a connection that stalls must END, not hold the step to its job timeout (v1.47.0; a consumer's
   # nightly 2026-11-26: one ssh sat silent until its caller's 120s limit). 20s to connect, then a
   # peer silent for 3 x 15s is dead. A slow transfer that is still moving is NOT cut by these.
+  # ...and a connection that never came up (no banner inside those 20s: trade-data#3260's review gate,
+  # 2026-11-28, went BLIND on one) is tried again by ssh_retry.sh, which re-runs ONLY a connect-phase
+  # failure (nothing of git's stdin was read yet) and returns every other exit as-is (v1.50.1).
+  local retry
+  retry="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ssh_retry.sh"
+  [ -r "$retry" ] || _ci_kit_git_ssh_die "route: $retry is missing"
+  if [[ "$retry" =~ [[:space:]] ]]; then _ci_kit_git_ssh_die "route: the ssh_retry.sh path '$retry' holds whitespace"; fi
   export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=$CI_KIT_GIT_SSH_KNOWN_HOSTS -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
   if [ -n "$cfg" ]; then
     # one key per repo: every repo must have its alias in the config, and every agent must be alive
@@ -210,6 +217,7 @@ _ci_kit_git_ssh_route() {
     done < <(awk '$1 == "IdentityAgent" {print $2}' "$cfg")
     GIT_SSH_COMMAND="ssh -F $cfg ${GIT_SSH_COMMAND#ssh }"
   fi
+  GIT_SSH_COMMAND="bash $retry ${GIT_SSH_COMMAND#ssh }"
   # env-scoped git config (git >= 2.31), appended after any the caller already set: no --global,
   # so no later step inherits the rewrite
   n=${GIT_CONFIG_COUNT:-0}
