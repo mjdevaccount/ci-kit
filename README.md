@@ -33,11 +33,12 @@ an argument you pass.
 | **[Shrink-only ratchets](docs/architecture.md#shrink-only-baselines)** | Adopt a gate on a messy codebase today. The current debt is frozen in a baseline that can only shrink, so nothing new gets in while the old debt is paid down. |
 | **[PR operations](docs/pr-ops/README.md)** | A serial PR queue, a merge train that tests N armed PRs once and lands them as N commits with bisect-on-red, and a heal ladder that fixes a red or conflicted PR cheapest-first, from a rerun up to a sandboxed agent. It works with strict branch protection, on a personal account, without a paid merge-queue service. |
 | **[Pre-merge review gate](docs/review-gate.md)** | A model code review that runs as a **required check**, so auto-merge waits for the verdict instead of racing it. Two transports (an API key, or a Claude Code subscription over MCP), a tiering policy, and a verdict carried over an unchanged diff. |
+| **[GitHub Apps](docs/github-apps.md)** | Declare each GitHub App your automation acts as (permissions, events, installed repositories) in a reviewed manifest, and turn any change made on GitHub's settings pages into a red scheduled run. |
 | **[Runner capacity](docs/runners.md)** | Self-hosted runner sizing as a library: schema-checked capacity files, host, guest and runner memory budgets against measured peaks, one JSON render per runner block, and the admission rule a supervisor runs. |
 | **[Library](docs/library.md)** | The parsers, discovery, site-lint and ratchet primitives the gates are built on, for writing your own gate with the same exit contract. |
 
 Also included: a shared **[Renovate preset](renovate/default.json5)** (one line in a consumer's
-`renovate.json`), and **[15 reusable workflows](docs/reusable-workflows.md)**, each documented
+`renovate.json`), and **[16 reusable workflows](docs/reusable-workflows.md)**, each documented
 with every input and a caller stanza.
 
 ## Quickstart
@@ -218,6 +219,16 @@ Every console script, grouped by concern. Each links to its page in [docs/](docs
 </details>
 
 <details>
+<summary><b>GitHub Apps</b> (2)</summary>
+
+| script | what it checks or does | docs |
+|---|---|---|
+| `ci-app-audit` | each declared GitHub App's permissions, events and installations match live (`apps` extra) | [github-apps](docs/github-apps.md) |
+| `ci-pr-token-check` | the pr-token record lines in a log or annotation dump parse and are clean | [github-apps](docs/github-apps.md#reading-the-pr-token-record) |
+
+</details>
+
+<details>
 <summary><b>Review gate (`review` extra)</b> (6)</summary>
 
 | script | what it checks or does | docs |
@@ -240,6 +251,7 @@ Every console script, grouped by concern. Each links to its page in [docs/](docs
 | [PR operations](docs/pr-ops/README.md) | [Autoupdate](docs/pr-ops/autoupdate.md), [merge train](docs/pr-ops/merge-train.md), [heal ladder](docs/pr-ops/heal-ladder.md), [push token](docs/pr-ops/push-token.md) |
 | [Review gate](docs/review-gate.md) | Policy, transports, the caller stanza |
 | [Runner capacity](docs/runners.md) | The capacity file, the kit file, the CLI, admission |
+| [GitHub Apps](docs/github-apps.md) | An App's permissions and installations declared and audited against live; reading the pr-token record |
 | [Reusable workflows](docs/reusable-workflows.md) | Every input of every workflow |
 | [Versioning](docs/versioning.md) | Tags, the moving major, release policy |
 | [Contributing](docs/contributing.md) | Adding a gate: selftest, must-fire suite, docs |

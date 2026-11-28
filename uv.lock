@@ -158,10 +158,14 @@ wheels = [
 
 [[package]]
 name = "ci-kit"
-version = "1.52.0"
+version = "1.53.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
+apps = [
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "pyyaml" },
+]
 cog = [
     { name = "cogapp" },
 ]
@@ -192,11 +196,13 @@ requires-dist = [
     { name = "cogapp", marker = "extra == 'cog'", specifier = ">=3.4" },
     { name = "mcp", marker = "extra == 'review'", specifier = ">=2.3,<3" },
     { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'review'", specifier = ">=2.57,<3" },
+    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'apps'", specifier = ">=2.10" },
+    { name = "pyyaml", marker = "extra == 'apps'", specifier = ">=6.0.2" },
     { name = "pyyaml", marker = "extra == 'runners'", specifier = ">=6.0.2" },
     { name = "pyyaml", marker = "extra == 'workflow'", specifier = ">=6.0.2" },
     { name = "sqlglot", marker = "extra == 'sql'", specifier = ">=30.13" },
 ]
-provides-extras = ["sql", "workflow", "cog", "runners", "review"]
+provides-extras = ["sql", "workflow", "cog", "runners", "review", "apps"]
 
 [package.metadata.requires-dev]
 dev = [

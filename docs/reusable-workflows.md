@@ -29,6 +29,7 @@ nothing else: plain flags, **no quotes** (they would stay literal) and no glob e
 | [`relock.yml`](#relockyml) | the dependency-bot relock | [pr-ops/heal-ladder.md](pr-ops/heal-ladder.md#relocking-a-dependency-bots-pr) |
 | [`merge-train.yml`](#merge-trainyml) | `ci-merge-train` | [pr-ops/merge-train.md](pr-ops/merge-train.md) |
 | [`review-gate.yml`](#review-gateyml) | the pre-merge model review gate | [review-gate.md](review-gate.md) |
+| [`app-audit.yml`](#app-audityml) | `ci-app-audit`: declared GitHub Apps against live | [github-apps.md](github-apps.md) |
 
 Not reusable (ci-kit's own): `ci.yml` (this repo's CI), `pr-autoupdate-self.yml` (ci-kit's own
 updater, [pr-ops/autoupdate.md](pr-ops/autoupdate.md#ci-kits-own-updater)) and `tag-version.yml`
@@ -47,8 +48,8 @@ updater, [pr-ops/autoupdate.md](pr-ops/autoupdate.md#ci-kits-own-updater)) and `
 - **Secret-holding jobs** run hosted unless the caller turns on their pool: `secure-runner` /
   `sealed-runner` inputs, else the `CI_SECURE_RUNNER` / `CI_SEALED_RUNNER` on/off switches for the
   fixed labels `["self-hosted","home-secure"]` / `["self-hosted","home-sealed"]`. Secure: the token
-  jobs of pr-autoupdate, merge-train, ci-green, pr-heal, relock and the review gate's `decide` and
-  `verdict`; sealed: the review gate's `model review` and pr-heal's `fix`. Never the shared
+  jobs of pr-autoupdate, merge-train, ci-green, pr-heal, relock, app-audit (it holds an App key) and
+  the review gate's `decide` and `verdict`; sealed: the review gate's `model review` and pr-heal's `fix`. Never the shared
   `CI_RUNNER` pool. Precedence and rationale: [pr-ops/push-token.md](pr-ops/push-token.md#pools).
 - pr-heal's `regen` job runs PR code with no secret, so it runs on `CI_RUNNER` or hosted; relock's
   `trigger` and `lock` jobs and `major-tag` always run hosted.
@@ -504,3 +505,38 @@ jobs:
 | `ntfy-url` | optional; a block or BLIND is pushed here (priority 3) |
 
 Outputs: `result`.
+
+## app-audit.yml
+
+`ci-app-audit` over the caller's App manifest, then its selftest
+([github-apps.md](github-apps.md)). Run it on a schedule: an App's grants and installations change
+on GitHub's settings pages, which no commit or run records, so the red run is the whole point.
+The key reaches the tool through the environment only.
+
+```yaml
+on:
+  schedule: [{cron: "17 6 * * *"}]
+  workflow_dispatch:
+jobs:
+  apps:
+    uses: mjdevaccount/ci-kit/.github/workflows/app-audit.yml@v1
+    with:
+      manifest: ci/github-apps.yml
+      keyed-app: example-bot
+      app-level: other-app
+    secrets:
+      app-private-key: ${{ secrets.EXAMPLE_BOT_PRIVATE_KEY }}
+```
+
+| input | type | default | what |
+|---|---|---|---|
+| `manifest` | string | `ci/github-apps.yml` | the App manifest (YAML or JSON) in the caller's checkout |
+| `keyed-app` | string | `''` | the name (slug) of the App whose private key is the `app-private-key` secret ('' = none) |
+| `app-level` | string | `''` | space-separated App names audited WITHOUT a key (permissions and events only; installations not read) |
+| `only` | string | `''` | space-separated App names to audit ('' = every App in the manifest) |
+| `secure-runner` | string | `''` | the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md |
+
+| secret | what |
+|---|---|
+| `app-private-key` | the keyed App's private key (PEM) |
+| `app-level-token` | a token that can read the app-level Apps (GET /apps/<slug>); default the job's own token |
