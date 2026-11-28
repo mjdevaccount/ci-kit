@@ -49,7 +49,7 @@ if ! { [ -n "${INSTANCE}" ] && [ -n "${EXPECT}" ] && [ -r "${CONFIG}" ] \
        && WORK_ROOT="$(sv work_root)" && BUSY_LIMIT_S="$(sv busy_limit_s)" \
        && IDLE_LIMIT_S="$(sv idle_limit_s)" && STRAY_LIMIT_S="$(sv stray_limit_s)" \
        && L_REPO="$(sv labels.repo)" && L_KEEP="$(sv labels.keep)" && L_CANARY="$(sv labels.canary)"; }; then
-  echo "usage: ci-runner-supervisor.sh INSTANCE RENDER ISOLATION:PREFIX -- ${CONFIG:-<no render>} is unreadable or has no complete supervisor section" >&2
+  echo "usage: supervisor.sh INSTANCE RENDER ISOLATION:PREFIX -- ${CONFIG:-<no render>} is unreadable or has no complete supervisor section" >&2
   exit 2
 fi
 # IDENTITY BEFORE ANY PATH IS USED. Every path above is the render's, so a render placed under
@@ -540,7 +540,8 @@ if [ "${ISOLATION}" = secure ]; then
   [ "${foreign}" -gt 0 ] && echo "ci-runner-supervisor: FOREIGN container(s) in VM ${VMID}: ${fl//$'\n'/ } (reaping)" >&2
   emit "${MP}runner_vm_foreign_containers ${foreign}"
 fi
-# Limits per instance (the render's): secure reaps a busy runner early and a stray at once.
+# Limits per instance (the render's busy / idle / stray limits): a secure render typically sets them short,
+# so a busy runner is reaped early and a stray at once.
 # The ONE exemption is the pull-through cache this supervisor started (registry_tick), by the full
 # container ID recorded on the HOST -- never a label or a name, which any job could put on a watcher.
 # Socket VM only: the secure instance passes no ID, so nothing in the secure VM is ever exempt.
@@ -1173,8 +1174,8 @@ done
 # MEMORY-WEIGHTED ADMISSION: every live runner counts at its pool's measured peak_mb
 # against mem_budget_mb; an (unlisted) runner is charged the largest peak (the allocator's rule).
 # The drain HEAD is carried across runs (the allocator's STARVATION rule): without it a pool sorted
-# ahead of the head took back the room the drain had just freed. ${RUN} (tmpfs): a reboot forgets
-# it, which only costs one re-pick. A missing/garbled file is no head, never an error.
+# ahead of the head took back the room the drain had just freed. ${RUN} (a volatile dir, typically tmpfs: a reboot forgets
+# it, which only costs one re-pick). A missing/garbled file is no head, never an error.
 HEAD_FILE="${RUN}/drain_head"
 prev_head="$(head -c 200 "${HEAD_FILE}" 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
 # the drain backfill's kill switch (the render's backfill: false); absent = on
@@ -1257,7 +1258,7 @@ plan="$(decide "${state}" "${prev_head}" "${live_free}")" \
 # THE TRACE: every run's allocator input and answer, one JSON line, last 600 lines (ticks plus re-decides that started something; ~4h of ticks alone,
 # ~1.5h when up to ~15 re-decides a run start something; at the
 # timer) in ${RUN}. A start nobody logged could not be traced to the pass that granted it (a heavy pool
-# re-admitted mid-drain); this is what a test is built from. tmpfs: a
+# re-admitted mid-drain); this is what a test is built from. ${RUN} is volatile (typically tmpfs): a
 # reboot drops it. A failed write only loses the trace, never the run.
 TRACE="${RUN}/alloc_trace.jsonl"
 # The memory inputs ride along: without live_free_mb a held tick could not say

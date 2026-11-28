@@ -1,11 +1,16 @@
-"""`ci-runners --verify-prom`: did a supervisor tick publish every series its alerts read?
+"""`ci-runners --verify-prom`: is a supervisor's file COMPLETE -- every series its alerts read?
 
-An install that moves the supervisor must prove the NEW script looked, not that a file exists: a
-rule over a series nobody publishes is a guard that cannot fire, and a supervisor that crashes after
-it publishes leaves a fresh, complete-looking file every tick. This reads one `.prom` file
-(`sh/supervisor.sh`'s textfile output) against the RENDER that supervisor was installed with -- the
-file it reads, so every requirement is derived from what was shipped, never from a list of pools
-kept here:
+A rule over a series nobody publishes is a guard that cannot fire, so an install checks the file the
+first tick wrote. This reads one `.prom` file (`sh/supervisor.sh`'s textfile output) against the
+RENDER that supervisor was installed with -- the file it reads, so every requirement is derived from
+what was shipped, never from a list of pools kept here.
+
+What it does NOT prove: WHICH script wrote the file, or WHEN. Any supervisor publishing these series
+for this render passes (the one being replaced does), and so does a file a crashed tick left behind.
+Identity and freshness are the installer's: a tick that BEGAN after the move, ended 0, and wrote a
+file newer than its own begin. Run this after those, never instead of them.
+
+Requirements:
 
   * only samples labelled ``supervisor="<render instance>"`` count (another instance's file, or an
     older script that did not label, never satisfies one);
@@ -21,8 +26,12 @@ kept here:
   * a ``socket`` render with a ``registry_cache``: the cache's gauges and the daemon's mirror on it
     (the protection is the mirror). The cache down, or switched off on purpose, is a NOTE.
 
+A file the textfile collector would REJECT is a finding too: a sample line that does not parse,
+a label block that is not all `k="v"` pairs, and the same series twice (node-exporter drops the
+whole file, so every series in it vanishes while each one, read alone, looks present).
+
 Exit 0 every requirement met, 1 one is not (each printed), 2 could not check (an unreadable file,
-a render with no supervisor section, an isolation this script does not run).
+a render with no supervisor section or a mistyped one, an isolation this script does not run).
 
 prometheus_client's text parser was checked: not adopted, because it would be this extra's first
 dependency beyond YAML, to read a format this package's own script writes in one fixed shape
@@ -37,6 +46,7 @@ import re
 
 SAMPLE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{(.*)\})?[ \t]+(\S+)$")
 LABEL = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="((?:[^"\\]|\\.)*)"')
+LABELS = re.compile(r'(?:[A-Za-z_][A-Za-z0-9_]*="(?:[^"\\]|\\.)*")(?:,[A-Za-z_][A-Za-z0-9_]*="(?:[^"\\]|\\.)*")*,?')
 
 # every series an alert or a per-tick sweep reads, without the metric prefix
 REQUIRED = (
@@ -58,19 +68,42 @@ class VerifyError(ValueError):
     """The inputs cannot be checked (exit 2), as distinct from a requirement not met (exit 1)."""
 
 
-def samples(text: str, instance: str) -> dict[tuple[str, tuple[tuple[str, str], ...]], str]:
-    """(name, sorted other labels) -> value, for every sample labelled supervisor=<instance>."""
-    out = {}
-    for line in text.splitlines():
-        line = line.strip()
+Key = tuple[str, tuple[tuple[str, str], ...]]
+
+
+def parse(text: str) -> tuple[list[tuple[str, dict[str, str], str]], list[str]]:
+    """([(name, labels, value)], [what would make the collector reject the file]) over every line."""
+    rows, bad = [], []
+    seen: set[Key] = set()
+    for i, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip().lstrip("\ufeff")
+        if not line or line.startswith("#"):
+            continue
         m = SAMPLE.match(line)
-        if not m or line.startswith("#"):
+        if not m or (m.group(2) is not None and m.group(2) != "" and not LABELS.fullmatch(m.group(2))):
+            bad.append(f"line {i}: not a sample the textfile collector accepts: {line[:120]!r}")
             continue
         labels = dict(LABEL.findall(m.group(2) or ""))
-        if labels.pop("supervisor", None) != instance:
-            continue
-        out[(m.group(1), tuple(sorted(labels.items())))] = m.group(3)
+        key = (m.group(1), tuple(sorted(labels.items())))
+        if key in seen:
+            bad.append(f"line {i}: {_shown(*key[:1], dict(key[1]))} published twice (the collector drops the file)")
+        seen.add(key)
+        rows.append((m.group(1), labels, m.group(3)))
+    return rows, bad
+
+
+def samples(text: str, instance: str) -> dict[Key, str]:
+    """(name, sorted other labels) -> value, for every sample labelled supervisor=<instance>."""
+    out = {}
+    for name, labels, value in parse(text)[0]:
+        labels = dict(labels)
+        if labels.pop("supervisor", None) == instance:
+            out[(name, tuple(sorted(labels.items())))] = value
     return out
+
+
+def _count(v: object) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
 
 
 def _int(v: str | None) -> int | None:
@@ -87,14 +120,20 @@ def verify(text: str, render: dict) -> tuple[list[str], list[str]]:
         inst, iso, sup = render["instance"], render["isolation"], render["supervisor"]
         mp, sha, total = sup["metric_prefix"], render["source_sha256"], render["max_total"]
         pools = [(p["repo"], p.get("min", 0)) for p in render["pools"]]
-    except (KeyError, TypeError) as e:
+    except (KeyError, TypeError, AttributeError) as e:
         raise VerifyError(f"the render has no complete supervisor section ({type(e).__name__}: {e})") from e
+    typed = (all(isinstance(x, str) and x for x in (inst, iso, mp, sha)) and _count(total)
+             and all(isinstance(r, str) and r and _count(m) for r, m in pools))
+    if not typed:
+        raise VerifyError("the render's instance / isolation / metric_prefix / source_sha256 / max_total /"
+                          " pools[].repo / pools[].min are not the types a render carries")
     if iso not in ("socket", "secure"):
         raise VerifyError(f"isolation {iso!r}: sh/supervisor.sh runs socket and secure instances only")
+    bad = parse(text)[1]
     got = samples(text, inst)
     if not got:
         return [f'no sample carries supervisor="{inst}": not this instance\'s file, or not its script'], []
-    findings: list[str] = []
+    findings: list[str] = list(bad)
     notes: list[str] = []
 
     def val(name: str, **labels: str) -> str | None:

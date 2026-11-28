@@ -160,3 +160,34 @@ def test_the_cli_exits_0_1_2(tmp_path, capsys):
     render.write_text("{not json", encoding="utf-8")
     assert main(["--verify-prom", str(prom), "--render", str(render)]) == 2
     assert "CANNOT CHECK" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("extra,needle", [
+    ('ci_runner_collect_ok{supervisor="ci"} 0', "published twice"),
+    ('ci_runner_max_total{supervisor="ci"} 4', "published twice"),
+    ('ci_runner_vm_volumes{supervisor="ci",,garbage} 4', "not a sample"),
+    ('ci_runner_vm_volumes{supervisor="ci" 4', "not a sample"),
+    ("ci_runner_vm_volumes", "not a sample"),
+])
+def test_a_file_the_collector_would_reject_is_a_finding(extra, needle):
+    """review 891 F2: node-exporter drops a file with a duplicate series or a broken line, so every
+    series in it vanishes -- each one, read alone, looking present is not a pass."""
+    lines = tick(SOCKET)
+    findings, _ = verify(text([extra, *lines]), SOCKET)
+    assert any(needle in f for f in findings), findings
+    # the same series in another label order is the same series
+    swapped = 'ci_runner_config_info{source_sha256="0123456789ab",supervisor="ci"} 1'
+    assert any("published twice" in f for f in verify(text([swapped, *lines]), SOCKET)[0])
+
+
+@pytest.mark.parametrize("edit", [
+    lambda r: r["pools"][0].update(min=None), lambda r: r["pools"][0].update(min="1"),
+    lambda r: r["supervisor"].update(metric_prefix=None), lambda r: r.update(instance=3),
+    lambda r: r.update(max_total=True), lambda r: r.update(supervisor=[]),
+])
+def test_a_mistyped_render_is_could_not_check_not_a_finding(edit):
+    """review 891 F3: a render this cannot read is exit 2, never a traceback read as findings."""
+    r = copy.deepcopy(SOCKET)
+    edit(r)
+    with pytest.raises(VerifyError):
+        verify(text(tick(SOCKET)), r)

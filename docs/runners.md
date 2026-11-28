@@ -52,8 +52,12 @@ ci-runners --selftest
 Exit 0 clean, 1 findings or a stale / orphaned render, 2 could not look (unreadable or unparsable
 file, malformed kit, no pyyaml).
 
-`--verify-prom` (v1.57.0) is the install gate for a moved supervisor: it reads one `.prom` file
+`--verify-prom` (v1.57.0) checks a supervisor's file is COMPLETE: it reads one `.prom` file
 against the RENDER that supervisor was installed with, so every requirement comes from what shipped.
+It does not prove WHICH script wrote the file or WHEN (the script being replaced publishes the same
+series, and a crashed tick leaves its file): identity and freshness stay with the installer (a tick
+that began after the move, ended 0, and wrote a file newer than its begin). A file the textfile
+collector would reject (an unparsable line or label block, a series twice) is a finding.
 Only samples labelled `supervisor="<instance>"` count. Required: `runner_collect_ok 1`, the
 render's `source_sha256` in `runner_config_info`, its `max_total`, every gauge an alert or a
 per-tick sweep reads, each pool's target / hold / declared peak, the working-set maximum of each pool
