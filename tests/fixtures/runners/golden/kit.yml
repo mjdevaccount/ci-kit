@@ -6,24 +6,24 @@ out_dir: expected
 blocks:
   runners:
     required: true
-    instance: home
-    prefix: home-
+    instance: shared
+    prefix: ci-
     isolation: socket
-    label: home
+    label: ci
     variable: CI_RUNNER
     output: ci-runners.json
   secure_runners:
     instance: secure
-    prefix: sec-
+    prefix: secure-
     isolation: secure
-    label: home-secure
+    label: ci-secure
     variable: CI_SECURE_RUNNER
     output: ci-runners-secure.json
   sealed_runners:
     instance: sealed
-    prefix: seal-
+    prefix: sealed-
     isolation: sealed
-    label: home-sealed
+    label: ci-sealed
     variable: CI_SEALED_RUNNER
     output: ci-runners-sealed.json
     one_job_per_boot: true

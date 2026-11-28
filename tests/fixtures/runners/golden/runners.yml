@@ -1,6 +1,8 @@
 # A synthetic capacity file: every feature the renderer reads, none of anyone's real numbers.
 # Its expected/*.json were rendered by the ORIGINAL hand-rolled renderer this package replaces,
 # so the golden test proves the library byte-identical to it -- comments and all (raw hash).
+# Its pool names were then made neutral by one substitution applied to this file and to the
+# expected output alike, with the raw hash recomputed: never re-rendered by the library.
 host:
   name: lab
   threads: 12            # 6C/12T
@@ -55,7 +57,7 @@ runners:
     cpus: 2
     memory_mb: 2048
     pids: 2048
-    labels: [self-hosted, home]
+    labels: [self-hosted, ci]
   pools:
     svc:
       enabled: true
@@ -67,7 +69,7 @@ runners:
       repo: svc
       variable: CI_RUNNER_BIG
       enabled: true
-      labels: [self-hosted, home-big]
+      labels: [self-hosted, ci-big]
       min_idle: 0
       max_runners: 2
       peak_mb: 3500
@@ -76,7 +78,7 @@ runners:
       repo: svc
       variable: CI_RUNNER_MAIN
       enabled: true
-      labels: [self-hosted, home-main]
+      labels: [self-hosted, ci-main]
       min_idle: 1        # no max_runners: admission is the ceiling
       peak_mb: 600
       young_mb: 300
@@ -88,7 +90,7 @@ runners:
       repo: web
       variable: CI_RUNNER_LIGHT
       enabled: true
-      labels: [self-hosted, home-light]
+      labels: [self-hosted, ci-light]
       min_idle: 0
       peak_mb: 700
     docs: {enabled: true, min_idle: 0, peak_mb: 700, young_mb: 350}
@@ -105,11 +107,11 @@ secure_runners:
     cpus: 1
     memory_mb: 768
     pids: 512
-    labels: [self-hosted, home-secure]
+    labels: [self-hosted, ci-secure]
   pools:
     svc: {enabled: true, min_idle: 0, max_runners: 2, peak_mb: 512}
     web: {enabled: true, min_idle: 0, max_runners: 1, peak_mb: 512}
-    ops: {enabled: true, min_idle: 0, peak_mb: 600, labels: [self-hosted, home-secure-ops]}
+    ops: {enabled: true, min_idle: 0, peak_mb: 600, labels: [self-hosted, ci-secure-ops]}
 
 sealed_runners:
   vm: pool-c
@@ -121,7 +123,7 @@ sealed_runners:
     cpus: 2
     memory_mb: 2000
     pids: 2048
-    labels: [self-hosted, home-sealed]
+    labels: [self-hosted, ci-sealed]
   pools:
     svc: {enabled: true, min_idle: 0, max_runners: 1, peak_mb: 1800}
     web: {enabled: true, min_idle: 0, max_runners: 1, peak_mb: 1500}
