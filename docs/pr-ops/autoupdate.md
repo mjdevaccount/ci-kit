@@ -72,7 +72,8 @@ the head it read, only when GitHub says CLEAN (every check green, required or no
 the head PASSED here too (a non-empty rollup, none cancelled or pending, every `--required-checks`
 name present), and no workflow run on that head is still going. A head BEHIND its base is updated
 (PUT update-branch) instead of merged: a non-strict base never reports BEHIND, so CLEAN there is no
-proof the head was tested on today's main. One per pass. A PR held only by
+proof the head was tested on today's main; while its fresh REQUIRED checks run it reads BLOCKED, so the
+next pass usually ARMS it and GitHub merges it on the required checks (the queue's standard). One per pass. A PR held only by
 `renovate/stability-days` reads **HELD BY POLICY** (the minimumReleaseAge gate, not stuck) and is
 never armed or landed until it passes. A refused merge is a red run; a moved head or base, or a PR
 someone merged first, is a race, decided next pass.
