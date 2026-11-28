@@ -1,6 +1,6 @@
 # Self-hosted runner capacity (`ci-runners`, `runners` extra)
 
-`ci_kit/runners/` (v1.51.0, `renders` v1.52.0, `supervisor` v1.54.0, scripts v1.56.0, `supervisor.sh` + `--verify-prom` v1.57.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
+`ci_kit/runners/` (v1.51.0, `renders` v1.52.0, `supervisor` v1.54.0, scripts v1.56.0, `supervisor.sh` + `--verify-prom` v1.57.0, `runner_impl_info` + `--scripts-sha256` v1.58.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
 runner CAPACITY as a library: the capacity file's schema, the host / guest / runner-VM budget
 invariants (measured `peak_mb` against real RAM, floors, ceilings, the live room), one JSON render
 per runner block for a supervisor to read with jq, and the runtime admission rule (`alloc.jq`,
@@ -45,7 +45,7 @@ ci-runners --check --config ci/runners.yml --kit ci/runners-kit.yml   # CI: sche
 ci-runners --write --config ci/runners.yml --kit ci/runners-kit.yml   # regenerate the renders
 ci-runners --write ... --out-dir "$RUNNER_TEMP/r"                     # render elsewhere, e.g. to diff against another renderer
 ci-runners --alloc < tick.json                                        # one admission verdict (alloc.jq's twin)
-ci-runners --verify-prom ci_runner.prom --render ci-runners.json      # did a tick publish what its alerts read?
+ci-runners --verify-prom ci_runner.prom --render ci-runners.json [--scripts-sha256 X]  # every series its alerts read
 ci-runners --selftest
 ```
 
@@ -54,9 +54,12 @@ file, malformed kit, no pyyaml).
 
 `--verify-prom` (v1.57.0) checks a supervisor's file is COMPLETE: it reads one `.prom` file
 against the RENDER that supervisor was installed with, so every requirement comes from what shipped.
-It does not prove WHICH script wrote the file or WHEN (the script being replaced publishes the same
-series, and a crashed tick leaves its file): identity and freshness stay with the installer (a tick
-that began after the move, ended 0, and wrote a file newer than its begin). A file the textfile
+It does not prove WHEN the file was written (a crashed tick leaves its file): freshness stays with
+the installer (a tick that began after the move, ended 0, and wrote a file newer than its begin).
+WHICH script wrote it is provable with `--scripts-sha256 <pin>`: `supervisor.sh` publishes
+`<prefix>runner_impl_info{scripts_sha256}` hashed from the directory it runs from (the same value
+`scripts_sha256` computes), and the flag requires it at the pin; without the flag, the script being
+replaced passes too, since it publishes the same series. A file the textfile
 collector would reject (an unparsable line or label block, a series twice) is a finding.
 Only samples labelled `supervisor="<instance>"` count. Required: `runner_collect_ok 1`, the
 render's `source_sha256` in `runner_config_info`, its `max_total`, every gauge an alert or a

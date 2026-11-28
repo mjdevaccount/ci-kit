@@ -191,3 +191,25 @@ def test_a_mistyped_render_is_could_not_check_not_a_finding(edit):
     edit(r)
     with pytest.raises(VerifyError):
         verify(text(tick(SOCKET)), r)
+
+
+def test_the_pinned_implementation_is_required_only_when_asked():
+    """Without the pin the series are all that is checked (the script being replaced passes); with it,
+    only a file carrying runner_impl_info at the pin does."""
+    t = text(tick(SOCKET))
+    assert verify(t, SOCKET) == ([], [])
+    assert [f.split(":")[0] for f in verify(t, SOCKET, "abcdef012345")[0]] == [
+        f'{MP}runner_impl_info{{scripts_sha256="abcdef012345"}}']
+    pinned = t + 'ci_runner_impl_info{supervisor="ci",scripts_sha256="abcdef012345"} 1\n'
+    assert verify(pinned, SOCKET, "abcdef012345") == ([], [])
+    assert verify(pinned.replace("abcdef012345", "unknown"), SOCKET, "abcdef012345")[0]
+    with pytest.raises(VerifyError):
+        verify(t, SOCKET, "ABC")
+
+
+def test_the_cli_takes_the_pin(tmp_path):
+    prom, render = tmp_path / "x.prom", tmp_path / "r.json"
+    render.write_text(json.dumps(SOCKET), encoding="utf-8")
+    prom.write_text(text(tick(SOCKET)), encoding="utf-8")
+    assert main(["--verify-prom", str(prom), "--render", str(render), "--scripts-sha256", "abcdef012345"]) == 1
+    assert main(["--verify-prom", str(prom), "--render", str(render), "--scripts-sha256", "nope"]) == 2

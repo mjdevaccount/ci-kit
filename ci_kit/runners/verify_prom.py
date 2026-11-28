@@ -7,8 +7,11 @@ what was shipped, never from a list of pools kept here.
 
 What it does NOT prove: WHICH script wrote the file, or WHEN. Any supervisor publishing these series
 for this render passes (the one being replaced does), and so does a file a crashed tick left behind.
-Identity and freshness are the installer's: a tick that BEGAN after the move, ended 0, and wrote a
-file newer than its own begin. Run this after those, never instead of them.
+Freshness is the installer's: a tick that BEGAN after the move, ended 0, and wrote a file newer
+than its own begin. Run this after that, never instead of it. IDENTITY can be required: with
+``scripts_sha256`` (``--scripts-sha256``, the kit's pin) the file must carry
+``runner_impl_info{scripts_sha256="<pin>"} 1``, which only ``sh/supervisor.sh`` publishes, hashed
+from the directory it runs from.
 
 Requirements:
 
@@ -114,8 +117,9 @@ def _shown(name: str, labels: dict[str, str]) -> str:
     return name + ("{" + ",".join(f'{k}="{x}"' for k, x in sorted(labels.items())) + "}" if labels else "")
 
 
-def verify(text: str, render: dict) -> tuple[list[str], list[str]]:
-    """(findings, notes) for one .prom file's text against the render its supervisor reads."""
+def verify(text: str, render: dict, scripts_sha256: str | None = None) -> tuple[list[str], list[str]]:
+    """(findings, notes) for one .prom file's text against the render its supervisor reads (and, given
+    `scripts_sha256`, the implementation the kit pins)."""
     try:
         inst, iso, sup = render["instance"], render["isolation"], render["supervisor"]
         mp, sha, total = sup["metric_prefix"], render["source_sha256"], render["max_total"]
@@ -127,6 +131,8 @@ def verify(text: str, render: dict) -> tuple[list[str], list[str]]:
     if not typed:
         raise VerifyError("the render's instance / isolation / metric_prefix / source_sha256 / max_total /"
                           " pools[].repo / pools[].min are not the types a render carries")
+    if scripts_sha256 is not None and not re.fullmatch(r"[0-9a-f]{12}", scripts_sha256):
+        raise VerifyError(f"scripts_sha256 {scripts_sha256!r} is not 12 lowercase hex characters")
     if iso not in ("socket", "secure"):
         raise VerifyError(f"isolation {iso!r}: sh/supervisor.sh runs socket and secure instances only")
     bad = parse(text)[1]
@@ -150,6 +156,8 @@ def verify(text: str, render: dict) -> tuple[list[str], list[str]]:
     want("runner_collect_ok", 1)
     want("runner_config_info", 1, source_sha256=sha)
     want("runner_max_total", total)
+    if scripts_sha256 is not None:
+        want("runner_impl_info", 1, scripts_sha256=scripts_sha256)
     for name in REQUIRED:
         want(name)
     for repo, floor in pools:
@@ -177,7 +185,8 @@ def verify(text: str, render: dict) -> tuple[list[str], list[str]]:
     return findings, notes
 
 
-def verify_files(prom: pathlib.Path, render: pathlib.Path) -> tuple[list[str], list[str]]:
+def verify_files(prom: pathlib.Path, render: pathlib.Path,
+                 scripts_sha256: str | None = None) -> tuple[list[str], list[str]]:
     """`verify` over two files; VerifyError when either cannot be read."""
     try:
         text = prom.read_text(encoding="utf-8")
@@ -186,4 +195,4 @@ def verify_files(prom: pathlib.Path, render: pathlib.Path) -> tuple[list[str], l
         raise VerifyError(f"{type(e).__name__}: {e}") from e
     if not isinstance(doc, dict):
         raise VerifyError(f"{render}: not a JSON object")
-    return verify(text, doc)
+    return verify(text, doc, scripts_sha256)

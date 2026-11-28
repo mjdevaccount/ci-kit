@@ -248,3 +248,41 @@ def test_a_malformed_scripts_dir_is_refused(edit, why):
     with pytest.raises(KitError, match=why):
         kit_from_dict({**d, **edit})
     kit_from_dict({**d, "scripts_dir": "gen/sh", "alloc_jq": "gen/alloc.jq"})  # the other direction
+
+
+def _impl_snippet() -> str:
+    """supervisor.sh's IMPL_SHA lines, as they ship."""
+    body = scripts()["supervisor.sh"].decode("utf-8")
+    m = re.search(r'^IMPL_SHA="\$\(.*?\n\[\[ "\$\{IMPL_SHA\}" =~ .*?$', body, re.M | re.S)
+    assert m, "the IMPL_SHA block moved -- re-aim this test"
+    return m.group(0)
+
+
+def test_the_supervisor_publishes_what_scripts_sha256_computes(tmp_path):
+    """The impl_info the supervisor emits is the kit's scripts_sha256 of the directory it runs from:
+    the same value both ways, and a changed byte (or a stray file) in that directory moves it."""
+    bash = shutil.which("bash")
+    if bash is None:
+        if os.environ.get("CI"):
+            pytest.fail("bash must be on PATH: a supervisor cannot run without it")
+        pytest.skip("bash not on PATH (workstation)")
+    write_scripts(tmp_path)
+    # the snippet hashes the directory the script runs from: aim it at the copies (the probe lives elsewhere)
+    here = '"$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"'
+    snippet = _impl_snippet()
+    assert snippet.count(here) == 1, "the IMPL_SHA block no longer hashes its own directory"
+    run = snippet.replace(here, f'"{tmp_path.as_posix()}"') + '\necho "$IMPL_SHA"\n'
+    probe_dir = tmp_path.parent / (tmp_path.name + "-probe")
+    probe_dir.mkdir()
+    probe = probe_dir / "probe.sh"
+    probe.write_text(run, encoding="utf-8", newline="\n")
+
+    def impl() -> str:
+        return subprocess.run([bash, probe.as_posix()], capture_output=True, text=True, check=True).stdout.strip()
+
+    assert impl() == scripts_sha256()
+    (tmp_path / "runs.sh").write_bytes(scripts()["runs.sh"] + b"#\n")
+    assert impl() not in (scripts_sha256(), "unknown")
+    (tmp_path / "runs.sh").write_bytes(scripts()["runs.sh"])
+    (tmp_path / "zz.sh").write_text("#\n", encoding="utf-8")
+    assert impl() != scripts_sha256()
