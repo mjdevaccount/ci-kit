@@ -108,11 +108,11 @@ on:
         type: string
         default: ""
       app-client-id:
-        description: the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- README "Generic names"
+        description: the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- docs/pr-ops/push-token.md
         type: string
         default: ""
       secure-runner:
-        description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- README "Generic names"
+        description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md
         type: string
         default: ""
     secrets:
@@ -120,10 +120,10 @@ on:
         description: the push token (fine-grained PAT, contents RW on the caller repo); empty while the PAT acts is red, only when a relock is needed
         required: false
       app-private-key:
-        description: the App's private key, with the app-client-id input -- README "Generic names"
+        description: the App's private key, with the app-client-id input -- docs/pr-ops/push-token.md
         required: false
       EDGE_BOT_PRIVATE_KEY:
-        description: DEPRECATED alias of app-private-key -- README "Generic names"
+        description: DEPRECATED alias of app-private-key (removed in v2)
         required: false
       git-ssh-key:
         description: >-

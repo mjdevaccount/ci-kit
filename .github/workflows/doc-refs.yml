@@ -18,7 +18,7 @@ on:
       runner:
         description: >-
           runs-on as a JSON label list, e.g. '["self-hosted","home"]' ('' = the caller repo's
-          CI_RUNNER_LIGHT, else CI_RUNNER, else ubuntu-latest; README § runs-on). Holds no
+          CI_RUNNER_LIGHT, else CI_RUNNER, else ubuntu-latest; docs/reusable-workflows.md "runs-on"). Holds no
           secret, so it may join a shared pool.
         type: string
         default: ""

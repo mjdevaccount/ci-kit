@@ -145,15 +145,15 @@ on:
         type: string
         default: ""
       app-client-id:
-        description: the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- README "Generic names"
+        description: the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- docs/pr-ops/push-token.md
         type: string
         default: ""
       secure-runner:
-        description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- README "Generic names"
+        description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md
         type: string
         default: ""
       sealed-runner:
-        description: the sealed pool's runs-on, a JSON label list ('' = the CI_SEALED_RUNNER switch, else hosted) -- README "Generic names"
+        description: the sealed pool's runs-on, a JSON label list ('' = the CI_SEALED_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md
         type: string
         default: ""
     secrets:
@@ -161,10 +161,10 @@ on:
         description: the push token (fine-grained PAT, contents + pull requests RW on the repo); comments too. Not required since v1.37.0 (empty while the PAT acts is still red)
         required: false
       app-private-key:
-        description: the App's private key, with the app-client-id input -- README "Generic names"
+        description: the App's private key, with the app-client-id input -- docs/pr-ops/push-token.md
         required: false
       EDGE_BOT_PRIVATE_KEY:
-        description: DEPRECATED alias of app-private-key -- README "Generic names"
+        description: DEPRECATED alias of app-private-key (removed in v2)
         required: false
       ntfy-url:
         description: tier 4's page topic ('' = not pushed, named in the record)
