@@ -410,7 +410,7 @@ def test_validate_holds_the_schedules_flags_to_the_manifest_must_fire(key: tuple
 def test_validate_in_actions_is_an_error_annotation(key: tuple[str, object], monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     rc, out = st.run(_m(permisions={}), _world(key), None, "--validate")
-    assert rc == 1 and "::error title=ci-app-audit::apps[0] example-bot: unknown key(s) permisions" in out
+    assert rc == 1 and "::error title=ci-app-audit::INVALID apps[0] example-bot: unknown key(s) permisions" in out
 
 
 # ── --app-level-token-from: a PRIVATE App read with the keyed App's scoped, revoked token ────────

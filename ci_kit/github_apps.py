@@ -581,7 +581,7 @@ def main(argv: list[str] | None = None, call: Transport = urllib_transport) -> i
     except Invalid as e:
         if not a.validate:
             return _blind(str(e))
-        print(f"::error title={PROG}::{e}" if in_actions else f"INVALID {e}")
+        print(f"::error title={PROG}::INVALID {e}" if in_actions else f"INVALID {e}")
         _summary([f"**{PROG}: the manifest is invalid** -- {e}"])
         return 1
     except Blind as e:
