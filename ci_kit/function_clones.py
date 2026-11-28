@@ -128,17 +128,12 @@ def selftest() -> list[str]:
 def main(argv: Sequence[str] | None = None) -> int:
     ap = site_lint.gate_parser("ci-function-clones", __doc__, baseline="ci/function_clones_baseline.txt")
     ap.add_argument("--min-nodes", type=int, default=40)
-    a = ap.parse_args(sys.argv[1:] if argv is None else argv)
-    if a.selftest:
-        return site_lint.selftest_exit(GATE, selftest)
-    root = site_lint.gate_root(a.root)
-    floors = site_lint.dir_floors(a.dir, gate=GATE)
+    a, root, floors = site_lint.parse_gate(ap, argv, gate=GATE, selftest=selftest)
     baseline = site_lint.under(root, a.baseline)
     seen = types.SimpleNamespace(files=0, groups=[])
 
     def scan() -> dict[str, int]:
-        files = discover.tracked(floors, root=root)
-        discover.require_scanned_each(discover.count_by_dir(files, floors), floors, gate=GATE)
+        files = discover.tracked_floored(floors, gate=GATE, root=root)
         by_file = {rel: functions(astread.parse_file(root / rel, gate=GATE, origin=rel), a.min_nodes)
                    for rel in files}
         seen.files, seen.groups = len(files), groups(by_file)

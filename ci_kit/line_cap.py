@@ -117,11 +117,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap = site_lint.gate_parser("ci-line-cap", __doc__, baseline="ci/line_cap_baseline.txt")
     ap.add_argument("--cap", type=int, default=400)
     ap.add_argument("--unruled", action="append", default=[], metavar="DIR:WHY")
-    a = ap.parse_args(sys.argv[1:] if argv is None else argv)
-    if a.selftest:
-        return site_lint.selftest_exit(GATE, selftest)
-    root = site_lint.gate_root(a.root)
-    floors = site_lint.dir_floors(a.dir, gate=GATE)
+    a, root, floors = site_lint.parse_gate(ap, argv, gate=GATE, selftest=selftest)
     unruled = _unruled(a.unruled)
     baseline = site_lint.under(root, a.baseline)
     seen: dict[str, int] = {}
