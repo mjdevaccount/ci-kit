@@ -169,7 +169,7 @@ jobs:
         with:
           tool: ci-app-audit
           args: --selftest
-      - name: pr-token-check on a record (through the action)
+      - name: write a sample pr-token record
         shell: bash
         run: |
           set -euo pipefail
