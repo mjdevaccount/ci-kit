@@ -12,6 +12,8 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
+import time
 
 import pytest
 
@@ -53,7 +55,7 @@ def test_a_banner_timeout_is_retried_and_the_retry_gets_stdin_whole(tmp_path: pa
     assert r.stdout == "fetched\n"
     assert (tmp_path / "stdin.2").read_text() == "want abc\n"
     assert "banner exchange" in r.stderr  # ssh's own words still reach the log
-    assert "ssh-retry: attempt 1/3 never connected (Connection timed out); retrying in 0s" in r.stderr
+    assert "ssh-retry: attempt 1/3 never connected (Connection timed out during banner exchange); retrying in 0s" in r.stderr
     assert (tmp_path / "argv.1").read_text() == (tmp_path / "argv.2").read_text()
 
 
@@ -62,11 +64,38 @@ def test_a_banner_timeout_is_retried_and_the_retry_gets_stdin_whole(tmp_path: pa
     "git@github.com: Permission denied (publickey).",
     "@@@@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\nHost key verification failed.",
     "Connection to github.com closed by remote host.",
+    # mid-session, the same strerror words as a connect failure, NOT anchored as one
+    "Read from remote host github.com: Connection timed out",
+    # a harmless earlier warning must not make a later real failure retryable
+    "Control socket connect(/tmp/cm): Connection refused\nHost key verification failed.",
 ])
 def test_a_failure_after_the_connection_is_never_retried(tmp_path: pathlib.Path, msg: str) -> None:
     r, calls = _run(tmp_path, [(255, msg), (0, "")])
     assert (r.returncode, calls) == (255, 1), r.stderr
     assert "ssh-retry" not in r.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize("msg", [
+    "ssh: connect to host github.com port 22: Connection refused",
+    "ssh: connect to host github.com port 22: Connection timed out",
+    "ssh: Could not resolve hostname github.com: Temporary failure in name resolution",
+    "kex_exchange_identification: read: Connection reset by peer",
+])
+def test_every_connect_phase_failure_is_retried(tmp_path: pathlib.Path, msg: str) -> None:
+    r, calls = _run(tmp_path, [(255, msg), (0, "")])
+    assert (r.returncode, calls) == (0, 2), r.stderr
+    assert f"never connected ({msg})" in r.stderr
+
+
+@needs_bash
+def test_a_retry_lands_on_the_step_summary(tmp_path: pathlib.Path) -> None:
+    # uv drops git's stderr when the fetch then succeeds: the summary is what still says it happened
+    summary = tmp_path / "summary.md"
+    r, calls = _run(tmp_path, [(255, BANNER), (0, "")], GITHUB_STEP_SUMMARY=summary.as_posix())
+    assert (r.returncode, calls) == (0, 2), r.stderr
+    assert summary.read_text().startswith("- ssh-retry: attempt 1/3 never connected (Connection timed out during banner exchange)")
+    assert "ssh-retry" not in r.stdout  # stdout is git's protocol stream
 
 
 @needs_bash
@@ -80,11 +109,38 @@ def test_the_remote_commands_own_exit_is_returned_as_is(tmp_path: pathlib.Path) 
 def test_attempts_are_bounded(tmp_path: pathlib.Path) -> None:
     r, calls = _run(tmp_path, [(255, BANNER)] * 5, CI_KIT_SSH_TRIES="2")
     assert (r.returncode, calls) == (255, 2), r.stderr
-    assert r.stderr.count("ssh-retry:") == 1
+    assert r.stderr.count("ssh-retry:") == 2  # one retry, then the give-up
+    assert "ssh-retry: gave up after 2/2 attempts" in r.stderr
 
 
 @needs_bash
-@pytest.mark.parametrize("env", [{"CI_KIT_SSH_TRIES": v} for v in ("0", "x", "100")] + [{"CI_KIT_SSH_PAUSE": "-1"}])
+@pytest.mark.parametrize("env", [{"CI_KIT_SSH_TRIES": v} for v in ("0", "x", "100")] + [{"CI_KIT_SSH_PAUSE": v} for v in ("-1", "08")])
 def test_a_bad_knob_is_exit_2_before_any_ssh(tmp_path: pathlib.Path, env: dict[str, str]) -> None:
     r, calls = _run(tmp_path, [(0, "")], **env)
     assert (r.returncode, calls) == (2, 0), r.stderr
+
+
+@needs_bash
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_a_signal_reaches_ssh_and_its_stderr_is_not_lost(tmp_path: pathlib.Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "ssh"
+    fake.write_text('#!/usr/bin/env bash\necho $$ > "$FAKE_DIR/pid"\necho "debug1: connecting" >&2\nexec sleep 30\n')
+    fake.chmod(0o755)
+    e = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}", "FAKE_DIR": str(tmp_path)}
+    p = subprocess.Popen([BASH, str(SCRIPT), "git@github.com"], env=e, stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for _ in range(50):
+        if (tmp_path / "pid").exists():
+            break
+        time.sleep(0.1)
+    time.sleep(0.3)
+    p.terminate()
+    _, err = p.communicate(timeout=10)
+    assert p.returncode == 143
+    assert "debug1: connecting" in err
+    pid = int((tmp_path / "pid").read_text())
+    time.sleep(0.2)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)  # ssh did not outlive its wrapper

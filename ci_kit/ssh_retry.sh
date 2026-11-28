@@ -8,34 +8,55 @@
 # the same runner host found 135 of 135 banners. One flaky connection should not blind a review.
 #
 # SAFE TO RE-RUN. A connect-phase failure ends before ssh opens a session channel, so it has not
-# read a byte of git's stdin and sent nothing upstream. Re-running is then the same as git calling
-# ssh again. Anything else (auth refused, a host key mismatch, a session that dropped mid-transfer,
-# the remote command's own exit) is returned as-is on the first try: those are not ours to retry.
-# The matched texts are OpenSSH's own pre-session errors. They are checked only when ssh exits 255,
-# its "the connection failed" code.
+# read a byte of git's stdin and sent nothing upstream (measured with OpenSSH 10.3: a listener that
+# never sends a banner, an unresolvable host and a dead port each exit 255 with stdin unread).
+# Re-running is then the same as git calling ssh again. Matched are only OpenSSH's own
+# pre-session lines, anchored (a mid-session "Read from remote host ...: Connection timed out" or
+# an earlier "Control socket connect(...): Connection refused" warning does not match), and only
+# when ssh exits 255, its "the connection failed" code. Auth refused, a host key mismatch, a
+# session that dropped mid-transfer and the remote command's own exit are returned on the first
+# try: those are not ours to retry.
 #
-# CI_KIT_SSH_TRIES (default 3) bounds the attempts; the pause before retry n is n x CI_KIT_SSH_PAUSE
-# seconds (default 2: 2 s, then 4 s). Each retry prints one `ssh-retry:` line on stderr, so a run
-# that needed one says so in its log.
+# SEEN FROM OUTSIDE. uv swallows git's stderr when the fetch finally succeeds, so a retry that
+# worked would otherwise leave no trace (review, 2026-11-28). Each retry and each give-up is
+# written to stderr AND appended to $GITHUB_STEP_SUMMARY when the runner sets it, so a run that
+# needed one says so on its summary page. Never stdout: that is git's protocol stream.
+#
+# BOUNDS. CI_KIT_SSH_TRIES (default 3) attempts; the pause before retry n is n x CI_KIT_SSH_PAUSE
+# seconds (default 2: 2 s, then 4 s). With git_ssh.sh's ConnectTimeout=20, a host that is really
+# down now costs a connection up to 66 s instead of 20 s.
 set -u
 tries="${CI_KIT_SSH_TRIES:-3}"
 pause="${CI_KIT_SSH_PAUSE:-2}"
 [[ "${tries}" =~ ^[1-9][0-9]?$ ]] || { echo "ssh-retry: CI_KIT_SSH_TRIES='${tries}' is not 1-99" >&2; exit 2; }
-[[ "${pause}" =~ ^[0-9]{1,2}$ ]] || { echo "ssh-retry: CI_KIT_SSH_PAUSE='${pause}' is not 0-99" >&2; exit 2; }
-# OpenSSH's connect-phase failures (ssh.c / sshconnect.c), never a session's: a dead peer mid-transfer
-# is "Timeout, server not responding", a closed one "Connection to X closed by remote host".
-NEVER_CONNECTED='banner exchange|kex_exchange_identification|Connection timed out|Connection refused|Network is unreachable|No route to host|Could not resolve hostname|Temporary failure in name resolution'
+[[ "${pause}" =~ ^(0|[1-9][0-9]?)$ ]] || { echo "ssh-retry: CI_KIT_SSH_PAUSE='${pause}' is not 0-99" >&2; exit 2; }
+# OpenSSH's connect-phase lines (sshconnect.c, ssh.c), anchored to the start of a line
+NEVER_CONNECTED='^(ssh: connect to host .* port [0-9]+: .*|ssh: Could not resolve hostname .*|Connection timed out during banner exchange|kex_exchange_identification: .*)$'
 err="$(mktemp)" || { echo "ssh-retry: mktemp failed" >&2; exit 2; }
 trap 'rm -f "${err}"' EXIT
+note() {
+  echo "$1" >&2
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then printf -- '- %s\n' "$1" >> "${GITHUB_STEP_SUMMARY}" 2>/dev/null || true; fi
+}
 n=1
 while :; do
-  ssh "$@" 2>"${err}"
+  # ssh in the background with stdin passed EXPLICITLY (a bare `&` would give it /dev/null), so a
+  # signal to this wrapper reaches ssh and ssh's stderr is still printed, never lost with the file
+  ssh "$@" <&0 2>"${err}" &
+  pid=$!
+  trap 'kill -TERM "${pid}" 2>/dev/null; wait "${pid}"; cat "${err}" >&2; exit 143' TERM INT HUP
+  wait "${pid}"
   rc=$?
+  trap - TERM INT HUP
   cat "${err}" >&2
-  [ "${rc}" = 255 ] && [ "${n}" -lt "${tries}" ] || exit "${rc}"
-  grep -qE "${NEVER_CONNECTED}" "${err}" \
-    || exit "${rc}"
-  echo "ssh-retry: attempt ${n}/${tries} never connected ($(grep -oE "${NEVER_CONNECTED}" "${err}" | head -n1)); retrying in $((pause * n))s" >&2
+  [ "${rc}" = 255 ] || exit "${rc}"
+  why="$(grep -E "${NEVER_CONNECTED}" "${err}" | head -n1)"
+  [ -n "${why}" ] || exit "${rc}"
+  if [ "${n}" -ge "${tries}" ]; then
+    note "ssh-retry: gave up after ${n}/${tries} attempts, none connected (${why})"
+    exit "${rc}"
+  fi
+  note "ssh-retry: attempt ${n}/${tries} never connected (${why}); retrying in $((pause * n))s"
   sleep $((pause * n))
   n=$((n + 1))
 done
