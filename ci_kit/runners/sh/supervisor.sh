@@ -157,7 +157,7 @@ emit() { metrics+=("$1"); }
 # installation token (its own rate bucket), else the PAT at ${CONF}/github.token, loudly. Not
 # sourceable (an install that lost it) = the PAT exactly as before, and the auth gauges say pat.
 TOKEN=""
-# shellcheck source=github-auth.sh
+# shellcheck source=SCRIPTDIR/github-auth.sh
 if . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/github-auth.sh"; then
   gh_auth || :
   gh_auth_emit
@@ -300,7 +300,7 @@ gh_get() { # path -> body on stdout; nonzero = could not read
 # DEMAND (which runs are open, which of their jobs a pool can serve): runs.sh, the ONE reader
 # this script and the sealed supervisor share -- memo_get, runs_read, recent_merge, open_runs,
 # job_demand. Installed beside this script by the installer.
-# shellcheck source=runs.sh
+# shellcheck source=SCRIPTDIR/runs.sh
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/runs.sh" \
   || { echo "ci-runner-supervisor: cannot source runs.sh beside $(readlink -f "${BASH_SOURCE[0]}")" >&2; ok=0; publish; exit 2; }
 
