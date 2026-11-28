@@ -18,8 +18,8 @@ from ci_kit.runners.schema import validate
 
 DEMO_KIT = Kit(blocks=(
     Block("runners", "shared", "ci-", "socket", "ci", "CI_RUNNER", "runners.json", required=True),
-    Block("secure_runners", "secure", "sec-", "secure", "ci-secure", "CI_SECURE_RUNNER", "runners-secure.json"),
-    Block("sealed_runners", "sealed", "seal-", "sealed", "ci-sealed", "CI_SEALED_RUNNER", "runners-sealed.json",
+    Block("secure_runners", "secure", "tok-", "secure", "ci-secure", "CI_SECURE_RUNNER", "runners-secure.json"),
+    Block("sealed_runners", "sealed", "boot-", "sealed", "ci-sealed", "CI_SEALED_RUNNER", "runners-sealed.json",
           one_job_per_boot=True),
 ))
 
@@ -178,13 +178,13 @@ ACCEPTS: dict[str, Callable[[], list[str]]] = {
         good_secure,
         lambda c: (_out(c)["instance"], _out(c)["prefix"], _out(c)["isolation"]) == ("shared", "ci-", "socket")
         and (_out(c, "secure_runners")["instance"], _out(c, "secure_runners")["prefix"],
-             _out(c, "secure_runners")["isolation"]) == ("secure", "sec-", "secure")
+             _out(c, "secure_runners")["isolation"]) == ("secure", "tok-", "secure")
         and _out(c, "secure_runners")["runner_vm"] == {"name": "later", "vmid": 920}
         and _out(c, "secure_runners")["max_total"] == 2, "secure render"),
     "sealed block: one job, its own vm and label": _a(
         good_sealed,
         lambda c: (_out(c, "sealed_runners")["instance"], _out(c, "sealed_runners")["prefix"],
-                   _out(c, "sealed_runners")["isolation"], _out(c, "sealed_runners")["max_total"]) == ("sealed", "seal-", "sealed", 1)
+                   _out(c, "sealed_runners")["isolation"], _out(c, "sealed_runners")["max_total"]) == ("sealed", "boot-", "sealed", 1)
         and _out(c, "sealed_runners")["runner_vm"] == {"name": "sealed", "vmid": 912}
         and _out(c, "sealed_runners")["pools"][0]["labels"] == ["self-hosted", "ci-sealed"], "sealed render"),
 }

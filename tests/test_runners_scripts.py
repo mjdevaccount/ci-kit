@@ -41,12 +41,19 @@ ESTATE = re.compile("".join(_ESTATE))
 #     workflow still ships the label (test_the_shipped_label_exemption_is_still_needed).
 TESTS = pathlib.Path(__file__).resolve().parent
 SHIPPED_LABELS = ("home-secure", "home-sealed")
+# the reusable workflows' DEPRECATED App inputs, still read as fallbacks (docs/pr-ops/push-token.md):
+# test_generic_names_must_fire pins that they still work, so it must spell them
+SHIPPED_ALIASES = ("vars.EDGE_BOT_APP_ID", "secrets.EDGE_BOT_PRIVATE_KEY", "EDGE_BOT_APP_ID", "EDGE_BOT_PRIVATE_KEY")
+# RUNNER-ADJACENT tests: no "runners" in the name, but they build pools, labels and runner switches
+# a reader copies as readily as a kit, so the same scan reads them
+ADJACENT = ("test_generic_names_must_fire.py", "test_pr_head_fail_fast.py")
 CATCH = ['emit "edge_ci_github_auth 1"', "GH_AUTH_RUN=/run/edge-ci", 'OWNER="${EDGE_CI_OWNER:-x}"',
          "GH_AUTH_OWNER=mjdevaccount", "LIB=/usr/local/lib/edge", "# three trade-data pools", "see home-host docs",
          "INSTANCE=home", "--label home.repo=x"]
 # keyed by path under tests/ (a same-named file elsewhere gets nothing), and each token removed only
 # where it stands alone: a shipped label with a suffix glued on (-ops, .x) is still a hit
-EXEMPT = {"_runners.py": SHIPPED_LABELS, pathlib.Path(__file__).name: (*_ESTATE, *CATCH, *SHIPPED_LABELS)}
+EXEMPT = {"_runners.py": SHIPPED_LABELS, "test_generic_names_must_fire.py": (*SHIPPED_ALIASES, *SHIPPED_LABELS),
+          pathlib.Path(__file__).name: (*_ESTATE, *CATCH, *SHIPPED_LABELS, *SHIPPED_ALIASES)}
 
 
 def _unexempt(rel: str, line: str) -> str:
@@ -57,9 +64,11 @@ def _unexempt(rel: str, line: str) -> str:
 
 
 def runner_tests(root: pathlib.Path = TESTS) -> list[pathlib.Path]:
-    """Every runners test module and fixture file under `root` (*runners* by name, and fixtures/runners/)."""
+    """Every runners test module and fixture file under `root` (*runners* by name, fixtures/runners/, and
+    the ADJACENT modules at its top)."""
     return [p for p in sorted(root.rglob("*")) if p.is_file() and "__pycache__" not in p.parts
-            and ("runners" in p.name or (root / "fixtures" / "runners") in p.parents)]
+            and ("runners" in p.name or (root / "fixtures" / "runners") in p.parents
+                 or (p.parent == root and p.name in ADJACENT))]
 
 
 def estate_hits(root: pathlib.Path = TESTS) -> list[str]:
@@ -124,15 +133,32 @@ def test_the_runner_tests_name_no_consumer():
     # the scope is real: the golden fixture, the kit tests and the selection constants are all in it
     names = {p.name for p in runner_tests()}
     assert {"_runners.py", "test_runners_must_fire.py", "test_review_gate_runners_must_fire.py", "kit.yml",
-            "runners.yml", "ci-runners.json"} <= names, sorted(names)
+            "runners.yml", "ci-runners.json", *ADJACENT} <= names, sorted(names)
     assert estate_hits() == []
 
 
 def test_the_shipped_label_exemption_is_still_needed():
     wf = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows"
-    text = "".join(p.read_text(encoding="utf-8") for p in sorted(wf.glob("*.yml")))
+    # code only: a usage example in a comment is not a workflow still shipping or reading the name
+    text = "".join(line for p in sorted(wf.glob("*.yml")) for line in p.read_text(encoding="utf-8").splitlines(True)
+                   if not line.lstrip().startswith("#"))
     for label in SHIPPED_LABELS:
         assert f'"{label}"' in text, f"no workflow ships {label} any more: drop it from SHIPPED_LABELS"
+    for alias in SHIPPED_ALIASES[:2]:
+        assert "${{ " + alias + " }}" in text, f"no workflow reads {alias} any more: drop it from SHIPPED_ALIASES"
+
+
+def test_an_adjacent_test_is_read_and_its_exemption_is_its_own(tmp_path):
+    """MUST-FIRE: an estate name planted in an ADJACENT module is a hit; the deprecated App inputs are
+    exempt in test_generic_names_must_fire.py only, and only standing alone."""
+    alias = f"X = '{SHIPPED_ALIASES[2]}'\n"
+    (tmp_path / ADJACENT[1]).write_text(CATCH[7] + "\n", encoding="utf-8")
+    (tmp_path / ADJACENT[0]).write_text(alias + f"Y = '{SHIPPED_ALIASES[2]}_V2'\n", encoding="utf-8")
+    (tmp_path / "deep").mkdir()
+    (tmp_path / "deep" / ADJACENT[0]).write_text(alias, encoding="utf-8")
+    (tmp_path / "test_other.py").write_text(alias, encoding="utf-8")
+    assert {p.relative_to(tmp_path).as_posix() for p in runner_tests(tmp_path)} == set(ADJACENT)
+    assert [h.split(": ", 1)[0] for h in estate_hits(tmp_path)] == [f"{ADJACENT[0]}:2", f"{ADJACENT[1]}:1"]
 
 
 def test_the_runner_test_scan_catches_a_planted_name(tmp_path):
