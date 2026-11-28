@@ -53,6 +53,7 @@ nothing has verified nothing.
 | `ci_kit/release_bin.py` | library: a third-party CLI pinned by **version + sha256 per platform**, fetched once into `$CI_KIT_CACHE_DIR` (`<name>-<version>-<asset>/`), `$CI_KIT_<NAME>` overrides; a 5xx or network error is retried 3x with backoff (a 4xx is not), the binary is written atomically (a shared cache is safe under concurrent jobs), and any failure to obtain it is still exit 2. jscpd and oasdiff state only a `Pin`. Each version line carries `# renovate: datasource=github-releases depName=...` (`renovate/default.json5` reads it): Renovate moves the VERSION, so its PR fails the selftest on the sha256 until the hashes move in the same PR -- a new binary never runs on an unreviewed digest |
 | `ci_kit/git_ssh.sh` | a PRIVATE GitHub git dependency in a runner install (the review gate, v1.24.0), three phases = three steps: `load` (the ONLY step holding `CI_KIT_GIT_SSH_KEY`; no PR code runs there) starts an `ssh-agent`, adds the key from stdin, writes GitHub's published host keys to a file of its own; `. git_ssh.sh route` in the install step (no key in its env: a build backend could read it from the parent shell's `/proc/<pid>/environ` even after `unset`) rewrites only `CI_KIT_GIT_SSH_REPOS` (`owner/name`) https -> ssh through env-scoped `GIT_CONFIG_COUNT` with `StrictHostKeyChecking=yes`; `kill` (`always()`; a zombie counts as dead) stops the agent before the step that runs the PR's tests. The agent starts without the key in its environment, but the key is in its MEMORY while Install runs: code with root (a hosted runner's passwordless sudo) can dump it, so the key must be read-only and scoped to one repo. webfactory/ssh-agent was not used: its agent lives to the job's end. **Several private repos, one deploy key each (v1.28.0)**: a deploy key reads ONE repo and GitHub takes the first key an agent offers, so `CI_KIT_GIT_SSH_KEY` may hold N concatenated keys for the N repos of `CI_KIT_GIT_SSH_REPOS`, paired by position (a `|` block of N secrets); each key gets its own agent and a host alias `ci-kit.<owner>.<name>` (HostName github.com, HostKeyAlias github.com, IdentityAgent = its agent) in a config load writes (`ssh-config=`, which `route` reads from `CI_KIT_GIT_SSH_CONFIG`), plus `agents=` (JSON repo -> socket, for a BuildKit `ssh:` id per repo); `pid=` lists every agent and `kill` stops them all. One key with several repos is the old shape unchanged; any other count, the same key twice, or a route for a repo load never named = red Repos named with an EMPTY key (a fork/Dependabot PR, an unmapped secret), a key with no repo, a malformed repo or a key `ssh-add` refuses = `::error::` and exit 1 before the install (`tests/test_git_ssh_must_fire.py`) The routed `GIT_SSH_COMMAND` ends a stalled connection (v1.47.0: `ConnectTimeout=20`, `ServerAliveInterval=15` x 3). Since v1.50.1 it runs through `ci_kit/ssh_retry.sh`, which re-runs ONLY a connection that never came up: an ssh exit 255 whose stderr holds one of OpenSSH's connect-phase lines, anchored (`ssh: connect to host ... port N: ...`, `ssh: Could not resolve hostname`, `Connection timed out during banner exchange`, `kex_exchange_identification:`), before any of git's stdin was read. Each retry and give-up is also appended to `$GITHUB_STEP_SUMMARY` (uv drops git's stderr when the fetch then succeeds), and a signal to the wrapper reaches ssh with its stderr still printed. `CI_KIT_SSH_TRIES` (default 3) bounds the attempts and the pause is n x `CI_KIT_SSH_PAUSE` s (default 2), so a host that is really down costs a connection up to 66 s, not 20. Auth, host-key and mid-session failures, and the remote command's own exit, are returned on the first try (`tests/test_ssh_retry_must_fire.py`). Added after trade-data#3260's review gate went BLIND on one banner timeout, 2026-11-28. |
 | `ci_kit/ratchet.py` | library: `RatchetSet` / `RatchetCount`, the shrink-only baseline every ratchet lint shares; `kept_header()` (v1.49.0) = a re-freeze keeps the caller's own baseline header |
+| `ci_kit/runners/` | `ci-runners` (v1.51.0, **the `runners` extra**: pyyaml): self-hosted GitHub runner CAPACITY as a library -- the capacity file's schema, the host / guest / runner-VM budget invariants (measured `peak_mb` against real RAM, floors, ceilings, the live room), one JSON render per runner block for a supervisor to read with jq, and the runtime admission rule (`alloc.jq`, shipped as package data, plus its Python twin `allocate()`, pinned equal by a parity test). The domain's specifics live in a KIT file: blocks, instances, prefixes, tier labels, variables, render paths, share duties. See [Self-hosted runner capacity](#self-hosted-runner-capacity-ci-runners) |
 | `ci_kit/discover.py` | library: `tracked()` = `git ls-files`, never a filesystem walk (a walk sees your untracked files, CI does not; a checkout under `.claude/worktrees/` once blinded three gates); `require_scanned()` = zero files is exit 2; `count_by_dir()` + `require_scanned_each()` (v1.9.0) = a floor PER ruled dir, so one tree going dark cannot hide under another's hundreds; two NAMED file lists (v1.14.0): `tracked_each()` = absolute paths, every dir contributes or exit 2 naming `gate[dir]` (the sql gates' `iter_files`), and `tracked_or_empty()` = absolute paths, [] when no scan dir exists so the gate exits 2 in its own words (a git failure is still 2) |
 | `ci_kit/site_lint.py` | library (v1.49.0: `gate_parser` / `gate_root` / `dir_floors` / `selftest_exit`, the flags a python-tree gate shares: `@FILE`, `--root`, `--dir DIR:FLOOR` per-dir floors, `--selftest`, `--baseline` + `--write-baseline`): the ratchet gate's scan / fixture selftest / CLI -- a per-file count (`RatchetCount`) or a set of keys (`RatchetSet`), with the gate's own words through optional hooks (`header`, `describe`, `ok`, `written`, and `hard` for findings no baseline grants) -- so a second ratchet lint is a predicate, not a copy. `check` is the same CLI for a **pass/fail** gate with no baseline (`--selftest`, the gate's own mode flags, findings -> 1, could not look -> 2, an optional scan floor; voice via `header`/`describe`/`advice`/`ok`, or `report` for output that fits no template). v1.14.0: `waived_lines(text, waiver)` = an inline waiver must carry a reason (>= 8 chars, else it is BARE and reported, not honoured); `repo_on_path(root, marker)` = put the checkout on `sys.path` only when it holds the marker file, so a must-fire fixture repo keeps the installed package |
 | `ci_kit/astread.py` | library: read + `ast.parse` a source file, or **exit 2** naming the file and the gate (`blind()`); BOM-tolerant (`utf-8-sig`), never `errors="replace"`. A parse failure answered with `continue` is byte-identical to "read and clean" |
@@ -364,6 +365,55 @@ pre-commit:
   rev: v1.0.0
   hooks: [{ id: doc-refs }, { id: secret-argv }, { id: dup-code }]
 ```
+
+## Self-hosted runner capacity (`ci-runners`)
+
+`ci_kit.runners` sizes self-hosted GitHub Actions runners that run as ephemeral containers inside
+runner VMs on one host (Proxmox or similar), shared by per-repo POOLS. The kit owns the
+mechanism; a domain supplies two files:
+
+- **the capacity file** (`runners.yml`): `host` (threads, RAM, `cpu_overcommit`, `reserves_mb`),
+  `guests` (vmid, cores, RAM; `state: running|stopped|on_demand`, `planned`, `budgeted: false`,
+  `shares: <reserve>`), and one block per runner tier (`vm`, `max_total`, overcommits,
+  `vm_reserve_mb`, `mem_book_ratio` + `live_floor_mb`, `backfill`, `redecide`, `defaults`, `pools`).
+  Each pool has `min_idle`, optional `max_runners` (absent = derived from admission), a MEASURED
+  `peak_mb`, optional `young_mb` / `starve_s`, and, for a second pool of one repo by job class,
+  `repo` + its own `labels` + its own `variable`.
+- **the kit** (`runners-kit.yml`): what the domain decides once. These are its extension points:
+
+| kit key | what it extends |
+|---|---|
+| `blocks.<key>` | a runner block the capacity file may hold: `instance`, `prefix` (unique, or two supervisors reap each other's runners), `isolation` (passed to the supervisor), `label` (the trust tier: a pool carries `label` or `label-<class>` and no other block's), `variable` (the `runs-on` kill switch), `output`, `required`, `one_job_per_boot` (max_total 1 on an `on_demand` VM) |
+| `share_duties.<reserve>` | a guest that `shares` a host reserve runs inside it, so the reserve's other owner must yield: `--check` requires `doc` to carry `text` |
+| `out_dir`, `generated`, `write_command` | where renders go (relative to `--root`), the banner they carry, the command a stale finding names |
+| `alloc_jq` | a path: `--write` copies ci-kit's `alloc.jq` there, `--check` flags a copy that drifted |
+| `source_hash` | `raw` (default) or `canonical`, below |
+| `Kit(rules=...)` (Python) | callables `(cfg, kit) -> [finding]` run after every built-in check passes |
+
+```bash
+ci-runners --check --config ci/runners.yml --kit ci/runners-kit.yml   # CI: schema + budgets + fresh renders
+ci-runners --write --config ci/runners.yml --kit ci/runners-kit.yml   # regenerate the renders
+ci-runners --write ... --out-dir "$RUNNER_TEMP/r"                     # render elsewhere, e.g. to diff against another renderer
+ci-runners --alloc < tick.json                                        # one admission verdict (alloc.jq's twin)
+ci-runners --selftest
+```
+
+Exit 0 clean, 1 findings or a stale / orphaned render, 2 could not look (unreadable or unparsable
+file, malformed kit, no pyyaml). **Admission** (`alloc.jq`, run by the supervisor with no Python):
+a start needs a free slot AND its pool's `peak_mb` free inside `mem_budget_mb`, capped each tick by
+the VM's live MemAvailable less `live_floor_mb`; a pool that does not fit is held, and after
+`starve_s` it reserves its room and the run drains for it, with bounded backfill.
+
+**`source_sha256` and the reinstall it causes.** A supervisor reinstalls whenever its render's
+`source_sha256` changes. In `raw` mode (the default, and what existing renders carry) the hash
+covers the capacity file's TEXT, so a comment-only edit reinstalls every supervisor. `canonical`
+hashes the parsed data instead, so comments and formatting reinstall nothing. It is opt-in and
+OFF by default because switching modes changes every render's hash once: turning it on is ONE
+deliberate reinstall of every supervisor, done when the operator chooses, not as a side effect of
+upgrading ci-kit.
+
+The golden test (`tests/test_runners_must_fire.py`) holds the render BYTE-IDENTICAL to the
+hand-rolled renderer this replaced, on a fixture rendered by that renderer.
 
 ## Nothing is assumed about your repo
 

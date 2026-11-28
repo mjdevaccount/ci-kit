@@ -158,7 +158,7 @@ wheels = [
 
 [[package]]
 name = "ci-kit"
-version = "1.50.1"
+version = "1.51.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -168,6 +168,9 @@ cog = [
 review = [
     { name = "mcp" },
     { name = "pydantic-ai-slim", extra = ["anthropic"] },
+]
+runners = [
+    { name = "pyyaml" },
 ]
 sql = [
     { name = "sqlglot" },
@@ -188,10 +191,11 @@ requires-dist = [
     { name = "cogapp", marker = "extra == 'cog'", specifier = ">=3.4" },
     { name = "mcp", marker = "extra == 'review'", specifier = ">=2.3,<3" },
     { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'review'", specifier = ">=2.57,<3" },
+    { name = "pyyaml", marker = "extra == 'runners'", specifier = ">=6.0.2" },
     { name = "pyyaml", marker = "extra == 'workflow'", specifier = ">=6.0.2" },
     { name = "sqlglot", marker = "extra == 'sql'", specifier = ">=30.13" },
 ]
-provides-extras = ["sql", "workflow", "cog", "review"]
+provides-extras = ["sql", "workflow", "cog", "runners", "review"]
 
 [package.metadata.requires-dev]
 dev = [

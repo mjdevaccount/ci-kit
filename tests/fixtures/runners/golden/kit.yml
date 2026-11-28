@@ -1,0 +1,31 @@
+# The kit the original renderer hard-coded: its blocks, instances, prefixes, labels and banner.
+generated: "by scripts/ci_runners.py from ci/runners.yml -- DO NOT EDIT; run --write"
+write_command: "ci-runners --write --config runners.yml --kit kit.yml"
+source_hash: raw
+out_dir: expected
+blocks:
+  runners:
+    required: true
+    instance: home
+    prefix: home-
+    isolation: socket
+    label: home
+    variable: CI_RUNNER
+    output: ci-runners.json
+  secure_runners:
+    instance: secure
+    prefix: sec-
+    isolation: secure
+    label: home-secure
+    variable: CI_SECURE_RUNNER
+    output: ci-runners-secure.json
+  sealed_runners:
+    instance: sealed
+    prefix: seal-
+    isolation: sealed
+    label: home-sealed
+    variable: CI_SEALED_RUNNER
+    output: ci-runners-sealed.json
+    one_job_per_boot: true
+share_duties:
+  drill: {doc: docs/DRILL.md, text: "take the sealed hold"}

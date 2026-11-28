@@ -240,6 +240,16 @@ jobs:
         uses: ./
         with:
           tool: ci-gate-lint
+      - name: ci-runners selftest (through the action, which installs the runners extra)
+        uses: ./
+        with:
+          tool: ci-runners
+          args: --selftest
+      - name: ci-runners golden check (through the action; the fixture the original renderer rendered)
+        uses: ./
+        with:
+          tool: ci-runners
+          args: --check --config tests/fixtures/runners/golden/runners.yml --kit tests/fixtures/runners/golden/kit.yml --root tests/fixtures/runners/golden
       - name: sql gate selftest (through the action, which installs the sql extra)
         uses: ./
         with:
