@@ -1,0 +1,169 @@
+{
+  "_generated": "by scripts/ci_runners.py from ci/runners.yml -- DO NOT EDIT; run --write",
+  "source_sha256": "fcc2d506a622",
+  "guests": {
+    "mon": {
+      "vmid": 201,
+      "cores": 3,
+      "ram_mb": 4000
+    },
+    "old": {
+      "vmid": 205,
+      "cores": 2,
+      "ram_mb": 4000,
+      "state": "stopped",
+      "budgeted": false
+    },
+    "pool-a": {
+      "vmid": 202,
+      "cores": 7,
+      "ram_mb": 9000
+    },
+    "pool-b": {
+      "vmid": 203,
+      "cores": 2,
+      "ram_mb": 2048
+    },
+    "pool-c": {
+      "vmid": 204,
+      "cores": 2,
+      "ram_mb": 2500,
+      "state": "on_demand"
+    }
+  },
+  "host": {
+    "ram_mb": 24000,
+    "reserves_mb": {
+      "hypervisor": 3000,
+      "drill": 3000,
+      "slack": 1000
+    }
+  },
+  "instance": "home",
+  "prefix": "home-",
+  "isolation": "socket",
+  "runner_vm": {
+    "name": "pool-a",
+    "vmid": 202
+  },
+  "max_total": 7,
+  "mem_budget_mb": 12000,
+  "mem_base_mb": 8000,
+  "live_floor_mb": 900,
+  "redecide": false,
+  "pools": [
+    {
+      "repo": "Pascal.Case",
+      "gh_repo": "Pascal.Case",
+      "variable": "CI_RUNNER",
+      "min": 0,
+      "max": 7,
+      "cpus": 2,
+      "memory_mb": 2048,
+      "pids": 2048,
+      "labels": [
+        "self-hosted",
+        "home"
+      ],
+      "peak_mb": 700,
+      "young_mb": 700
+    },
+    {
+      "repo": "docs",
+      "gh_repo": "docs",
+      "variable": "CI_RUNNER",
+      "min": 0,
+      "max": 7,
+      "cpus": 2,
+      "memory_mb": 2048,
+      "pids": 2048,
+      "labels": [
+        "self-hosted",
+        "home"
+      ],
+      "peak_mb": 700,
+      "young_mb": 350
+    },
+    {
+      "repo": "svc",
+      "gh_repo": "svc",
+      "variable": "CI_RUNNER",
+      "min": 1,
+      "max": 3,
+      "cpus": 2,
+      "memory_mb": 2048,
+      "pids": 2048,
+      "labels": [
+        "self-hosted",
+        "home"
+      ],
+      "peak_mb": 2000,
+      "young_mb": 1200
+    },
+    {
+      "repo": "svc-big",
+      "gh_repo": "svc",
+      "variable": "CI_RUNNER_BIG",
+      "min": 0,
+      "max": 2,
+      "cpus": 2,
+      "memory_mb": 2048,
+      "pids": 2048,
+      "labels": [
+        "self-hosted",
+        "home-big"
+      ],
+      "peak_mb": 3500,
+      "young_mb": 3500,
+      "starve_s": 0
+    },
+    {
+      "repo": "svc-main",
+      "gh_repo": "svc",
+      "variable": "CI_RUNNER_MAIN",
+      "min": 1,
+      "max": 7,
+      "cpus": 2,
+      "memory_mb": 2048,
+      "pids": 2048,
+      "labels": [
+        "self-hosted",
+        "home-main"
+      ],
+      "peak_mb": 600,
+      "young_mb": 300
+    },
+    {
+      "repo": "web",
+      "gh_repo": "web",
+      "variable": "CI_RUNNER",
+      "min": 0,
+      "max": 5,
+      "cpus": 2,
+      "memory_mb": 2048,
+      "pids": 2048,
+      "labels": [
+        "self-hosted",
+        "home"
+      ],
+      "peak_mb": 2400,
+      "young_mb": 2400
+    },
+    {
+      "repo": "web-light",
+      "gh_repo": "web",
+      "variable": "CI_RUNNER_LIGHT",
+      "min": 0,
+      "max": 7,
+      "cpus": 2,
+      "memory_mb": 2048,
+      "pids": 2048,
+      "labels": [
+        "self-hosted",
+        "home-light"
+      ],
+      "peak_mb": 700,
+      "young_mb": 700
+    }
+  ]
+}

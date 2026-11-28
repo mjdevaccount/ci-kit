@@ -1,0 +1,85 @@
+{
+  "_generated": "by scripts/ci_runners.py from ci/runners.yml -- DO NOT EDIT; run --write",
+  "source_sha256": "fcc2d506a622",
+  "guests": {
+    "mon": {
+      "vmid": 201,
+      "cores": 3,
+      "ram_mb": 4000
+    },
+    "old": {
+      "vmid": 205,
+      "cores": 2,
+      "ram_mb": 4000,
+      "state": "stopped",
+      "budgeted": false
+    },
+    "pool-a": {
+      "vmid": 202,
+      "cores": 7,
+      "ram_mb": 9000
+    },
+    "pool-b": {
+      "vmid": 203,
+      "cores": 2,
+      "ram_mb": 2048
+    },
+    "pool-c": {
+      "vmid": 204,
+      "cores": 2,
+      "ram_mb": 2500,
+      "state": "on_demand"
+    }
+  },
+  "host": {
+    "ram_mb": 24000,
+    "reserves_mb": {
+      "hypervisor": 3000,
+      "drill": 3000,
+      "slack": 1000
+    }
+  },
+  "instance": "sealed",
+  "prefix": "seal-",
+  "isolation": "sealed",
+  "runner_vm": {
+    "name": "pool-c",
+    "vmid": 204
+  },
+  "max_total": 1,
+  "mem_budget_mb": 2000,
+  "pools": [
+    {
+      "repo": "svc",
+      "gh_repo": "svc",
+      "variable": "CI_SEALED_RUNNER",
+      "min": 0,
+      "max": 1,
+      "cpus": 2,
+      "memory_mb": 2000,
+      "pids": 2048,
+      "labels": [
+        "self-hosted",
+        "home-sealed"
+      ],
+      "peak_mb": 1800,
+      "young_mb": 1800
+    },
+    {
+      "repo": "web",
+      "gh_repo": "web",
+      "variable": "CI_SEALED_RUNNER",
+      "min": 0,
+      "max": 1,
+      "cpus": 2,
+      "memory_mb": 2000,
+      "pids": 2048,
+      "labels": [
+        "self-hosted",
+        "home-sealed"
+      ],
+      "peak_mb": 1500,
+      "young_mb": 1500
+    }
+  ]
+}

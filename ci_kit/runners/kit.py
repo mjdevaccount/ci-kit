@@ -163,7 +163,6 @@ def kit_from_dict(d: Any) -> Kit:
     blocks_in = d.get("blocks")
     if not isinstance(blocks_in, dict) or not blocks_in:
         raise KitError("blocks: at least one runner block is required")
-    blocks = []
     for key, b in blocks_in.items():
         p += _unknown(f"blocks.{key}", b, _BLOCK_KEYS)
         if isinstance(b, dict):
@@ -175,6 +174,8 @@ def kit_from_dict(d: Any) -> Kit:
         duties_in = {}
     for name, x in duties_in.items():
         p += _unknown(f"share_duties.{name}", x, {"doc", "text"})
+        if isinstance(x, dict):
+            p += [f"share_duties.{name}: missing {k!r}" for k in sorted({"doc", "text"} - set(x))]
     if p:
         raise KitError("; ".join(p))
     blocks = tuple(Block(key=str(k), **b) for k, b in blocks_in.items())
