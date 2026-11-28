@@ -73,11 +73,44 @@ def estate_hits(root: pathlib.Path = TESTS) -> list[str]:
     return hits
 
 
+RUN = {"supervisor.sh"}  # run by a unit; every other script is SOURCED by it
+SOURCED = re.compile(r'^\s*(?:if\s+)?\.\s+"\$\(dirname "\$\(readlink -f "\$\{BASH_SOURCE\[0\]\}"\)"\)/([^"]+)"', re.M)
+
+
 def test_what_ships():
-    assert sorted(scripts()) == ["github-auth.sh", "runs.sh"]
+    assert sorted(scripts()) == ["github-auth.sh", "runs.sh", "supervisor.sh"]
     for name, body in scripts().items():
         assert b"\r" not in body, f"{name}: CRLF (the .gitattributes eol=lf rule is what keeps the hash stable)"
-        assert body.startswith(b"# shellcheck shell=bash"), name
+        assert body.startswith(b"#!/usr/bin/env bash\n" if name in RUN else b"# shellcheck shell=bash"), name
+
+
+def sourced_beside(body: str) -> list[str]:
+    """Every file a script sources from beside itself (`. "$(dirname "$(readlink -f ...)")/<name>"`)."""
+    return SOURCED.findall(body)
+
+
+def test_the_supervisor_sources_only_what_ships():
+    """Everything supervisor.sh sources from its own directory is a packaged script: a name the package
+    does not ship would be a supervisor that goes blind (exit 2) on the first tick after --write."""
+    body = scripts()["supervisor.sh"].decode("utf-8")
+    assert sorted(sourced_beside(body)) == ["github-auth.sh", "runs.sh"]
+    assert set(sourced_beside(body)) <= set(scripts())
+    # MUST-FIRE: the reader sees a renamed source, in both of the supervisor's spellings
+    planted = body.replace('/runs.sh"', '/ci-runs.sh"').replace('/github-auth.sh"; then', '/auth.sh"; then')
+    assert sorted(sourced_beside(planted)) == ["auth.sh", "ci-runs.sh"]
+
+
+@pytest.mark.parametrize("name", sorted(scripts()))
+def test_every_script_parses(name, tmp_path):
+    bash = shutil.which("bash")  # resolved: a bare "bash" on Windows is System32's WSL launcher
+    if bash is None:
+        if os.environ.get("CI"):
+            pytest.fail("bash must be on PATH: a supervisor cannot run without it")
+        pytest.skip("bash not on PATH (workstation)")
+    f = tmp_path / name
+    f.write_bytes(scripts()[name])
+    r = subprocess.run([bash, "-n", f.as_posix()], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
 
 
 def test_the_package_names_no_consumer():

@@ -1,6 +1,6 @@
 # Self-hosted runner capacity (`ci-runners`, `runners` extra)
 
-`ci_kit/runners/` (v1.51.0, `renders` v1.52.0, `supervisor` v1.54.0, scripts v1.56.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
+`ci_kit/runners/` (v1.51.0, `renders` v1.52.0, `supervisor` v1.54.0, scripts v1.56.0, `supervisor.sh` + `--verify-prom` v1.57.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
 runner CAPACITY as a library: the capacity file's schema, the host / guest / runner-VM budget
 invariants (measured `peak_mb` against real RAM, floors, ceilings, the live room), one JSON render
 per runner block for a supervisor to read with jq, and the runtime admission rule (`alloc.jq`,
@@ -45,11 +45,26 @@ ci-runners --check --config ci/runners.yml --kit ci/runners-kit.yml   # CI: sche
 ci-runners --write --config ci/runners.yml --kit ci/runners-kit.yml   # regenerate the renders
 ci-runners --write ... --out-dir "$RUNNER_TEMP/r"                     # render elsewhere, e.g. to diff against another renderer
 ci-runners --alloc < tick.json                                        # one admission verdict (alloc.jq's twin)
+ci-runners --verify-prom ci_runner.prom --render ci-runners.json      # did a tick publish what its alerts read?
 ci-runners --selftest
 ```
 
 Exit 0 clean, 1 findings or a stale / orphaned render, 2 could not look (unreadable or unparsable
 file, malformed kit, no pyyaml).
+
+`--verify-prom` (v1.57.0) checks a supervisor's file is COMPLETE: it reads one `.prom` file
+against the RENDER that supervisor was installed with, so every requirement comes from what shipped.
+It does not prove WHICH script wrote the file or WHEN (the script being replaced publishes the same
+series, and a crashed tick leaves its file): identity and freshness stay with the installer (a tick
+that began after the move, ended 0, and wrote a file newer than its begin). A file the textfile
+collector would reject (an unparsable line or label block, a series twice) is a finding.
+Only samples labelled `supervisor="<instance>"` count. Required: `runner_collect_ok 1`, the
+render's `source_sha256` in `runner_config_info`, its `max_total`, every gauge an alert or a
+per-tick sweep reads, each pool's target / hold / declared peak, the working-set maximum of each pool
+with a floor (`min >= 1`; none is a NOTE), the secure conditions exactly on a `secure` render (and
+at least one container inspected), and the registry cache's gauges plus the daemon's mirror on a
+`socket` render that declares one (the cache off or not answering is a NOTE). Exit 0 / 1 / 2 as
+above; a `sealed` render is 2 (`supervisor.sh` does not run it).
 
 The Python API (`ci_kit.runners`): `validate` returns every way the capacity file is wrong;
 `render` writes one JSON per block; `extras` renders the kit's `renders`; `freshness` says whether
@@ -60,8 +75,14 @@ takes parsed data.
 ## The scripts
 
 A runner host runs bash, jq and curl, not ci-kit, so the supervisor's shell ships as package data
-and is COPIED into the consumer's tree (`scripts_dir`), then installed from there. Each is
-SOURCED by a supervisor, never run, and reads its inputs from the environment it is sourced in:
+and is COPIED into the consumer's tree (`scripts_dir`), then installed from there.
+`supervisor.sh` (v1.57.0) is the one that RUNS: `supervisor.sh INSTANCE RENDER ISOLATION:PREFIX`
+from a systemd oneshot and timer, reading every path, label, limit and cache from its render (the
+kit's `supervisor` section) and holding no domain constant of its own. It sources the other two
+from beside itself, and sets their inputs from the render (`CI_RUNNER_CONF`, `CI_RUNNER_RUN`,
+`CI_RUNNER_METRIC_PREFIX`). Exit 0 looked, 2 could not look; every sample carries
+`supervisor="<instance>"`. The other two are SOURCED, never run, and read their inputs from the
+environment they are sourced in:
 
 | script | the caller provides | it provides |
 |---|---|---|
