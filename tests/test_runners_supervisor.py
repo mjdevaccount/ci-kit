@@ -95,7 +95,11 @@ def test_an_unwired_detail_is_absent_not_defaulted():
 
 def test_the_section_adds_only_the_supervisor_key():
     cfg, text = _cfg()
-    plain = kit_from_dict(yaml.safe_load((GOLDEN / "kit.yml").read_text(encoding="utf-8")))
+    d = _kit_dict()
+    d.pop("supervisor")
+    for b in d["blocks"].values():
+        b.pop("supervisor", None)
+    plain = kit_from_dict(d)
     before = json.loads(render(cfg, text, "runners", plain))
     after = _doc("runners")
     assert list(after) == [*before, "supervisor"]
