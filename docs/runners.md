@@ -1,6 +1,6 @@
 # Self-hosted runner capacity (`ci-runners`, `runners` extra)
 
-`ci_kit/runners/` (v1.51.0, `renders` v1.52.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
+`ci_kit/runners/` (v1.51.0, `renders` v1.52.0, `supervisor` v1.53.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
 runner CAPACITY as a library: the capacity file's schema, the host / guest / runner-VM budget
 invariants (measured `peak_mb` against real RAM, floors, ceilings, the live room), one JSON render
 per runner block for a supervisor to read with jq, and the runtime admission rule (`alloc.jq`,
@@ -33,6 +33,7 @@ What the domain decides once. These are its extension points:
 | `out_dir`, `generated`, `write_command` | where renders go (relative to `--root`), the banner they carry, the command a stale finding names |
 | `alloc_jq` | a path: `--write` copies ci-kit's `alloc.jq` there, `--check` flags a copy that drifted |
 | `renders.<name>` (v1.52.0) | an extra GENERATED file keyed on the same hash as the JSONs: `output` (relative to `--root`) and a `template` ([`string.Template`](https://docs.python.org/3/library/string.html#template-strings): `${source_sha256}`, `${config}`; `$$` is a literal `$`). For a consumer of the hash that is not a supervisor, such as an alert rule that holds every installed supervisor's published hash to main's. `--check` holds it to a fresh render; an unknown placeholder or a bare `$` is a malformed kit (exit 2). With `--out-dir` it is written under its file name there, so a shadow run can diff it too |
+| `supervisor` + `blocks.<key>.supervisor` (v1.53.0) | a supervisor's own WIRING, so the host script holds no domain constants: the GitHub `owner`, `metric_prefix`, `conf_dir` / `run_dir` / `prom_dir`, the installed `alloc_jq`, the container `labels` (`repo`, `keep`, `canary`), `work_root`, `runner_env`, bounded shared `caches` and an optional pull-through `registry_cache`; per block its `state_dir`, `dockerfile`, `image`, `prom_file`, `busy_limit_s` / `idle_limit_s` / `stray_limit_s`, `network`, the `caches` it mounts and whether it runs the `registry_cache`. A wired block's render gains ONE key, `supervisor`, with every path resolved and `foreign_vmids` (every other block's VM: an instance that finds its own VM there must refuse). A kit without it renders byte-identically to before. Shapes are checked (absolute paths, docker label keys, env names, `host:port`, https upstream) and two instances may not share a state dir, metrics file or image tag. Full shape: `ci_kit/runners/supervisor.py` |
 | `source_hash` | `raw` (default) or `canonical`, below |
 | `Kit(rules=...)` (Python) | callables `(cfg, kit) -> [finding]` run after every built-in check passes |
 
