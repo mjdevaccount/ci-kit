@@ -24,11 +24,11 @@ needs_bash = pytest.mark.skipif(shutil.which("bash") is None and not os.environ.
 
 BANNER = "Connection timed out during banner exchange\nConnection to 140.82.114.3 port 22 timed out"
 FAKE = r"""#!/usr/bin/env bash
-# fake ssh: call N plays line N of $FAKE_SEQ ("<rc>|<stderr>"); records argv and stdin
+# fake ssh (CR LF line ends, as OpenSSH writes them): call N plays line N of $FAKE_SEQ ("<rc>|<stderr>"); records argv and stdin
 d="$FAKE_DIR"; n=$(( $(cat "$d/n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$d/n"
 printf '%s\n' "$*" > "$d/argv.$n"
 line=$(sed -n "${n}p" "$d/seq"); rc=${line%%|*}; msg=${line#*|}
-if [ "$rc" = 0 ]; then cat > "$d/stdin.$n"; echo "fetched"; else printf '%b\n' "$msg" >&2; fi
+if [ "$rc" = 0 ]; then cat > "$d/stdin.$n"; echo "fetched"; else printf '%s\r\n' "${msg//\\n/$'\r\n'}" >&2; fi
 exit "$rc"
 """
 
@@ -144,3 +144,42 @@ def test_a_signal_reaches_ssh_and_its_stderr_is_not_lost(tmp_path: pathlib.Path)
     time.sleep(0.2)
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)  # ssh did not outlive its wrapper
+
+
+def _no_banner_server():
+    """A listener that accepts every connection and never sends a byte: the 11-28 GitHub shape."""
+    import socket
+    import threading
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    held: list = []
+
+    def accept() -> None:
+        while True:
+            try:
+                held.append(srv.accept()[0])
+            except OSError:
+                return
+    threading.Thread(target=accept, daemon=True).start()
+    return srv, held
+
+
+@needs_bash
+@pytest.mark.skipif(shutil.which("ssh") is None and not os.environ.get("CI"), reason="no ssh")
+@pytest.mark.skipif(sys.platform == "win32", reason="Win32-OpenSSH words its timeouts differently")
+def test_real_ssh_against_a_server_that_never_sends_a_banner_is_retried(tmp_path: pathlib.Path) -> None:
+    srv, held = _no_banner_server()
+    try:
+        e = {**os.environ, "CI_KIT_SSH_TRIES": "2", "CI_KIT_SSH_PAUSE": "0",
+             "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md")}
+        r = subprocess.run([BASH, str(SCRIPT), "-o", "BatchMode=yes", "-o", "ConnectTimeout=2",
+                            "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                            "-p", str(srv.getsockname()[1]), "127.0.0.1", "true"],
+                           input="want abc\n", env=e, capture_output=True, text=True, timeout=60)
+    finally:
+        srv.close()
+    assert r.returncode == 255, r.stderr
+    assert len(held) == 2, r.stderr  # the real OpenSSH line was matched and retried once
+    assert "ssh-retry: gave up after 2/2 attempts, none connected (Connection timed out during banner exchange)" in r.stderr
+    assert "ssh-retry: attempt 1/2" in (tmp_path / "summary.md").read_text()

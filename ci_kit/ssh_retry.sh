@@ -30,7 +30,9 @@ tries="${CI_KIT_SSH_TRIES:-3}"
 pause="${CI_KIT_SSH_PAUSE:-2}"
 [[ "${tries}" =~ ^[1-9][0-9]?$ ]] || { echo "ssh-retry: CI_KIT_SSH_TRIES='${tries}' is not 1-99" >&2; exit 2; }
 [[ "${pause}" =~ ^(0|[1-9][0-9]?)$ ]] || { echo "ssh-retry: CI_KIT_SSH_PAUSE='${pause}' is not 0-99" >&2; exit 2; }
-# OpenSSH's connect-phase lines (sshconnect.c, ssh.c), anchored to the start of a line
+# OpenSSH's connect-phase lines (sshconnect.c, ssh.c), anchored to the start of a line. ssh ends its
+# stderr lines with CR LF (measured, OpenSSH 10.0p2: "exchange\r\n"), so the CRs are stripped before
+# matching -- without that `$` never matched the banner line and the 11-28 failure was not retried.
 NEVER_CONNECTED='^(ssh: connect to host .* port [0-9]+: .*|ssh: Could not resolve hostname .*|Connection timed out during banner exchange|kex_exchange_identification: .*)$'
 err="$(mktemp)" || { echo "ssh-retry: mktemp failed" >&2; exit 2; }
 trap 'rm -f "${err}"' EXIT
@@ -42,15 +44,17 @@ n=1
 while :; do
   # ssh in the background with stdin passed EXPLICITLY (a bare `&` would give it /dev/null), so a
   # signal to this wrapper reaches ssh and ssh's stderr is still printed, never lost with the file
+  # the trap is set BEFORE ssh starts: a signal in between still ends with its stderr printed
+  pid=""
+  trap 'if [ -n "${pid}" ]; then kill -TERM "${pid}" 2>/dev/null; wait "${pid}"; fi; cat "${err}" >&2; exit 143' TERM INT HUP
   ssh "$@" <&0 2>"${err}" &
   pid=$!
-  trap 'kill -TERM "${pid}" 2>/dev/null; wait "${pid}"; cat "${err}" >&2; exit 143' TERM INT HUP
   wait "${pid}"
   rc=$?
   trap - TERM INT HUP
   cat "${err}" >&2
   [ "${rc}" = 255 ] || exit "${rc}"
-  why="$(grep -E "${NEVER_CONNECTED}" "${err}" | head -n1)"
+  why="$(tr -d '\r' < "${err}" | grep -E "${NEVER_CONNECTED}" | head -n1)"
   [ -n "${why}" ] || exit "${rc}"
   if [ "${n}" -ge "${tries}" ]; then
     note "ssh-retry: gave up after ${n}/${tries} attempts, none connected (${why})"
