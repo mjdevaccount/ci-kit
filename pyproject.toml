@@ -75,6 +75,7 @@ packages = ["ci_kit"]
 dev = [
     "json5>=0.17.3",
     "pytest>=8",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.6",
 ]
 
@@ -87,3 +88,7 @@ select = ["E", "F", "W", "I", "B", "UP", "PLR0915"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Parallel by default (pytest-xdist): 2.4k tests, most spawning git. One core took 21 min on a
+# Windows workstation; `-n auto` 9 min there. `worksteal` keeps the 10-40s merge-train/renovate
+# tests from leaving workers idle at the tail. `-n0` runs serially (debugging, `-x`, pdb).
+addopts = "-n auto --dist worksteal"
