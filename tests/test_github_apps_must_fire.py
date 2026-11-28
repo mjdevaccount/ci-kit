@@ -3,9 +3,12 @@ could not look = 2, over a synthetic App on the fake GitHub the selftest uses
 (ci_kit/github_apps_selftest.py: a real RS256 JWT, installation tokens, pagination)."""
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import json
 import pathlib
+import tempfile
 
 import pytest
 
@@ -190,6 +193,17 @@ BAD_MANIFESTS = [
     json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [
         {"account": "o", "repository_selection": "all"}, {"account": "O", "repository_selection": "all"}]}]}),
     json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": []}, {"name": "a", "app_id": 2, "installations": []}]}),
+    # each Invalid path, proven red under --validate (reviewer: five were not)
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [], "default_permissions": {"x": ["read"]}}]}),
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [], "default_permissions": {"x": {"y": 1}}}]}),
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [], "default_permissions": ["contents"]}]}),
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": ["o"]}]}),
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [
+        {"account": "o", "repository_selection": "all", "repos": []}]}]}),
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [
+        {"account": "o", "repository_selection": "all", "permissions": {"x": ["write"]}}]}]}),
+    json.dumps({"apps": [{"name": "a", "client_id": 5, "installations": []}]}),
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [], "default_events": "push"}]}),
 ]
 
 
@@ -371,9 +385,26 @@ def test_validate_an_unreadable_manifest_is_2_must_fire(tmp_path: pathlib.Path) 
     assert ga.main(["--manifest", str(m), "--validate"], call=None) == 2
 
 
-@pytest.mark.parametrize("args", [["--only", "nope"], ["--app-level", "nope"], ["--app-level-token-from", "nope"]])
-def test_validate_flags_naming_no_declared_app_are_2(key: tuple[str, object], args: list[str]) -> None:
-    assert st.run(st.MANIFEST, _world(key), None, "--validate", *args)[0] == 2
+@pytest.mark.parametrize("args", [["--only", "nope"], ["--app-level", "nope"], ["--app-level-token-from", "nope"],
+                                  ["--app-level-token-from", ""]])
+def test_validate_flags_naming_no_declared_app_are_1(key: tuple[str, object], args: list[str]) -> None:
+    """The schedule names an App the manifest no longer declares: the manifest edit is the finding."""
+    rc, out = st.run(st.MANIFEST, _world(key), None, "--validate", *args)
+    assert rc == 1 and "INVALID" in out, out
+
+
+@pytest.mark.parametrize("args, want", [
+    (["--key-env", f"{st.SLUG}=X"], "App other-bot: no key flag and no --app-level"),            # an App added, not scheduled
+    (["--key-env", f"{st.SLUG}=X", "--app-level", st.OTHER, "--app-level-token-from", st.OTHER],
+     "--app-level-token-from 'other-bot': no key flag names that App"),
+])
+def test_validate_holds_the_schedules_flags_to_the_manifest_must_fire(key: tuple[str, object], args: list[str],
+                                                                      want: str) -> None:
+    w = _world(key)
+    rc, out = st.run(st.WITH_OTHER, w, None, "--validate", *args)
+    assert rc == 1 and want in out and w.calls == [], out
+    ok = ["--key-env", f"{st.SLUG}=X", "--app-level", st.OTHER, "--app-level-token-from", st.SLUG]
+    assert st.run(st.WITH_OTHER, w, None, "--validate", *ok)[0] == 0 and w.calls == []
 
 
 def test_validate_in_actions_is_an_error_annotation(key: tuple[str, object], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -450,3 +481,34 @@ def test_the_reusable_passes_the_reader_flag_only_for_its_keyed_app() -> None:
     text = (pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "app-audit.yml").read_text(encoding="utf-8")
     assert "app-level-reader:" in text and '--app-level-token-from $KEYED' in text
     assert '[ "$READER" = true ]' in text
+
+
+def test_the_reader_is_minted_on_the_private_apps_own_account(key: tuple[str, object]) -> None:
+    """The keyed App on two accounts: the token comes from the account the private App is declared on."""
+    w = _private(key)
+    m = copy.deepcopy(st.WITH_OTHER)
+    m["apps"][1]["installations"] = [{"account": "example-user", "repository_selection": "all"}]
+    rc, out = st.run(m, w, key[0], "--app-level", st.OTHER, "--app-level-token-from", st.SLUG)
+    assert rc == 0 and "(installation 12), revoked" in out, out
+
+
+def test_any_revoke_failure_is_a_note_never_the_report_lost(key: tuple[str, object]) -> None:
+    w = _private(key)
+    _mut_add(w)
+
+    def call(method: str, path: str, bearer: str, body: dict | None) -> object:
+        if method == "DELETE" and bearer in ("ghs_fake0", "ghs_fake1"):
+            raise ConnectionResetError("reset")  # BOTH revokes: the reader's and the selected installation's
+        return w(method, path, bearer, body)
+    with tempfile.TemporaryDirectory() as d:
+        mp, kp = pathlib.Path(d) / "m.json", pathlib.Path(d) / "k.pem"
+        mp.write_text(json.dumps(st.WITH_OTHER), encoding="utf-8")
+        kp.write_text(key[0], encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = ga.main(["--manifest", str(mp), "--key-file", f"{st.SLUG}={kp}", "--app-level", st.OTHER,
+                          "--app-level-token-from", st.SLUG], call=call)
+    o = out.getvalue()
+    assert rc == 1 and "WIDENED administration" in o, o
+    assert "app-level reader token (example-bot, installation 11, metadata: read) was NOT revoked" in o
+    assert "installation 11's scoped read token was NOT revoked" in o

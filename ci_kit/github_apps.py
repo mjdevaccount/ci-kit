@@ -37,8 +37,10 @@ THE LIVE READ, per App:
     403): `--app-level-token-from KEYED` mints one from an App audited here with its key (scoped to
     metadata:read, revoked after), so no long-lived token is stored for it (v1.55.0).
 
-`--validate` (v1.55.0) is the pre-merge half: the manifest parsed exactly as the audit parses it and
-every flag's App name checked, with no key read and no network call. Invalid = 1, unreadable = 2.
+`--validate` (v1.55.0) is the pre-merge half: the manifest parsed exactly as the audit parses it,
+and the schedule's App flags held to it (each names a declared App; every App has a key flag or
+--app-level; the reader App has a key flag), with no key read and no network call. Invalid = 1,
+unreadable = 2.
 
 DRIFT (exit 1), one line each: a permission widened or narrowed (read < write < admin; added or
 dropped counts), an event added or dropped, an installation on an undeclared account or a declared
@@ -122,7 +124,7 @@ def _perms(raw: object, where: str) -> dict[str, str]:
         raise Invalid(f"{where}: permissions must be a mapping, got {type(raw).__name__}")
     out = {}
     for k, v in raw.items():
-        if not isinstance(k, str) or v not in LEVEL:
+        if not isinstance(k, str) or not isinstance(v, str) or v not in LEVEL:
             raise Invalid(f"{where}: permission {k!r}: {v!r} is not one of {', '.join(LEVEL)}")
         out[k] = v
     return {**IMPLICIT, **out}
@@ -293,17 +295,20 @@ def read_with_key(call: Transport, spec: AppSpec, key_pem: str, now: float | Non
         finally:
             try:
                 call("DELETE", "/installation/token", token, None)
-            except Blind:
+            except Exception:  # noqa: BLE001 - ANY failed revoke is a note; the read stands
                 live.unrevoked.append(iid)  # said in the notes: it expires in an hour (metadata: read only)
         live.repos[iid] = frozenset(str(r.get("name") or "").lower() for r in names)
     return live
 
 
-def mint_reader(call: Transport, spec: AppSpec, key_pem: str, now: float | None = None) -> tuple[str, int]:
+def mint_reader(call: Transport, spec: AppSpec, key_pem: str, now: float | None = None,
+                prefer: frozenset[str] = frozenset()) -> tuple[str, int]:
     """(token, installation id): an installation token of the keyed App `spec`, scoped to
     metadata: read, for the app-level reads. GET /apps/<slug> answers a PRIVATE App only to an
     installation or user token, never to a workflow's GITHUB_TOKEN (HTTP 403), and this needs no
-    long-lived token stored anywhere. The caller revokes it. Never printed."""
+    long-lived token stored anywhere. The caller revokes it. `prefer`: the accounts the app-level
+    Apps are declared on; an installation on one of them is taken first (a private App is visible
+    on its own account). Never printed."""
     bearer = app_jwt(spec.issuer, key_pem, now)
     me = call("GET", "/app", bearer, None)
     slug = me.get("slug") if isinstance(me, dict) else None
@@ -312,7 +317,8 @@ def mint_reader(call: Transport, spec: AppSpec, key_pem: str, now: float | None 
     insts = [i for i in _pages(call, "/app/installations", bearer, None) if not i.get("suspended_at")]
     if not insts:
         raise Blind(f"{spec.name} has no unsuspended installation to mint a reader token on")
-    iid = insts[0].get("id")
+    same = [i for i in insts if str((i.get("account") or {}).get("login") or "").lower() in prefer]
+    iid = (same or insts)[0].get("id")
     tok = call("POST", f"/app/installations/{iid}/access_tokens", bearer, {"permissions": {"metadata": "read"}})
     token = tok.get("token") if isinstance(tok, dict) else None
     if not token:
@@ -478,7 +484,9 @@ def _reader(call: Transport, specs: list[AppSpec], keys: dict[str, str | None], 
     if not any(s.name in app_level and not keys.get(s.name) for s in specs):
         return "", None, None
     try:
-        token, iid = mint_reader(call, spec, keys[name] or "")
+        prefer = frozenset(x.account.lower() for s in specs if s.name in app_level and not keys.get(s.name)
+                           for x in s.installations)
+        token, iid = mint_reader(call, spec, keys[name] or "", prefer=prefer)
     except Blind as e:
         return "", None, f"no app-level reader token from {name}: {e}"
     except Exception as e:  # noqa: BLE001 - a crash minting is those Apps unread, exit 2
@@ -486,7 +494,22 @@ def _reader(call: Transport, specs: list[AppSpec], keys: dict[str, str | None], 
     return token, iid, None
 
 
-def _validate(path: pathlib.Path, specs: list[AppSpec]) -> int:
+def _flags_cover(specs: list[AppSpec], keyed: set[str], app_level: set[str], token_from: str | None) -> list[str]:
+    """What the audit would refuse in these flags, decided without a key or a call. Pure. Every App
+    needs a key flag or --app-level (else it is unread), and the reader App needs a key flag."""
+    out = [f"App {s.name}: no key flag and no --app-level names it, so the audit cannot read it"
+           for s in specs if s.name not in keyed | app_level]
+    if token_from is not None and token_from not in keyed:
+        out.append(f"--app-level-token-from {token_from!r}: no key flag names that App, so no reader can be minted")
+    return out
+
+
+def _validate(path: pathlib.Path, specs: list[AppSpec], keyed: set[str], app_level: set[str],
+              token_from: str | None) -> int:
+    if keyed or app_level or token_from is not None:  # the flags the schedule passes: hold them too
+        problems = _flags_cover(specs, keyed, app_level, token_from)
+        if problems:
+            raise Invalid("; ".join(problems))
     print(f"{PROG}: manifest {path} is valid: {len(specs)} App(s), "
           f"{sum(len(s.installations) for s in specs)} installation(s) declared (nothing read from GitHub)")
     return 0
@@ -530,17 +553,19 @@ def main(argv: list[str] | None = None, call: Transport = urllib_transport) -> i
         if a.only:
             unknown = set(a.only) - {s.name for s in specs}
             if unknown:
-                raise Blind(f"--only names App(s) the manifest does not declare: {', '.join(sorted(unknown))}")
+                raise Invalid(f"--only names App(s) the manifest does not declare: {', '.join(sorted(unknown))}")
             specs = [s for s in specs if s.name in a.only]
         files, envs = _pairs(a.key_file, "--key-file"), _pairs(a.key_env, "--key-env")
         stray = (set(files) | set(envs) | set(a.app_level) | {a.app_level_token_from} - {None}) \
             - {s.name for s in specs}
         if stray:
-            raise Blind(f"a key or --app-level names App(s) not audited: {', '.join(sorted(stray))}")
+            raise Invalid("a key, --app-level or --app-level-token-from flag names App(s) not audited: "
+                          f"{', '.join(repr(x) for x in sorted(stray))}")
         if a.app_level_token_from and a.token_env:
             raise Blind("--app-level-token-from and --token-env both name the app-level token: pass one")
         if a.validate:
-            return _validate(a.manifest, specs)  # names checked above; no key is read, nothing is called
+            # names checked above; no key is read, nothing is called
+            return _validate(a.manifest, specs, set(files) | set(envs), set(a.app_level), a.app_level_token_from)
         keys = {s.name: _key(s.name, files, envs) for s in specs}
         token_error = None
         if a.app_level_token_from:
@@ -586,7 +611,7 @@ def _revoke(call: Transport, token: str, iid: int | None, name: str | None) -> l
         return []
     try:
         call("DELETE", "/installation/token", token, None)
-    except Blind:
+    except Exception:  # noqa: BLE001 - a revoke that failed in ANY way is said; the report stands
         return [f"the app-level reader token ({name}, installation {iid}, metadata: read) was NOT revoked "
                 "(DELETE failed; it expires within the hour)"]
     return [f"app-level reads used a metadata:read installation token of {name} (installation {iid}), revoked"]
