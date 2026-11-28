@@ -178,7 +178,9 @@ def test_real_ssh_against_a_server_that_never_sends_a_banner_is_retried(tmp_path
                             "-p", str(srv.getsockname()[1]), "127.0.0.1", "true"],
                            input="want abc\n", env=e, capture_output=True, text=True, timeout=60)
     finally:
-        srv.close()
+        srv.close()  # ends the accept thread (accept raises OSError)
+        for c in held:
+            c.close()
     assert r.returncode == 255, r.stderr
     assert len(held) == 2, r.stderr  # the real OpenSSH line was matched and retried once
     assert "ssh-retry: gave up after 2/2 attempts, none connected (Connection timed out during banner exchange)" in r.stderr
