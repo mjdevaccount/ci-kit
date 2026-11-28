@@ -92,7 +92,7 @@ def test_minio_digest_merges_on_green_in_its_own_group() -> None:
     cfg = _resolve(MINIO)
     assert cfg.get("automerge") is True
     assert "held-deploy" in cfg.get("labels", [])
-    assert cfg.get("groupName") == "chainguard minio"  # not "compose images": would un-automerge it
+    assert cfg.get("groupName") == "chainguard minio"  # not "compose images": that group would spread its held-deploy label here
     assert cfg.get("updateNotScheduled") is False
 
 

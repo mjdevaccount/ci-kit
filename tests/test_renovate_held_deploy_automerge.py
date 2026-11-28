@@ -4,7 +4,8 @@ Operator ruling 2026-11-28: "isnt that the point of coded tests to check this sh
 green." The hold for a stateful compose image lives in the consumer's DEPLOY (edge-host
 runbooks/lib-held-infra.sh: hold -> drain -> deploy -> verify -> release, unattended, one unit
 per slot), not in the merge. So every `held-deploy` non-major resolves to automerge true and keeps
-the label that routes it to that lane, while three holds stay exactly as they were:
+its (informational) `held-deploy` label -- the consumer's lane deploys from its own unit list,
+edge-host infra_config.py HELD_UNITS, not from the label -- while three holds stay exactly as they were:
 
   - a windmill MAJOR (the consumer's lane refuses it too: a human upgrade),
   - every other held-deploy image's MAJOR (the default major rule),
@@ -41,7 +42,7 @@ def _dep(name: str, manager: str, update: str) -> dict:
 def test_a_green_held_deploy_bump_merges_and_keeps_its_label_must_fire(image: str, update: str) -> None:
     cfg = _resolve(_dep(image, "docker-compose", update))
     assert cfg.get("automerge") is True, f"{image} {update}: held at merge again ({cfg.get('automerge')})"
-    assert "held-deploy" in cfg.get("labels", []), f"{image} {update}: lost the label the deploy lane routes on"
+    assert "held-deploy" in cfg.get("labels", []), f"{image} {update}: lost its held-deploy label"
 
 
 def test_the_windmill_worker_dockerfile_moves_with_the_server() -> None:

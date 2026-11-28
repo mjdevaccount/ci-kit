@@ -603,8 +603,10 @@
     // reconciler ships a merged held-deploy pin unattended through its drain-safe held deploy
     // (edge-host runbooks/lib-held-infra.sh: hold -> drain -> deploy -> verify -> release, one
     // stateful unit per slot, a failed drain defers, never forced) and pages a pin merged but not
-    // running for 12h (home-host HeldDeployOwedStuck). So `held-deploy` stays as the label that
-    // routes the deploy, and `automerge` is true. MAJORS stay held: the default major rule
+    // running for 12h (home-host HeldDeployOwedStuck). So `automerge` is true and `held-deploy`
+    // stays as an INFORMATIONAL label: nothing reads it. The lane picks what to deploy from its own
+    // unit list (edge-host scripts/infra_config.py HELD_UNITS) vs the running containers, so a NEW
+    // stateful image added here must ALSO be added there, or it merges on green and nothing ships it. MAJORS stay held: the default major rule
     // (automerge false) is not overridden here -- this rule matches minor/patch/digest only.
     {
       matchPackageNames: [
