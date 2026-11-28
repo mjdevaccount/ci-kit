@@ -1,6 +1,6 @@
 # Self-hosted runner capacity (`ci-runners`, `runners` extra)
 
-`ci_kit/runners/` (v1.51.0, `renders` v1.52.0, `supervisor` v1.54.0, scripts v1.56.0, `supervisor.sh` + `--verify-prom` v1.57.0, `runner_impl_info` + `--scripts-sha256` v1.58.0, Python twins `ci_kit.runners.tick` v1.59.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
+`ci_kit/runners/` (v1.51.0, `renders` v1.52.0, `supervisor` v1.54.0, scripts v1.56.0, `supervisor.sh` + `--verify-prom` v1.57.0, `runner_impl_info` + `--scripts-sha256` v1.58.0, Python twins `ci_kit.runners.tick` v1.59.0, all-or-`unknown` impl hash v1.60.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
 runner CAPACITY as a library: the capacity file's schema, the host / guest / runner-VM budget
 invariants (measured `peak_mb` against real RAM, floors, ceilings, the live room), one JSON render
 per runner block for a supervisor to read with jq, and the runtime admission rule (`alloc.jq`,
@@ -58,8 +58,9 @@ It does not prove WHEN the file was written (a crashed tick leaves its file): fr
 the installer (a tick that began after the move, ended 0, and wrote a file newer than its begin).
 WHICH script wrote it is provable with `--scripts-sha256 <pin>`: `supervisor.sh` publishes
 `<prefix>runner_impl_info{scripts_sha256}` hashed from the directory it runs from (the same value
-`scripts_sha256` computes), and the flag requires it at the pin; without the flag, the script being
-replaced passes too, since it publishes the same series. A file the textfile
+`scripts_sha256` computes; every entry, hidden ones included, and `unknown` when any entry cannot be
+hashed, never a hash of the readable part, v1.60.0), and the flag requires it at the pin; without
+the flag, the script being replaced passes too, since it publishes the same series. A file the textfile
 collector would reject (an unparsable line or label block, a series twice) is a finding.
 Only samples labelled `supervisor="<instance>"` count. Required: `runner_collect_ok 1`, the
 render's `source_sha256` in `runner_config_info`, its `max_total`, every gauge an alert or a
