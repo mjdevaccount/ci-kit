@@ -58,6 +58,9 @@ class FakeGitHub:
         self.revoked: list[str] = []
         self.scopes: list[dict] = []
         self.fail: str | None = None   # a path prefix that answers HTTP 500
+        # PRIVATE Apps on the same account: GET /apps/<slug> answers only a live installation token
+        # (GitHub: a workflow's GITHUB_TOKEN gets 403)
+        self.private: dict[str, dict] = {}
         self.calls: list[str] = []
 
     def _jwt_ok(self, bearer: str) -> bool:
@@ -101,11 +104,23 @@ class FakeGitHub:
         if base == "/installation/token" and method == "DELETE":
             self.revoked.append(bearer)
             return {}
+        if base.startswith("/apps/") and base[len("/apps/"):] in self.private:
+            if bearer not in self.tokens or bearer in self.revoked:
+                raise ga.Blind(f"GET {base}: HTTP 403")
+            return copy.deepcopy(self.private[base[len("/apps/"):]])
         if base == f"/apps/{SLUG}":
             if not bearer:
                 raise ga.Blind(f"GET {base}: HTTP 401")
             return {k: copy.deepcopy(v) for k, v in self.app.items()}
         raise ga.Blind(f"{method} {base}: HTTP 404")
+
+
+OTHER = "other-bot"
+OTHER_APP = {"slug": OTHER, "id": 7, "client_id": "Iv23liOTHER000000000", "permissions": {"actions": "read",
+             "metadata": "read"}, "events": []}
+WITH_OTHER = {"apps": [*MANIFEST["apps"], {"name": OTHER, "app_id": 7, "default_permissions": {"actions": "read"},
+                                           "installations": [{"account": "example-org",
+                                                              "repository_selection": "all"}]}]}
 
 
 def run(manifest: dict | str, world: FakeGitHub, key_pem: str | None, *extra: str) -> tuple[int, str]:
@@ -152,4 +167,20 @@ def selftest() -> list[str]:
     rc, out = run(MANIFEST, FakeGitHub(pub), None)
     if rc != 2:
         fails.append(f"no key and no --app-level was not could-not-look: rc {rc}")
+    w = FakeGitHub(pub)
+    w.private[OTHER] = copy.deepcopy(OTHER_APP)
+    rc, out = run(WITH_OTHER, w, pem, "--app-level", OTHER, "--app-level-token-from", SLUG)
+    if rc != 0 or sorted(w.revoked) != sorted(w.tokens) or "(installation 11), revoked" not in out:
+        fails.append(f"a private App was not read with the keyed App's revoked reader token: rc {rc} {out[-300:]}")
+    w.private[OTHER]["permissions"]["administration"] = "write"
+    rc, out = run(WITH_OTHER, w, pem, "--app-level", OTHER, "--app-level-token-from", SLUG)
+    if rc != 1 or "App other-bot: permission WIDENED administration" not in out:
+        fails.append(f"a private App's widened permission, read app-level, was not drift: rc {rc}")
+    w = FakeGitHub(pub)
+    rc, out = run(MANIFEST, w, None, "--validate")
+    if rc != 0 or w.calls:
+        fails.append(f"--validate on a valid manifest was not 0 with nothing called: rc {rc} {w.calls}")
+    rc, out = run({"apps": [{"name": "a", "app_id": 1, "installations": [], "permisions": {}}]}, w, None, "--validate")
+    if rc != 1 or "INVALID" not in out:
+        fails.append(f"--validate on a manifest with a typo key was not 1: rc {rc}")
     return fails

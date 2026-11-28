@@ -10,6 +10,7 @@
 #         manifest: ci/github-apps.yml
 #         keyed-app: example-bot          # the App whose key is passed below: full audit
 #         app-level: other-app            # Apps audited without a key: permissions and events only
+#         app-level-reader: true          # read them with the keyed App's scoped token (a PRIVATE App)
 #       secrets:
 #         app-private-key: ${{ secrets.EXAMPLE_BOT_PRIVATE_KEY }}
 #
@@ -34,6 +35,10 @@ on:
         description: space-separated App names audited WITHOUT a key (permissions and events only; installations not read)
         type: string
         default: ""
+      app-level-reader:
+        description: read the app-level Apps with a metadata-read installation token of the keyed App, revoked after (a PRIVATE App answers GITHUB_TOKEN with 403)
+        type: boolean
+        default: false
       only:
         description: space-separated App names to audit ('' = every App in the manifest)
         type: string
@@ -47,7 +52,7 @@ on:
         description: the keyed App's private key (PEM)
         required: false
       app-level-token:
-        description: a token that can read the app-level Apps (GET /apps/<slug>); default the job's own token
+        description: a token that can read the app-level Apps (GET /apps/<slug>); default the job's own token (unused with app-level-reader)
         required: false
 
 permissions:
@@ -70,6 +75,7 @@ jobs:
           KEYED: ${{ inputs.keyed-app }}
           APP_LEVEL: ${{ inputs.app-level }}
           ONLY: ${{ inputs.only }}
+          READER: ${{ inputs.app-level-reader }}
           HAS_KEY: ${{ secrets.app-private-key != '' }}
         run: |
           set -euo pipefail
@@ -81,6 +87,10 @@ jobs:
             [[ "$KEYED" =~ $name ]] || { echo "::error title=app-audit::keyed-app '$KEYED' is not an App name"; exit 2; }
             [ "$HAS_KEY" = true ] || { echo "::error title=app-audit::keyed-app $KEYED but the app-private-key secret is empty"; exit 2; }
             args="$args --key-env $KEYED=CI_KIT_APP_KEY"
+          fi
+          if [ "$READER" = true ]; then
+            [ -n "$KEYED" ] || { echo "::error title=app-audit::app-level-reader needs keyed-app: the reader token is minted from that App's key"; exit 2; }
+            args="$args --app-level-token-from $KEYED"
           fi
           for n in $APP_LEVEL; do [[ "$n" =~ $name ]] || { echo "::error title=app-audit::app-level '$n' is not an App name"; exit 2; }; args="$args --app-level $n"; done
           for n in $ONLY; do [[ "$n" =~ $name ]] || { echo "::error title=app-audit::only '$n' is not an App name"; exit 2; }; args="$args --only $n"; done
