@@ -137,6 +137,47 @@ jobs:
         with:
           tool: ci-quarantine
           args: --selftest
+      # v1.50.0, batch 2 moved from trade-data: the same shape, each selftest through the action.
+      - name: cog selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-cog
+          args: --selftest
+      - name: test-standins selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-test-standins
+          args: --selftest
+      - name: guards-have-tests selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-guards-have-tests
+          args: --selftest
+      - name: untested-modules selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-untested-modules
+          args: --selftest
+      - name: http-clients selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-http-clients
+          args: --selftest
+      - name: sql-placement selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-sql-placement
+          args: --selftest
+      - name: image-pr-filter selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-image-pr-filter
+          args: --selftest
+      - name: migration-open-prs selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-migration-open-prs
+          args: --selftest
       - name: dup-code gate on ci-kit itself (through the action; baseline ci/jscpd-baseline.json)
         uses: ./
         with:

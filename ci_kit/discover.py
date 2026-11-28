@@ -30,7 +30,7 @@ from __future__ import annotations
 import pathlib
 import subprocess
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 
 
 def _git(args: list[str], *, timeout: int) -> subprocess.CompletedProcess[bytes]:
@@ -122,6 +122,16 @@ def require_scanned_each(by_dir: Mapping[str, int], floors: Mapping[str, int], *
     A dir in `floors` that `by_dir` never counted is ZERO (exit 2), never skipped."""
     for d, floor in floors.items():
         require_scanned(by_dir.get(d, 0), gate=f"{gate}[{d}]", dirs=(d,), floor=floor)
+
+
+def tracked_floored(floors: Mapping[str, int], *, gate: str, root: pathlib.Path,
+                    keep: Callable[[str], bool] | None = None, suffix: str = ".py") -> list[str]:
+    """Repo-relative tracked files under each `floors` dir that `keep` admits, and EVERY dir must
+    hold at least its floor of them (`require_scanned_each`: exit 2 naming `gate[dir]`) (v1.50.0).
+    The floor counts what the gate will READ, so a filter that empties a dir is blindness too."""
+    files = [rel for rel in tracked(floors, suffix=suffix, root=root) if keep is None or keep(rel)]
+    require_scanned_each(count_by_dir(files, floors), floors, gate=gate)
+    return files
 
 
 def tracked_each(scan_dirs: Iterable[str], *, gate: str, suffix: str = ".py",

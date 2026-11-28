@@ -1,8 +1,8 @@
 name: ci-kit
 description: >-
   Run one ci_kit console script (ci-doc-lint, ci-secret-argv-lint, ci-hidden-unicode, ci-pr-autoupdate, ci-pin-drift,
-  ci-manual-lint, ci-guard-selfproof, ci-declared-literal, ci-env-reads, ci-line-cap, ci-function-clones, ci-blind-parse, ci-quarantine, ci-dup-code, ci-api-diff, ci-gitleaks, ci-tf-seed, ci-gate-lint, ci-version-tag, ci-green, ci-merge-train, ci-runners, or a SQL gate: ci-sql-casts, ci-pit-reads, ci-decimal-reads,
-  ci-phantom-columns, ci-column-comments)
+  ci-manual-lint, ci-guard-selfproof, ci-declared-literal, ci-env-reads, ci-line-cap, ci-function-clones, ci-blind-parse, ci-quarantine, ci-test-standins, ci-guards-have-tests, ci-untested-modules, ci-http-clients, ci-migration-open-prs, ci-cog, ci-image-pr-filter, ci-dup-code, ci-api-diff, ci-gitleaks, ci-tf-seed, ci-gate-lint, ci-version-tag, ci-green, ci-merge-train, ci-runners, or a SQL gate: ci-sql-casts, ci-pit-reads, ci-decimal-reads,
+  ci-phantom-columns, ci-column-comments, ci-sql-placement)
   against the caller's checkout, installed with uvx from THIS action's own download of ci-kit.
 
 # WHY AN ACTION AND NOT `uvx --from git+https://github.com/<owner>/ci-kit@v1` IN EVERY WORKFLOW.
@@ -13,7 +13,7 @@ description: >-
 
 inputs:
   tool:
-    description: console script to run (ci-doc-lint | ci-secret-argv-lint | ci-hidden-unicode | ci-pr-autoupdate | ci-pin-drift | ci-manual-lint | ci-guard-selfproof | ci-declared-literal | ci-env-reads | ci-line-cap | ci-function-clones | ci-blind-parse | ci-quarantine | ci-dup-code | ci-api-diff | ci-gitleaks | ci-tf-seed | ci-gate-lint | ci-version-tag | ci-green | ci-merge-train | ci-runners | ci-sql-casts | ci-pit-reads | ci-decimal-reads | ci-phantom-columns | ci-column-comments)
+    description: console script to run (ci-doc-lint | ci-secret-argv-lint | ci-hidden-unicode | ci-pr-autoupdate | ci-pin-drift | ci-manual-lint | ci-guard-selfproof | ci-declared-literal | ci-env-reads | ci-line-cap | ci-function-clones | ci-blind-parse | ci-quarantine | ci-test-standins | ci-guards-have-tests | ci-untested-modules | ci-http-clients | ci-migration-open-prs | ci-cog | ci-image-pr-filter | ci-dup-code | ci-api-diff | ci-gitleaks | ci-tf-seed | ci-gate-lint | ci-version-tag | ci-green | ci-merge-train | ci-runners | ci-sql-casts | ci-pit-reads | ci-decimal-reads | ci-phantom-columns | ci-column-comments | ci-sql-placement)
     required: true
   args:
     description: arguments, word-split by the shell
@@ -44,13 +44,15 @@ runs:
         CI_KIT_GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # the SQL gates need the `sql` extra (sqlglot), ci-gate-lint the `workflow` extra and ci-runners the `runners` extra (pyyaml);
-        # every other tool is zero-dependency
+        # the SQL gates need the `sql` extra (sqlglot), ci-gate-lint and ci-image-pr-filter the `workflow`
+        # extra (pyyaml), ci-runners the `runners` extra (pyyaml), ci-cog the `cog` extra (cogapp); every
+        # other tool is zero-dependency
         case "$TOOL" in
-          ci-doc-lint|ci-secret-argv-lint|ci-hidden-unicode|ci-pr-autoupdate|ci-pin-drift|ci-queue-wait|ci-manual-lint|ci-guard-selfproof|ci-declared-literal|ci-env-reads|ci-line-cap|ci-function-clones|ci-blind-parse|ci-quarantine|ci-dup-code|ci-api-diff|ci-gitleaks|ci-tf-seed|ci-version-tag|ci-green|ci-merge-train) from="$GITHUB_ACTION_PATH" ;;
-          ci-sql-casts|ci-pit-reads|ci-decimal-reads|ci-phantom-columns|ci-column-comments)
+          ci-doc-lint|ci-secret-argv-lint|ci-hidden-unicode|ci-pr-autoupdate|ci-pin-drift|ci-queue-wait|ci-manual-lint|ci-guard-selfproof|ci-declared-literal|ci-env-reads|ci-line-cap|ci-function-clones|ci-blind-parse|ci-quarantine|ci-test-standins|ci-guards-have-tests|ci-untested-modules|ci-http-clients|ci-migration-open-prs|ci-dup-code|ci-api-diff|ci-gitleaks|ci-tf-seed|ci-version-tag|ci-green|ci-merge-train) from="$GITHUB_ACTION_PATH" ;;
+          ci-sql-casts|ci-pit-reads|ci-decimal-reads|ci-phantom-columns|ci-column-comments|ci-sql-placement)
             from="ci-kit[sql] @ file://$GITHUB_ACTION_PATH" ;;
-          ci-gate-lint) from="ci-kit[workflow] @ file://$GITHUB_ACTION_PATH" ;;
+          ci-gate-lint|ci-image-pr-filter) from="ci-kit[workflow] @ file://$GITHUB_ACTION_PATH" ;;
+          ci-cog) from="ci-kit[cog] @ file://$GITHUB_ACTION_PATH" ;;
           ci-runners) from="ci-kit[runners] @ file://$GITHUB_ACTION_PATH" ;;
           *) echo "::error::unknown ci_kit tool: $TOOL"; exit 2 ;;
         esac
