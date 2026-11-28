@@ -1,10 +1,11 @@
-"""cgr.dev/chainguard/minio:latest digest updates are releasable, and never land unattended.
+"""cgr.dev/chainguard/minio:latest digest updates are releasable, in their own PR.
 
 Renovate reads release timestamps from Docker Hub only and ages a digest update against the
 matched version, so an unversioned `latest` on cgr.dev is held "indefinitely" under the default
 minimumReleaseAgeBehaviour (docs.renovatebot.com/key-concepts/minimum-release-age/). A consumer's
 two langfuse-minio pins sat behind for 25 days with no PR (its dependency dashboard). The preset
-replaces the age gate for that one package with review: no age wait, no auto-merge.
+replaces the age gate for that one package: no age wait, its own weekend-window PR, and (since
+2026-11-28) a merge on green that the consumer's held deploy recreates under a drain.
 
 packageRules apply in order and a later match wins, so this resolves the WHOLE list for the
 update rather than reading one rule: a rule added below it that re-arms automerge or the age
@@ -85,9 +86,12 @@ def test_minio_digest_has_no_age_wait() -> None:
     assert _resolve(MINIO).get("minimumReleaseAge") is None
 
 
-def test_minio_digest_never_auto_merges() -> None:
+def test_minio_digest_merges_on_green_in_its_own_group() -> None:
+    # Since 2026-11-28 the hold lives in the consumer's DEPLOY (a held deploy recreates minio under
+    # a drain), so a green digest merges; its own group and window are what stay.
     cfg = _resolve(MINIO)
-    assert cfg.get("automerge") is False
+    assert cfg.get("automerge") is True
+    assert "held-deploy" in cfg.get("labels", [])
     assert cfg.get("groupName") == "chainguard minio"  # not "compose images": would un-automerge it
     assert cfg.get("updateNotScheduled") is False
 
