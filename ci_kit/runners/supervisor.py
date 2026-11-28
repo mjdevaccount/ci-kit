@@ -44,6 +44,9 @@ kit, never the capacity file: a wiring change must not move `source_sha256` (kit
           caches: [pip]               # optional: which of the kit's caches it mounts, in order
           registry_cache: true        # optional: it runs the kit's registry cache
 
+Every shape below is a FULL match (a trailing newline is not a match) and is no looser than what
+the supervisor enforces when it reads the render: a render this accepts is one it will run.
+
 The render carries the result under `supervisor`, every path resolved, plus `foreign_vmids`: the VM
 ids of every OTHER block in the capacity file. An instance that finds its own runner VM among them
 is driving another tier's VM and must refuse. schema.py already refuses two blocks on one guest at
@@ -69,16 +72,20 @@ LABEL_KEYS = ("repo", "keep", "canary")
 CACHE_KEYS = {"dir", "max_bytes", "env", "set"}
 REGISTRY_KEYS = ("image", "name", "addr", "debug_addr", "dir", "upstream", "ttl", "max_bytes", "log_environment")
 
-_PATH = re.compile(r"^/(?:[A-Za-z0-9._-]+/?)*$")
+# at least one segment: `/` alone (a work_root or cache dir of the whole host) is refused
+_PATH = re.compile(r"^/(?:[A-Za-z0-9._-]+/?)+$")
 _OWNER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 _PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*_$")
 _DOCKER_LABEL = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _ENV = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _PROM = re.compile(r"^[A-Za-z0-9_.-]+\.prom$")
-_ADDR = re.compile(r"^[A-Za-z0-9.-]+:[0-9]{1,5}$")
+_ADDR = re.compile(r"^[0-9.]+:[0-9]{1,5}$")
 _TTL = re.compile(r"^[0-9]+[smh]$")
-_IMAGE = re.compile(r"^\S+$")
+_IMAGE = re.compile(r"^[A-Za-z0-9._/:@-]+$")
+_UPSTREAM = re.compile(r"^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[A-Za-z0-9._/-]*)?$")
+# an env value reaches a runner as one argv word and a log line: no line breaks, no NUL
+_VALUE = re.compile(r"^[^\n\r\x00]*$")
 
 
 @dataclass(frozen=True)
@@ -142,14 +149,14 @@ class BlockSupervisor:
 
 
 def _ok(x: Any, rx: re.Pattern) -> bool:
-    return isinstance(x, str) and bool(rx.match(x)) and "/../" not in x + "/"
+    return isinstance(x, str) and bool(rx.fullmatch(x)) and "/../" not in x + "/"
 
 
 def _env_problems(where: str, env: Any) -> list[str]:
     if not isinstance(env, Mapping):
         return [f"{where} must be a mapping"]
-    return [f"{where}.{k} must be a {_ENV.pattern} name with a string value"
-            for k, v in env.items() if not (_ok(k, _ENV) and isinstance(v, str))]
+    return [f"{where}.{k} must be a {_ENV.pattern} name with a one-line string value"
+            for k, v in env.items() if not (_ok(k, _ENV) and isinstance(v, str) and _VALUE.fullmatch(v))]
 
 
 def supervisor_problems(s: Supervisor) -> list[str]:
@@ -187,7 +194,7 @@ def supervisor_problems(s: Supervisor) -> list[str]:
             ("image", _ok(r.image, _IMAGE), "must be an image reference"),
             ("name", _ok(r.name, _NAME), f"must match {_NAME.pattern}"),
             ("dir", _ok(r.dir, _PATH), "must be an absolute path"),
-            ("upstream", isinstance(r.upstream, str) and r.upstream.startswith("https://"), "must be an https:// URL"),
+            ("upstream", _ok(r.upstream, _UPSTREAM), "must be an https:// URL (host, port, path)"),
             ("ttl", _ok(r.ttl, _TTL), "must be a duration like 336h"),
             ("max_bytes", _pos(r.max_bytes), "must be a positive integer"),
             ("log_environment", _ok(r.log_environment, _NAME), f"must match {_NAME.pattern}")) if not ok]
