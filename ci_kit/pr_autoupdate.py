@@ -375,7 +375,8 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
     # an IDLE queue (nothing in flight, nothing attempted) lands a CLEAN Renovate PR itself, which GitHub
     # refuses to arm (pr_renovate.land_idle)
     errors += err + (cancel.errors if cancel else 0) + (
-        pr_renovate.land_idle(repo, prs, q.in_flight, q.update, _gh_read, pr_heal.write, summary)
+        pr_renovate.land_idle(repo, prs, q, opts.required, _gh_read, pr_heal.write,
+                              lambda p: _put_kind(repo, p), summary)
         if opts.max_in_flight > 0 else 0)
     # ONE ACTOR PER HEAD: a PR this pass base-retried has a new head on its way; its old head goes to
     # neither the ladder (whose dispatch marker would spend a tier-3 slot on a head already gone) nor pr_heal
@@ -753,6 +754,12 @@ def _put(repo: str, p: dict) -> tuple[Outcome, str]:
         if state.returncode == 0 and state.stdout.strip() not in ("", "OPEN"):
             return o, state.stdout.strip().lower()
     return o, ""
+
+
+def _put_kind(repo: str, p: dict) -> tuple[str, str]:
+    """`_put` as (kind, detail): the update pr_renovate.land_idle runs on a CLEAN head behind its base."""
+    o, gone = _put(repo, p)
+    return ("current", f"no longer open: {gone}") if gone else (o.kind, o.detail)
 
 
 def _line(n: int, o: Outcome) -> str:

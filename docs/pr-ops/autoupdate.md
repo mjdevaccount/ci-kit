@@ -66,12 +66,16 @@ conflicting one gets its Renovate rebase box ticked; a refused arm or tick is a 
 that is already CLEAN, and Renovate never merges in a queue repo (`pr-comment`), so a CLEAN
 Enabled PR used to wait for a push to main that a quiet repo never gets (trade-infra#977/#978,
 2026-11-28, `queue: 0/1 in flight, 0 to attempt` on every pass until a hand merge). Now, with
-nothing in flight, nothing next and no train open, the pass MERGES the lowest-numbered one: squash,
-`expectedHeadOid` = the head it read, only when GitHub says CLEAN (every check green, required or
-not), the PR's own rollup reads green, and no workflow run on that head is still going. One per
-pass: the merge moves main and the push-to-main pass arms the rest. UNSTABLE (a red check, or
-`renovate/stability-days` still pending) is never landed. A refused merge is a red run; a moved
-head or base is a race, decided next pass.
+nothing in flight, nothing to attempt but DIRTY PRs, no armed held PR that is still waiting its turn
+(not failing) and no train open, the pass MERGES the lowest-numbered one: squash, `expectedHeadOid` =
+the head it read, only when GitHub says CLEAN (every check green, required or not), every check on
+the head PASSED here too (a non-empty rollup, none cancelled or pending, every `--required-checks`
+name present), and no workflow run on that head is still going. A head BEHIND its base is updated
+(PUT update-branch) instead of merged: a non-strict base never reports BEHIND, so CLEAN there is no
+proof the head was tested on today's main. One per pass. A PR held only by
+`renovate/stability-days` reads **HELD BY POLICY** (the minimumReleaseAge gate, not stuck) and is
+never armed or landed until it passes. A refused merge is a red run; a moved head or base, or a PR
+someone merged first, is a race, decided next pass.
 
 ## Smart auto-merge
 

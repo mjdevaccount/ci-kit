@@ -112,11 +112,12 @@ class World:
 
     def __init__(self, bodies: dict[int, tuple[str, dict | None]], *, refuse_arm: bool = False,
                  detail_fails: bool = False, refuse_patch: bool = False, land: str = "ok",
-                 running: dict[str, list[str]] | None = None) -> None:
+                 running: dict[str, list[str]] | None = None, behind: dict[str, int] | None = None) -> None:
         self.bodies, self.refuse_arm, self.detail_fails, self.writes = bodies, refuse_arm, detail_fails, []
         self.refuse_patch, self.inputs = refuse_patch, {}
-        # land: "ok" | "refused" | "raced" (GitHub's answer to mergePullRequest); running: head -> its unfinished runs
-        self.land, self.running = land, running or {}
+        # land: "ok" | "refused" | "raced" | "merged" (GitHub's answer to mergePullRequest); running: head ->
+        # its unfinished runs; behind: head -> commits its base has that it lacks (compare's behind_by)
+        self.land, self.running, self.behind, self.updates = land, running or {}, behind or {}, []
 
     def read(self, *a: str) -> subprocess.CompletedProcess:
         if a[:2] == ("api", "graphql") and not any(x.startswith("number=") for x in a):
@@ -132,6 +133,8 @@ class World:
         if "/actions/runs?head_sha=" in path:  # pr_renovate._runs_done: the --jq names of unfinished runs
             oid = path.split("head_sha=")[1].split("&")[0]
             return subprocess.CompletedProcess(a, 0, json.dumps(self.running.get(oid, [])), "")
+        if "/compare/" in path:  # pr_renovate._behind: the --jq .behind_by
+            return subprocess.CompletedProcess(a, 0, str(self.behind.get(path.rsplit("...", 1)[1], 0)), "")
         if path.endswith("/status"):
             return subprocess.CompletedProcess(a, 0, json.dumps({"statuses": []}), "")
         return subprocess.CompletedProcess(a, 0, json.dumps({"default_branch": "main"}), "")
@@ -149,7 +152,11 @@ class World:
             if self.land == "refused":
                 return subprocess.CompletedProcess(a, 1, "", "GraphQL: Repository rule violations found (mergePullRequest)")
             if self.land == "raced":
-                return subprocess.CompletedProcess(a, 1, "", "GraphQL: Head branch was modified. expected head sha differs")
+                # GitHub's verbatim answer when the head moved after the read (reviewer, 2026-11-28)
+                return subprocess.CompletedProcess(
+                    a, 1, "", "GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)")
+            if self.land == "merged":
+                return subprocess.CompletedProcess(a, 1, "", "GraphQL: Pull Request is already merged (mergePullRequest)")
             ok = {"data": {"mergePullRequest": {"pullRequest": {"state": "MERGED", "merged": True}}}}
             return subprocess.CompletedProcess(a, 0, json.dumps(ok), "")
         if "PATCH" in a and self.refuse_patch:
@@ -193,6 +200,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, prs: list[dict], world: World, **opts)
     monkeypatch.setattr(pr_autoupdate, "unlabel_resolved", lambda *a, **k: 0)
     monkeypatch.setattr(pr_autoupdate, "_update_one", lambda *a, **k: ("updated", "updated"))
     monkeypatch.setattr(pr_autoupdate, "reviewing", lambda *a: False)
+    monkeypatch.setattr(pr_autoupdate, "_put_kind", lambda repo, p: (world.updates.append(p["number"]), ("updated", ""))[1])
     monkeypatch.setattr(pr_hold, "page", lambda *a: "paged")
     summary: list[str] = []
     rc = pr_autoupdate.run("o/r", summary, [], pr_autoupdate.Options(**{"max_in_flight": 1, "hold": True, **opts}))
@@ -400,3 +408,59 @@ def test_a_refused_land_is_a_red_run_a_raced_one_is_not_must_fire(monkeypatch: p
     rc, summary = _run(monkeypatch, [_pr(977, merge="CLEAN", statusCheckRollup=GREEN)],
                        World({977: (ON, None)}, land="raced"), hold=False)
     assert rc == 0 and any("decided afresh next pass" in s for s in summary)
+
+
+def test_a_raced_or_already_merged_land_is_not_a_red_must_not_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+    # dies to: _LAND_RACE dropping "head branch was modified" (GitHub's verbatim wording, which the arm's
+    # _RACE never matched) or "already merged" (a session or reconciler merged it between read and write)
+    for land in ("raced", "merged"):
+        rc, summary = _run(monkeypatch, [_pr(977, merge="CLEAN", statusCheckRollup=GREEN)],
+                           World({977: (ON, None)}, land=land), hold=False)
+        assert rc == 0 and any("decided afresh next pass" in s for s in summary), (land, summary)
+
+
+def test_a_clean_head_behind_a_non_strict_base_is_updated_not_landed_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+    # trade-infra / local-mcp are strict:false: GitHub never says BEHIND there, so CLEAN is no proof the
+    # head was tested on today's main. After #977 lands, #978 would merge on a base its checks never saw.
+    # dies to: _behind() not read, or a behind head landed anyway
+    world = World({978: (ON, None)}, behind={f"{978:040d}": 1})
+    rc, summary = _run(monkeypatch, [_pr(978, merge="CLEAN", statusCheckRollup=GREEN)], world, hold=False)
+    assert rc == 0 and world.landed() == [] and world.updates == [978], summary
+    assert any("1 commit(s) behind its base" in s for s in summary), summary
+    # must-not-fire: level with base -> landed, no update
+    world = World({978: (ON, None)}, behind={f"{978:040d}": 0})
+    rc, summary = _run(monkeypatch, [_pr(978, merge="CLEAN", statusCheckRollup=GREEN)], world, hold=False)
+    assert rc == 0 and world.landed() == ["id=PR_node978"] and world.updates == [], summary
+
+
+def test_idle_ignores_a_dirty_or_failing_armed_pr_but_not_a_waiting_one_must_fire(monkeypatch: pytest.MonkeyPatch) -> None:
+    # dies to: a DIRTY armed PR in `update` blocking every land until its author resolves it (for ever),
+    # a failing held one blocking, or a held one WAITING its turn (green, BLOCKED on a review) being jumped
+    red = [{"__typename": "CheckRun", "name": "gate", "status": "COMPLETED", "conclusion": "FAILURE"}]
+    for other, lands in ((dict(merge="DIRTY", statusCheckRollup=GREEN), True),
+                         (dict(merge="BLOCKED", statusCheckRollup=red), True),
+                         (dict(merge="BLOCKED", statusCheckRollup=GREEN), False)):
+        world = World({977: (ON, None)})
+        prs = [_pr(977, merge="CLEAN", statusCheckRollup=GREEN),
+               _pr(980, author=HUMAN, armed=True, headRefName="fix/x", **other)]
+        rc, summary = _run(monkeypatch, prs, world, hold=False)
+        assert rc == 0 and (world.landed() == ["id=PR_node977"]) == lands, (other, summary)
+        if not lands:
+            assert any("armed #980 is held, waiting its turn" in s for s in summary), summary
+
+
+@pytest.mark.parametrize(("rollup", "required"), [
+    ([], ()),                                                                         # no checks at all
+    ([{**GREEN[0], "conclusion": "CANCELLED"}], ()),                                  # a cancelled run
+    ([{**GREEN[0], "status": "IN_PROGRESS", "conclusion": None}], ()),
+    ([{"__typename": "StatusContext", "context": "ci", "state": "PENDING"}, *GREEN], ()),
+    (GREEN, ("gate", "build")),                                                       # a required check absent
+])
+def test_only_a_strictly_green_head_is_landed_must_not_fire(monkeypatch: pytest.MonkeyPatch, rollup: list,
+                                                            required: tuple) -> None:
+    # dies to: idle_landable trusting pr_queue.check_state, which reads [] and CANCELLED as green
+    world = World({977: (ON, None)})
+    rc, summary = _run(monkeypatch, [_pr(977, merge="CLEAN", statusCheckRollup=rollup)], world, hold=False,
+                       required=required)
+    assert world.landed() == [], summary
+    assert pr_renovate.idle_landable(_pr(977, merge="CLEAN", statusCheckRollup=GREEN), ("gate",))   # the green direction
