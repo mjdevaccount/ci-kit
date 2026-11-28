@@ -32,7 +32,7 @@ who registered that name is not it), unarmed, same-repo, not a draft, not a trai
         unarmed PR's `queue/position` is pending, so it is BLOCKED); elsewhere it is armed once main
         moves. UNSTABLE stays held (a check is red or still pending: `renovate/stability-days`).
         CLEAN is LANDED by this pass when the queue is IDLE (`land_idle`, below).
-  * LANDED, when the queue is idle (v1.60.0): nothing in flight, nothing to attempt, no train open.
+  * LANDED, when the queue is idle (v1.61.0): nothing in flight, nothing to attempt, no train open.
     "Armed once main moves" waited on a push that a quiet repo never gets: trade-infra#977/#978
     (2026-11-28) sat CLEAN, every check green, Renovate's verdict Enabled, under `queue: 0/1 in
     flight, 0 to attempt` for every pass until a session merged them by hand -- Renovate never
@@ -316,7 +316,7 @@ def join(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str]) ->
     return errors
 
 
-# ---- the idle queue lands a CLEAN Renovate PR itself (v1.60.0, module doc "LANDED") -------------
+# ---- the idle queue lands a CLEAN Renovate PR itself (v1.61.0, module doc "LANDED") -------------
 LANDABLE = "renovateLandable"  # row key join() sets on a CLEAN Enabled candidate it left unarmed
 _LAND_STATES = {"CLEAN", "HAS_HOOKS"}  # every check green; UNSTABLE (a red/pending one) never
 

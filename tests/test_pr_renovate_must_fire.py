@@ -324,7 +324,7 @@ def test_a_crlf_body_still_reads_must_fire() -> None:
     assert pr_renovate.ticked(crlf) is not None
 
 
-# ---- an IDLE queue lands a CLEAN Renovate PR itself (v1.60.0, pr_renovate.land_idle) ---------------
+# ---- an IDLE queue lands a CLEAN Renovate PR itself (v1.61.0, pr_renovate.land_idle) ---------------
 # THE CASE (trade-infra, 2026-11-28): #977 (chainguard minio digest) and #978 (ci-kit v1.59.0), both
 # "Automerge: Enabled", CLEAN with every check green, sat under "mergeable as it stands (CLEAN) ... armed
 # once main moves" with `queue: 0/1 in flight, 0 to attempt` on every pass (run 46145295455, 12:36Z) until

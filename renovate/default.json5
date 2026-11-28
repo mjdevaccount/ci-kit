@@ -840,7 +840,7 @@
     // ci_kit/pr_renovate.py since v1.32.0 -- no hand step; an outside PR reconciler is the witness).
     // A PR ALREADY CLEAN (every check green, current with main) cannot be armed -- GitHub refuses
     // "clean status" -- so with the queue IDLE (nothing in flight or next, no train) pr-autoupdate
-    // MERGES the lowest one itself, pinned to its head (v1.60.0, pr_renovate.land_idle): trade-infra
+    // MERGES the lowest one itself, pinned to its head (v1.61.0, pr_renovate.land_idle): trade-infra
     // #977/#978 sat CLEAN under "armed once main moves" on a quiet Saturday until a hand merge,
     // 2026-11-28. UNSTABLE (stability-days still pending, or any red check) is never landed. A repo that adds pr-autoupdate.yml with
     // max-in-flight joins this list (tests/test_renovate_merge_queue.py pins it).
