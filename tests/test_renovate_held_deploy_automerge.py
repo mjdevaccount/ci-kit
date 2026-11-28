@@ -17,7 +17,6 @@ later that re-holds a green bump, or re-arms a major, turns this red.
 from __future__ import annotations
 
 import pytest
-
 from test_renovate_floating_digest import _resolve
 
 # image -> the non-major update types it really gets (all compose)
