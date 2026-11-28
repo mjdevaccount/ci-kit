@@ -1,0 +1,99 @@
+# app-audit -- a declared GitHub App manifest held to live (ci-app-audit), callable by any repo.
+#
+#   on:
+#     schedule: [{cron: "17 6 * * *"}]
+#     workflow_dispatch:
+#   jobs:
+#     apps:
+#       uses: mjdevaccount/ci-kit/.github/workflows/app-audit.yml@v1
+#       with:
+#         manifest: ci/github-apps.yml
+#         keyed-app: example-bot          # the App whose key is passed below: full audit
+#         app-level: other-app            # Apps audited without a key: permissions and events only
+#       secrets:
+#         app-private-key: ${{ secrets.EXAMPLE_BOT_PRIVATE_KEY }}
+#
+# Red = drift (exit 1) or could not look (exit 2). Its value is the red: an App's grants and
+# installations change on GitHub's settings pages, which no commit or run records, so the caller
+# runs this on a schedule and something outside it watches that the schedule stays green and alive.
+# The key reaches the tool through the environment only (never argv, never printed).
+name: app-audit
+
+on:
+  workflow_call:
+    inputs:
+      manifest:
+        description: the App manifest (YAML or JSON) in the caller's checkout
+        type: string
+        default: ci/github-apps.yml
+      keyed-app:
+        description: the name (slug) of the App whose private key is the `app-private-key` secret ('' = none)
+        type: string
+        default: ""
+      app-level:
+        description: space-separated App names audited WITHOUT a key (permissions and events only; installations not read)
+        type: string
+        default: ""
+      only:
+        description: space-separated App names to audit ('' = every App in the manifest)
+        type: string
+        default: ""
+      secure-runner:
+        description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md
+        type: string
+        default: ""
+    secrets:
+      app-private-key:
+        description: the keyed App's private key (PEM)
+        required: false
+      app-level-token:
+        description: a token that can read the app-level Apps (GET /apps/<slug>); default the job's own token
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: audit
+    # It holds an App's private key: the secure pool, whose labels are hard-coded (CI_SECURE_RUNNER
+    # is an on/off switch, as every ci-kit token job), else hosted.
+    runs-on: ${{ inputs.secure-runner && fromJSON(inputs.secure-runner) || vars.CI_SECURE_RUNNER && fromJSON('["self-hosted","home-secure"]') || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: arguments
+        id: args
+        shell: bash
+        env:
+          MANIFEST: ${{ inputs.manifest }}
+          KEYED: ${{ inputs.keyed-app }}
+          APP_LEVEL: ${{ inputs.app-level }}
+          ONLY: ${{ inputs.only }}
+          HAS_KEY: ${{ secrets.app-private-key != '' }}
+        run: |
+          set -euo pipefail
+          name='^[A-Za-z0-9][A-Za-z0-9_.-]*$'
+          [[ "$MANIFEST" =~ ^[A-Za-z0-9_./-]+$ ]] || { echo "::error title=app-audit::manifest path '$MANIFEST' holds characters this workflow will not pass"; exit 2; }
+          args="--manifest $MANIFEST"
+          if [ -n "$KEYED" ]; then
+            [[ "$KEYED" =~ $name ]] || { echo "::error title=app-audit::keyed-app '$KEYED' is not an App name"; exit 2; }
+            [ "$HAS_KEY" = true ] || { echo "::error title=app-audit::keyed-app $KEYED but the app-private-key secret is empty"; exit 2; }
+            args="$args --key-env $KEYED=CI_KIT_APP_KEY"
+          fi
+          for n in $APP_LEVEL; do [[ "$n" =~ $name ]] || { echo "::error title=app-audit::app-level '$n' is not an App name"; exit 2; }; args="$args --app-level $n"; done
+          for n in $ONLY; do [[ "$n" =~ $name ]] || { echo "::error title=app-audit::only '$n' is not an App name"; exit 2; }; args="$args --only $n"; done
+          echo "args=$args" >> "$GITHUB_OUTPUT"
+      - name: the declared Apps against live
+        uses: mjdevaccount/ci-kit@v1
+        env:
+          CI_KIT_APP_KEY: ${{ secrets.app-private-key }}
+          GH_TOKEN: ${{ secrets.app-level-token || github.token }}
+        with:
+          tool: ci-app-audit
+          args: ${{ steps.args.outputs.args }}
+      - name: ci-app-audit selftest (bad = 1, good = 0, blind = 2 on a synthetic App)
+        uses: mjdevaccount/ci-kit@v1
+        with:
+          tool: ci-app-audit
+          args: --selftest

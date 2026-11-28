@@ -25,6 +25,7 @@ gate must prove it can fire, and the dependency policy. Everything else is a ref
 | [pr-ops/push-token.md](pr-ops/push-token.md) | the push token (GitHub App or PAT), its record line, generic names, runner pools |
 | [review-gate.md](review-gate.md) | the pre-merge model review gate (the `review` extra) |
 | [runners.md](runners.md) | `ci-runners`: self-hosted runner capacity (the `runners` extra) |
+| [github-apps.md](github-apps.md) | `ci-app-audit`: GitHub Apps declared and held to live (the `apps` extra); reading the pr-token record (`ci-pr-token-check`) |
 
 ## Using and changing the kit
 

@@ -72,6 +72,12 @@ outside with `gh run view <run> --log | grep 'pr-token: '` or the job's check-ru
 (`gh api repos/<owner>/<repo>/check-runs/<job id>/annotations`); the step summary is for humans (no
 REST endpoint serves it).
 
+Reading it back (v1.53.0): `ci_kit.pr_token` owns the grammar in both directions. `parse()` refuses
+every malformed shape (`RecordError`), `classify()` names what a record says went wrong, and
+`records_in_log()` / `records_in_annotations()` find the lines; `ci-pr-token-check` is the same
+on stdin. A test parses every record the real steps print back to what was written
+([github-apps.md](../github-apps.md#reading-the-pr-token-record)).
+
 ## The pr-token composite's input names (v1.40.0)
 
 The composite (`.github/actions/pr-token`) takes the App's id as `client-id` (its client id, or app

@@ -36,6 +36,14 @@ annotations API) and in the step summary, in ONE fixed shape -- a CONTRACT, a de
 Every value is free of `=` and spaces. The decide step's shell writes `reason=decide-crashed`
 itself when this module cannot run at all.
 
+READING IT BACK (v1.53.0). The grammar's other direction lives here too, so producer and parser
+cannot drift apart: `parse()` turns one record into a `Record` or refuses it with `RecordError`
+(STRICT: an unknown, missing or duplicated key, an empty value, a value holding `=`, whitespace or a
+`${` template, a `source` / `app` / `reason` outside its set -- each is refused, never skipped);
+`classify()` names what a parsed record says went wrong (`REASON_CLASS` classifies every reason);
+`records_in_log()` / `records_in_annotations()` find the record lines where the composite prints
+them. `ci-pr-token-check` is the same over a log or annotation dump on stdin.
+
 DEPRECATED NAMES. The App's id and key were first read under consumer-specific names (a repository
 variable and a secret); the generic names are the reusables' `app-client-id` input and
 `app-private-key` secret (v1.42.0), and this composite's `client-id` (v1.40.0; create-github-app-token
@@ -49,7 +57,9 @@ only when the generic input is empty) and the composite alone resolves them, so 
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -147,6 +157,121 @@ def line(d: Decision, mode: str, app: str, repo: str, workflow: str, job: str, l
               "reason": _field(d.reason, "?"), "app": _field(app, "absent"), "repo": _field(repo, "?"),
               "workflow": _field(workflow, "?"), "job": _field(job, "?"), "login": _field(login, "unknown")}
     return " ".join([PREFIX, *(f"{k}={v}" for k, v in fields.items())])
+
+
+# ── THE RECORD, read back: the grammar's other direction (v1.53.0) ───────────────────────────────
+#: the record's keys, in the order line() writes them (a test holds line() to this)
+KEYS = ("source", "mode", "reason", "app", "repo", "workflow", "job", "login")
+SOURCES = ("app", "pat", "none")
+APPS = ("minted", "failed", "absent")
+#: every reason, classified on purpose (a test holds the keys to REASONS). ok = the token acted as
+#: configured; fallback = the App is not configured (a finding only where the mode asked for it);
+#: failure = the job could not act, or could not say who acted.
+REASON_CLASS = {"configured": "ok", "mode-pat": "ok", "var-absent": "fallback", "key-absent": "fallback",
+                "mode-invalid": "failure", "scope-invalid": "failure", "mint-failed": "failure",
+                "identity-unreadable": "failure", "decide-crashed": "failure"}
+TITLE = "pr-token"  # the annotation title the record is printed under
+_TOKEN = re.compile(r"^([a-z]+)=([^\s=]+)$")
+# A log line from `gh run view --log` (job <TAB> step <TAB> stamp) or a raw runner log: only a line
+# ANCHORED on the workflow command's rendering counts -- the runner echoes the composite's own
+# script (which holds the record's template) into the log, and an unanchored grep reads that echo.
+_LOG = re.compile(r"^(?:[^\t]*\t[^\t]*\t)?(?:\d{4}-\d\d-\d\dT[\d:.]+Z )?##\[(?:notice|warning|error)\](pr-token:.*)$")
+
+
+class RecordError(ValueError):
+    """A line that is not a valid record. str() is the reason it was refused."""
+
+
+@dataclass(frozen=True)
+class Record:
+    source: str
+    mode: str
+    reason: str
+    app: str
+    repo: str
+    workflow: str
+    job: str
+    login: str
+
+    def asdict(self) -> dict[str, str]:
+        return {k: getattr(self, k) for k in KEYS}
+
+
+def parse(text: str) -> Record:
+    """One record line -> Record, or RecordError naming why not. Pure and STRICT: never a partial
+    record, never a skip. `text` is the record itself (an annotation message, or a log line with
+    its `##[level]` prefix removed: records_in_log)."""
+    if "${" in text:
+        raise RecordError("template text (contains ${), not a record")
+    s = text.strip()
+    if "\n" in s or "\r" in s:
+        raise RecordError("more than one line")
+    if not s.startswith(PREFIX + " "):
+        raise RecordError(f"does not start with '{PREFIX} '")
+    got: dict[str, str] = {}
+    for tok in s[len(PREFIX) + 1:].split(" "):
+        m = _TOKEN.match(tok)
+        if not m:
+            raise RecordError(f"bad token {tok!r} (want key=value, no space or = in the value)")
+        k, v = m.groups()
+        if k not in KEYS:
+            raise RecordError(f"unknown key {k!r}")
+        if k in got:
+            raise RecordError(f"duplicated key {k!r}")
+        got[k] = v
+    missing = [k for k in KEYS if k not in got]
+    if missing:
+        raise RecordError(f"missing key(s) {', '.join(missing)}")
+    for k, allowed in (("source", SOURCES), ("app", APPS), ("reason", REASONS)):
+        if got[k] not in allowed:
+            raise RecordError(f"{k}={got[k]} is not one of {', '.join(allowed)} "
+                              "(a newer ci-kit wrote it? read it with that version)")
+    return Record(**got)
+
+
+def classify(rec: Record, repo: str | None = None) -> list[str]:
+    """What a parsed record says went wrong (empty = the token acted as configured). Pure.
+    `repo` = the repository it was read from (a record naming another one is a finding).
+    Not findings: app=absent in pat mode (no key passed yet), and login=unknown outside the
+    identity scopes (decide/report already fail the job where a tool would trust it)."""
+    f: list[str] = []
+    cls = REASON_CLASS[rec.reason]
+    if cls == "failure":
+        f.append(f"reason={rec.reason} source={rec.source}: the token job could not act as configured")
+    if rec.app == "failed":
+        f.append(f"app=failed (mode={rec.mode}): the App mint FAILED -- fix the key or installation "
+                 "before this repository uses token-source app")
+    if rec.mode not in MODES and rec.reason != "mode-invalid":
+        f.append(f"mode={rec.mode} is not one of {', '.join(MODES)}")
+    if rec.mode in ("app", "app-required") and rec.source != "app" and cls != "failure":
+        f.append(f"mode={rec.mode} but source={rec.source} (reason={rec.reason}): asked for the App, did not get it")
+    if rec.mode == "pat" and rec.source == "app":
+        f.append("source=app in mode=pat: decide() never does this -- contract violation")
+    if rec.source == "none" and not f:
+        f.append(f"source=none (reason={rec.reason}): no token acted")
+    if repo is not None and rec.repo.lower() != repo.lower():
+        f.append(f"record names repo={rec.repo}, read from {repo}")
+    return f
+
+
+def records_in_log(log: str) -> list[str]:
+    """The record lines in a job log (`gh run view --log` shape, or the raw log), the `##[level]`
+    prefix removed. Pure. Only an ANCHORED line counts, and never one holding a `${` template."""
+    out = []
+    for ln in log.splitlines():
+        m = _LOG.match(ln.rstrip("\r"))
+        if m and "${" not in m.group(1):
+            out.append(m.group(1))
+    return out
+
+
+def records_in_annotations(annotations: list[dict]) -> list[str]:
+    """The record messages among a check run's annotations (`/check-runs/{id}/annotations`). Pure.
+    Other `pr-token`-titled annotations (the canary warning, the trusted-identities notice) are
+    prose, not records."""
+    return [str(a.get("message") or "") for a in annotations
+            if isinstance(a, dict) and a.get("title") == TITLE
+            and str(a.get("message") or "").startswith(PREFIX) and "${" not in str(a.get("message"))]
 
 
 # ── what the tools read (pr_baseretry, merge_train) ─────────────────────────────────────────────
@@ -285,10 +410,64 @@ def cmd_report() -> int:
     return 0
 
 
+def check(text: str, fmt: str = "log", repo: str | None = None) -> tuple[list[dict], list[str]]:
+    """Records found in `text` (parsed, as dicts) and every finding: unparseable records, what
+    classify() says, and NO record at all (a token step that ran must print one). Pure."""
+    if fmt == "annotations":
+        data = json.loads(text)
+        lines = records_in_annotations(data if isinstance(data, list) else [])
+    else:
+        lines = records_in_log(text) if fmt == "log" else [x for x in text.splitlines() if x.strip()]
+    recs: list[dict] = []
+    findings: list[str] = []
+    for ln in lines:
+        try:
+            rec = parse(ln)
+        except RecordError as e:
+            findings.append(f"unparseable record ({e}): {ln[:160]}")
+            continue
+        recs.append(rec.asdict())
+        findings += classify(rec, repo)
+    if not lines:
+        findings.append("no pr-token record in the input: the token step did not say which token acted")
+    return recs, findings
+
+
+def check_main(argv: list[str] | None = None) -> int:
+    """ci-pr-token-check: read records from a log, an annotations JSON array, or one record per
+    line; print each record as JSON and each finding. Exit 0 clean, 1 findings, 2 could not read."""
+    ap = argparse.ArgumentParser(prog="ci-pr-token-check", description=check_main.__doc__.split("\n", 1)[0])
+    ap.add_argument("file", nargs="?", default="-", help="input (default stdin)")
+    ap.add_argument("--format", dest="fmt", choices=("log", "annotations", "lines"), default="log",
+                    help="log: `gh run view --log` output; annotations: the check-run annotations JSON; "
+                         "lines: one record per line")
+    ap.add_argument("--repo", help="the repository the input was read from (owner/name)")
+    a = ap.parse_args(argv)
+    try:
+        if a.file == "-":
+            text = sys.stdin.read()
+        else:
+            with open(a.file, encoding="utf-8") as fh:
+                text = fh.read()
+        recs, findings = check(text, a.fmt, a.repo)
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        print(f"ci-pr-token-check: COULD NOT LOOK: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    for r in recs:
+        print(json.dumps(r, sort_keys=True))
+    for x in findings:
+        print(f"FINDING: {x}")
+    return 1 if findings else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m ci_kit.pr_token", description=__doc__.split("\n", 1)[0])
-    ap.add_argument("step", choices=("decide", "report"))
-    a = ap.parse_args(argv)
+    ap.add_argument("step", choices=("decide", "report", "check"))
+    a, rest = ap.parse_known_args(argv)
+    if a.step == "check":
+        return check_main(rest)
+    if rest:
+        ap.error(f"unrecognized arguments: {' '.join(rest)}")
     return cmd_decide() if a.step == "decide" else cmd_report()
 
 

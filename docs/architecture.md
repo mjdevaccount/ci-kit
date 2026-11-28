@@ -144,6 +144,7 @@ optional extra, so a consumer installs only what the gates it runs need:
 | `cog` | `cogapp>=3.4` | `ci-cog`, which runs cog in-process |
 | `runners` | `pyyaml>=6.0.2` | `ci-runners`, which reads the capacity file and its kit ([runners.md](runners.md)) |
 | `review` | `pydantic-ai-slim[anthropic]>=2.57,<3`, `mcp>=2.3,<3` | the pre-merge model review gate ([review-gate.md](review-gate.md)) |
+| `apps` | `pyjwt[crypto]>=2.10`, `pyyaml>=6.0.2` | `ci-app-audit`, which signs an App's JWT and reads its manifest ([github-apps.md](github-apps.md)) |
 
 The composite action installs the right extra per tool (`action.yml`'s `case`), so a workflow
 caller never names one. The review gate's `tier`, `verdict` and `carry` modules stay stdlib-only.
