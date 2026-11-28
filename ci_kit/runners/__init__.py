@@ -16,12 +16,12 @@ Needs the `runners` extra (pyyaml) only to READ YAML files; every function here 
 
 from ci_kit.runners.alloc import JQ_PATH, AllocError, allocate
 from ci_kit.runners.budget import derived_ceiling, pools, vm_budget
-from ci_kit.runners.kit import Block, Duty, Kit, KitError, kit_from_dict, load_kit
-from ci_kit.runners.render import freshness, outputs, render, source_hash
+from ci_kit.runners.kit import RENDER_VARS, Block, Duty, Kit, KitError, Render, kit_from_dict, load_kit
+from ci_kit.runners.render import extras, freshness, outputs, render, source_hash
 from ci_kit.runners.schema import validate
 
 __all__ = [
-    "JQ_PATH", "AllocError", "Block", "Duty", "Kit", "KitError", "allocate", "derived_ceiling",
-    "freshness", "kit_from_dict", "load_kit", "outputs", "pools", "render", "source_hash",
+    "JQ_PATH", "RENDER_VARS", "AllocError", "Block", "Duty", "Kit", "Render", "KitError", "allocate", "derived_ceiling",
+    "extras", "freshness", "kit_from_dict", "load_kit", "outputs", "pools", "render", "source_hash",
     "validate", "vm_budget",
 ]

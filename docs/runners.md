@@ -1,6 +1,6 @@
 # Self-hosted runner capacity (`ci-runners`, `runners` extra)
 
-`ci_kit/runners/` (v1.51.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
+`ci_kit/runners/` (v1.51.0, `renders` v1.52.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
 runner CAPACITY as a library: the capacity file's schema, the host / guest / runner-VM budget
 invariants (measured `peak_mb` against real RAM, floors, ceilings, the live room), one JSON render
 per runner block for a supervisor to read with jq, and the runtime admission rule (`alloc.jq`,
@@ -32,6 +32,7 @@ What the domain decides once. These are its extension points:
 | `share_duties.<reserve>` | a guest that `shares` a host reserve runs inside it, so the reserve's other owner must yield: `--check` requires `doc` to carry `text` |
 | `out_dir`, `generated`, `write_command` | where renders go (relative to `--root`), the banner they carry, the command a stale finding names |
 | `alloc_jq` | a path: `--write` copies ci-kit's `alloc.jq` there, `--check` flags a copy that drifted |
+| `renders.<name>` (v1.52.0) | an extra GENERATED file keyed on the same hash as the JSONs: `output` (relative to `--root`) and a `template` ([`string.Template`](https://docs.python.org/3/library/string.html#template-strings): `${source_sha256}`, `${config}`; `$$` is a literal `$`). For a consumer of the hash that is not a supervisor, such as an alert rule that holds every installed supervisor's published hash to main's. `--check` holds it to a fresh render; an unknown placeholder or a bare `$` is a malformed kit (exit 2). With `--out-dir` it is written under its file name there, so a shadow run can diff it too |
 | `source_hash` | `raw` (default) or `canonical`, below |
 | `Kit(rules=...)` (Python) | callables `(cfg, kit) -> [finding]` run after every built-in check passes |
 
@@ -49,7 +50,8 @@ Exit 0 clean, 1 findings or a stale / orphaned render, 2 could not look (unreada
 file, malformed kit, no pyyaml).
 
 The Python API (`ci_kit.runners`): `validate` returns every way the capacity file is wrong;
-`render` writes one JSON per block; `freshness` says whether the committed renders are current;
+`render` writes one JSON per block; `extras` renders the kit's `renders`; `freshness` says whether
+the committed renders are current;
 `allocate` is the admission rule. pyyaml is needed only to READ the YAML files; every function
 takes parsed data.
 
