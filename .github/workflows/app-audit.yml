@@ -73,6 +73,7 @@ jobs:
           HAS_KEY: ${{ secrets.app-private-key != '' }}
         run: |
           set -euo pipefail
+          set -f  # the name lists are split on spaces, never globbed against the checkout
           name='^[A-Za-z0-9][A-Za-z0-9_.-]*$'
           [[ "$MANIFEST" =~ ^[A-Za-z0-9_./-]+$ ]] || { echo "::error title=app-audit::manifest path '$MANIFEST' holds characters this workflow will not pass"; exit 2; }
           args="--manifest $MANIFEST"

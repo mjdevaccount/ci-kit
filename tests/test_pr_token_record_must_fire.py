@@ -79,6 +79,34 @@ def test_every_record_the_steps_print_parses_back_to_what_was_written_must_fire(
         rec = pt.parse(r)
         assert list(rec.asdict()) == list(pt.KEYS)
         assert r == " ".join([pt.PREFIX, *(f"{k}={v}" for k, v in rec.asdict().items())])  # nothing lost or reordered
+        # the contract-violation rules never fire on a record the real producer writes
+        assert not [x for x in pt.classify(rec, REPO) if "contract violation" in x], r
+
+
+@pytest.mark.parametrize("fields", [
+    "source=app mode=app-required reason=configured app=absent login=unknown",
+    "source=app mode=app reason=var-absent app=absent login=bot",
+    "source=app mode=app reason=configured app=minted login=unknown",
+    "source=pat mode=pat reason=configured app=absent login=me",
+    "source=app mode=pat reason=configured app=minted login=bot",
+])
+def test_a_record_the_producer_cannot_write_is_a_contract_violation_must_fire(fields: str) -> None:
+    rec = pt.parse(f"pr-token: {fields} repo=o/r workflow=w.yml job=update")
+    assert any("contract violation" in x for x in pt.classify(rec, "o/r")), fields
+
+
+def test_an_annotations_body_that_is_not_a_list_is_2_never_no_record(tmp_path: pathlib.Path) -> None:
+    f = tmp_path / "a.json"
+    f.write_text('{"message": "Bad credentials"}', encoding="utf-8")
+    assert pt.check_main([str(f), "--format", "annotations"]) == 2
+
+
+def test_slurped_annotation_pages_are_flattened(tmp_path: pathlib.Path,
+                                                capsys: pytest.CaptureFixture[str]) -> None:
+    f = tmp_path / "a.json"
+    pages = [[{"title": "other", "message": "x"}], [{"title": pt.TITLE, "message": GOOD}]]
+    f.write_text(json.dumps(pages), encoding="utf-8")
+    assert pt.check_main([str(f), "--format", "annotations", "--repo", "o/r"]) == 0, capsys.readouterr()
 
 
 def test_the_shells_own_crash_record_parses() -> None:

@@ -54,11 +54,13 @@ PyGithub are clients. PyJWT signs; the read and the comparison are this module.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import pathlib
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -205,7 +207,7 @@ def urllib_transport(method: str, path: str, bearer: str, body: dict | None = No
             return json.loads(raw.decode("utf-8")) if raw else {}
     except urllib.error.HTTPError as e:
         raise Blind(f"{method} {path}: HTTP {e.code}") from e
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
         raise Blind(f"{method} {path}: {type(e).__name__}: {e}") from e
 
 
@@ -245,6 +247,7 @@ class Live:
     events: frozenset[str]
     installations: list[dict] | None = None  # None = not read (app level only)
     repos: dict[int, frozenset[str]] = field(default_factory=dict)  # installation id -> names (selected ones)
+    unrevoked: list[int] = field(default_factory=list)  # installations whose scoped token DELETE failed
 
 
 def read_app_level(call: Transport, slug: str, token: str) -> Live:
@@ -279,7 +282,7 @@ def read_with_key(call: Transport, spec: AppSpec, key_pem: str, now: float | Non
             try:
                 call("DELETE", "/installation/token", token, None)
             except Blind:
-                pass  # it expires in an hour regardless; the read itself already succeeded or failed
+                live.unrevoked.append(iid)  # said in the notes: it expires in an hour (metadata: read only)
         live.repos[iid] = frozenset(str(r.get("name") or "").lower() for r in names)
     return live
 
@@ -376,29 +379,56 @@ def _key(name: str, files: dict[str, str], envs: dict[str, str]) -> str | None:
     return None
 
 
+def _crash(e: BaseException) -> str:
+    """An unexpected exception, named by type and WHERE only: its message and locals may hold a
+    value read from GitHub, so neither is printed (a crash is exit 2, never drift)."""
+    tb = traceback.extract_tb(e.__traceback__)
+    at = f" at {pathlib.Path(tb[-1].filename).name}:{tb[-1].lineno}" if tb else ""
+    return f"CRASHED {type(e).__name__}{at}"
+
+
+def audit_one(spec: AppSpec, key: str | None, token: str, app_level: set[str], call: Transport,
+              now: float | None = None) -> tuple[list[str], list[str]]:
+    """One App -> (drift findings, notes). Raises Blind when it could not be read."""
+    notes: list[str] = []
+    if key:
+        live = read_with_key(call, spec, key, now)
+        n_repos = sum(len(v) for v in live.repos.values())
+        notes.append(f"App {spec.name}: read with its key: {len(live.installations or [])} installation(s), "
+                     f"{n_repos} selected repo(s)")
+        notes += [f"App {spec.name}: installation {i}'s scoped read token was NOT revoked (DELETE failed; "
+                  "it expires within the hour, metadata: read only)" for i in live.unrevoked]
+    else:
+        if spec.name not in app_level:
+            raise Blind(f"App {spec.name}: no key, so its installations cannot be read (pass --key-file/--key-env, "
+                        f"or --app-level {spec.name} to audit its permissions and events only)")
+        if not token:
+            raise Blind(f"App {spec.name}: no key and no token for GET /apps/{spec.name}")
+        live = read_app_level(call, spec.name, token)
+        notes.append(f"App {spec.name}: APP LEVEL ONLY (no key here): permissions and events read, "
+                     f"{len(spec.installations)} declared installation(s) NOT looked at")
+    return compare(spec, live), notes
+
+
 def audit(specs: list[AppSpec], keys: dict[str, str | None], token: str, app_level: set[str],
-          call: Transport, now: float | None = None) -> tuple[list[str], list[str]]:
-    """(drift findings, notes). Blind propagates: one App unread = the run could not judge."""
+          call: Transport, now: float | None = None) -> tuple[list[str], list[str], list[str]]:
+    """(drift findings, notes, blind). Each App is read on its own: one App unread is a `blind`
+    line (the run exits 2) and never hides another App's findings."""
     findings: list[str] = []
     notes: list[str] = []
+    blind: list[str] = []
     for spec in specs:
-        key = keys.get(spec.name)
-        if key:
-            live = read_with_key(call, spec, key, now)
-            n_repos = sum(len(v) for v in live.repos.values())
-            notes.append(f"App {spec.name}: read with its key: {len(live.installations or [])} installation(s), "
-                         f"{n_repos} selected repo(s)")
-        else:
-            if spec.name not in app_level:
-                raise Blind(f"App {spec.name}: no key, so its installations cannot be read (pass --key-file/--key-env, "
-                            f"or --app-level {spec.name} to audit its permissions and events only)")
-            if not token:
-                raise Blind(f"App {spec.name}: no key and no token for GET /apps/{spec.name}")
-            live = read_app_level(call, spec.name, token)
-            notes.append(f"App {spec.name}: APP LEVEL ONLY (no key here): permissions and events read, "
-                         f"{len(spec.installations)} declared installation(s) NOT looked at")
-        findings += compare(spec, live)
-    return findings, notes
+        try:
+            f, n = audit_one(spec, keys.get(spec.name), token, app_level, call, now)
+        except Blind as e:
+            blind.append(f"App {spec.name}: {e}" if not str(e).startswith(f"App {spec.name}") else str(e))
+            continue
+        except Exception as e:  # noqa: BLE001 - a crash reading one App is that App unread, exit 2
+            blind.append(f"App {spec.name}: {_crash(e)}")
+            continue
+        findings += f
+        notes += n
+    return findings, notes, blind
 
 
 def main(argv: list[str] | None = None, call: Transport = urllib_transport) -> int:
@@ -435,19 +465,26 @@ def main(argv: list[str] | None = None, call: Transport = urllib_transport) -> i
             raise Blind(f"a key or --app-level names App(s) not audited: {', '.join(sorted(stray))}")
         keys = {s.name: _key(s.name, files, envs) for s in specs}
         token = next((os.environ[v] for v in (a.token_env or ["GH_TOKEN", "GITHUB_TOKEN"]) if os.environ.get(v)), "")
-        findings, notes = audit(specs, keys, token, set(a.app_level), call)
+        findings, notes, blind = audit(specs, keys, token, set(a.app_level), call)
     except Blind as e:
         print(f"{PROG}: COULD NOT LOOK: {e}", file=sys.stderr)
         _summary([f"**{PROG}: could not look** -- {e}"])
+        return 2
+    except Exception as e:  # noqa: BLE001 - a crash is "could not look", never drift
+        print(f"{PROG}: COULD NOT LOOK: {_crash(e)}", file=sys.stderr)
+        _summary([f"**{PROG}: could not look** -- {_crash(e)}"])
         return 2
     for n in notes:
         print(n)
     in_actions = os.environ.get("GITHUB_ACTIONS") == "true"
     for x in findings:
         print(f"::error title={PROG}::{x}" if in_actions else f"DRIFT {x}")
-    print(f"{PROG}: apps={len(specs)} findings={len(findings)}")
-    _summary([f"**{PROG}**: {len(specs)} App(s), {len(findings)} drift finding(s)", *notes, *findings])
-    return 1 if findings else 0
+    for x in blind:
+        print(f"{PROG}: COULD NOT LOOK: {x}", file=sys.stderr)
+    print(f"{PROG}: apps={len(specs)} findings={len(findings)} unread={len(blind)}")
+    _summary([f"**{PROG}**: {len(specs)} App(s), {len(findings)} drift finding(s), {len(blind)} App(s) unread",
+              *notes, *findings, *(f"could not look: {x}" for x in blind)])
+    return 2 if blind else 1 if findings else 0
 
 
 def _summary(lines: list[str]) -> None:

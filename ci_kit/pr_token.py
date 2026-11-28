@@ -247,6 +247,11 @@ def classify(rec: Record, repo: str | None = None) -> list[str]:
         f.append(f"mode={rec.mode} but source={rec.source} (reason={rec.reason}): asked for the App, did not get it")
     if rec.mode == "pat" and rec.source == "app":
         f.append("source=app in mode=pat: decide() never does this -- contract violation")
+    elif rec.source == "app" and (rec.app != "minted" or rec.reason != "configured" or rec.login == "unknown"):
+        f.append(f"source=app with app={rec.app} reason={rec.reason} login={rec.login}: the App acted without a "
+                 "minted token, a configured reason or an identity -- contract violation")
+    if rec.mode == "pat" and rec.source == "pat" and rec.reason != "mode-pat":
+        f.append(f"source=pat in mode=pat with reason={rec.reason}: decide() only says mode-pat -- contract violation")
     if rec.source == "none" and not f:
         f.append(f"source=none (reason={rec.reason}): no token acted")
     if repo is not None and rec.repo.lower() != repo.lower():
@@ -415,7 +420,11 @@ def check(text: str, fmt: str = "log", repo: str | None = None) -> tuple[list[di
     classify() says, and NO record at all (a token step that ran must print one). Pure."""
     if fmt == "annotations":
         data = json.loads(text)
-        lines = records_in_annotations(data if isinstance(data, list) else [])
+        if isinstance(data, list) and data and all(isinstance(x, list) for x in data):
+            data = [a for page in data for a in page]  # `gh api --paginate --slurp`: a list of pages
+        if not isinstance(data, list):  # an API error body ({"message": ...}) is a failed read, not "no record"
+            raise ValueError(f"annotations input is a JSON {type(data).__name__}, not a list")
+        lines = records_in_annotations(data)
     else:
         lines = records_in_log(text) if fmt == "log" else [x for x in text.splitlines() if x.strip()]
     recs: list[dict] = []

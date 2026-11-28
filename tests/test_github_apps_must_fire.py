@@ -227,10 +227,48 @@ def test_any_failed_read_is_2_must_fire(key: tuple[str, object], where: str) -> 
     assert rc == 2 and "HTTP 500" in out
 
 
-def test_a_failed_revoke_does_not_blind_the_read(key: tuple[str, object]) -> None:
+def test_a_failed_revoke_does_not_blind_the_read_and_is_said(key: tuple[str, object]) -> None:
     w = _world(key)
     w.fail = "/installation/token"
-    assert st.run(st.MANIFEST, w, key[0])[0] == 0
+    rc, out = st.run(st.MANIFEST, w, key[0])
+    assert rc == 0 and "scoped read token was NOT revoked" in out, out
+
+
+def test_one_unread_app_never_hides_another_apps_drift_must_fire(key: tuple[str, object],
+                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    """A keyed App that drifted + an app-level App GitHub will not show: exit 2, and the first
+    App's drift is still printed (the reviewer's probe: it was thrown away)."""
+    monkeypatch.setenv("GH_TOKEN", "t")
+    m = copy.deepcopy(st.MANIFEST)
+    m["apps"].append({"name": "other-bot", "app_id": 7, "default_permissions": {}, "installations": []})
+    w = _world(key)
+    _mut_add(w)
+    rc, out = st.run(m, w, key[0], "--app-level", "other-bot")
+    assert rc == 2, out
+    assert "WIDENED administration" in out and "COULD NOT LOOK: App other-bot" in out and "unread=1" in out
+
+
+def test_a_crash_reading_an_app_is_2_never_drift_must_fire(key: tuple[str, object]) -> None:
+    w = _world(key)
+    w.installations[0]["account"] = "not-a-mapping"
+    rc, out = st.run(st.MANIFEST, w, key[0])
+    assert rc == 2 and "CRASHED AttributeError at github_apps.py:" in out, out
+    assert "not-a-mapping" not in out  # a crash names its type and place, never a value
+
+
+def test_a_broken_http_response_is_blind_not_a_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    import http.client
+
+    def broken(*a: object, **k: object) -> object:
+        raise http.client.IncompleteRead(b"")
+    monkeypatch.setattr(ga.urllib.request, "urlopen", broken)
+    with pytest.raises(ga.Blind, match="IncompleteRead"):
+        ga.urllib_transport("GET", "/app", "x")
+
+
+def test_the_reusable_never_globs_its_name_lists() -> None:
+    text = (pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "app-audit.yml").read_text(encoding="utf-8")
+    assert "set -f" in text and text.index("set -f") < text.index("for n in $APP_LEVEL")
 
 
 def test_no_key_without_app_level_is_2_must_fire(key: tuple[str, object], monkeypatch: pytest.MonkeyPatch) -> None:

@@ -126,8 +126,10 @@ unparseable, never read as healthy.
 
 ```bash
 gh run view <run> --log --job <job> | ci-pr-token-check --repo owner/name
-gh api repos/owner/name/check-runs/<job>/annotations | ci-pr-token-check --format annotations
+gh api --paginate --slurp repos/owner/name/check-runs/<job>/annotations | ci-pr-token-check --format annotations
 ```
 
 Exit 0: every record is clean. Exit 1: a finding, an unparseable record, or no record at all (a
-token step that ran must print one). Exit 2: the input could not be read.
+token step that ran must print one). Exit 2: the input could not be read, including an annotations
+input that is not a JSON list (an API error body). `--slurp` pages are flattened: without
+`--paginate` a job with more than 30 annotations is read from its first page only.
