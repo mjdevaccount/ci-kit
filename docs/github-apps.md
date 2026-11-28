@@ -53,11 +53,20 @@ The manifest belongs to the repository that owns the Apps, never to ci-kit.
 | App has | reads | sees |
 |---|---|---|
 | its private key (`--key-file NAME=PATH`, `--key-env NAME=VAR`) | a JWT (RS256, PyJWT) for `GET /app` and `GET /app/installations`; per `selected` installation, an installation token scoped to `metadata: read` for `GET /installation/repositories`, revoked after use | everything |
-| no key, `--app-level NAME` | `GET /apps/<slug>` with `--token-env` (default `GH_TOKEN`, then `GITHUB_TOKEN`) | permissions and events only. The output names the installations it did not look at, on every run |
+| no key, `--app-level NAME` | `GET /apps/<slug>` with `--token-env` (default `GH_TOKEN`, then `GITHUB_TOKEN`), or with `--app-level-token-from KEYED` | permissions and events only. The output names the installations it did not look at, on every run |
 | no key, no `--app-level` | nothing | exit 2 |
 
 Keys are never read from argv and nothing prints a key, a JWT or a token. Pages are followed to
 the end (100 per page).
+
+**A private App.** `GET /apps/<slug>` answers a PRIVATE App only to an installation token or a
+user token. A workflow's `GITHUB_TOKEN` gets HTTP 403, which is exit 2. `--app-level-token-from
+KEYED` mints an installation token from an App audited here with its key (scoped to
+`metadata: read`, on its installation on an account the app-level Apps are declared on, else its
+first unsuspended one) and reads the app-level Apps with it,
+then revokes it. That works for an App on the same account, needs no long-lived token stored
+anywhere, and every run's output says the token was used and revoked. If the mint fails, only the
+app-level Apps are unread (exit 2). The keyed App's own findings still print.
 
 ## Exit codes
 
@@ -67,12 +76,46 @@ the end (100 per page).
 | 1 | drift: a permission widened or narrowed (added or dropped counts), an event added or dropped, an installation on an undeclared account or a declared one missing, a suspended installation, `all` vs `selected`, a repository installed but undeclared or declared but not installed, an installation's permissions or events differing from the declaration, an id that differs |
 | 2 | could not look: the manifest unreadable or invalid, a key unreadable or refused, a key belonging to another App, any API read failing, a flag naming no declared App |
 
+## Checking a manifest edit before merge (`--validate`)
+
+The audit holds a private key, so it runs on a schedule on a trusted runner and never on a pull
+request's code. `--validate` is the half that can run on a pull request. It parses the manifest
+exactly as the audit does and stops there. It reads no key file or variable and makes no network
+call, so it needs no secret.
+
+Pass it the SAME App flags the scheduled run passes (`--key-env`/`--key-file`, `--app-level`,
+`--app-level-token-from`, `--only`). Then it also holds the schedule to the manifest, as the audit
+would:
+- every flag must name a declared App;
+- every App must be named by a key flag or `--app-level` (an App added to the manifest but not to
+  the schedule would be unread);
+- the `--app-level-token-from` App must have a key flag.
+
+Key flags are checked by NAME only: their files and variables are never opened. With no App flags
+at all, only the manifest's shape is checked.
+
+| exit | when |
+|---|---|
+| 0 | the manifest is one the audit can judge live against |
+| 1 | the manifest is invalid: a missing or unknown key, a level outside `read`/`write`/`admin`, a selection outside `all`/`selected`, a duplicated App or account, a file that does not parse; or the App flags do not cover it (above). Each is an `::error` annotation in Actions |
+| 2 | could not look: the file is missing or not UTF-8, PyYAML is not installed |
+
+```yaml
+- run: pip install "ci-kit[apps] @ git+https://github.com/mjdevaccount/ci-kit@v1.55.0"
+- run: >-
+    ci-app-audit --validate --manifest ci/github-apps.yml
+    --key-env example-bot=EXAMPLE_BOT_KEY --app-level other-app --app-level-token-from example-bot
+```
+
 ## CLI
 
 ```bash
 ci-app-audit --manifest ci/github-apps.yml --key-env example-bot=EXAMPLE_BOT_KEY \
              --app-level other-app
 ci-app-audit --manifest ci/github-apps.yml --key-file example-bot=/path/to/key.pem --only example-bot
+ci-app-audit --manifest ci/github-apps.yml --key-env example-bot=EXAMPLE_BOT_KEY \
+             --app-level private-app --app-level-token-from example-bot
+ci-app-audit --manifest ci/github-apps.yml --validate   # keyless, no network: the pre-merge check
 ci-app-audit --selftest   # a synthetic App on an in-process fake GitHub: bad = 1, good = 0, blind = 2
 ```
 
@@ -93,6 +136,7 @@ jobs:
       manifest: ci/github-apps.yml
       keyed-app: example-bot
       app-level: other-app
+      app-level-reader: true   # other-app is private: read it with example-bot's scoped token
     secrets:
       app-private-key: ${{ secrets.EXAMPLE_BOT_PRIVATE_KEY }}
 ```
