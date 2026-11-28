@@ -29,9 +29,28 @@ TOOLS = ("bash", "git", "ssh-agent", "ssh-add", "ssh-keygen")
 MISSING = [t for t in TOOLS if shutil.which(t) is None]
 # by full path: on Windows, CreateProcess finds System32\bash.exe (WSL) before PATH
 BASH = shutil.which("bash") or "bash"
-# CI must never skip this suite into a blind pass: the hosted image has every tool
-needs_tools = pytest.mark.skipif(bool(MISSING) and not os.environ.get("CI"),
-                                 reason=f"not on PATH: {MISSING}")
+
+
+def _bash_ssh_version() -> str:
+    """`ssh -V` as the BASH the script runs under resolves it (not as Python's PATH does)."""
+    if MISSING:
+        return ""
+    r = subprocess.run([BASH, "-c", "ssh -V"], capture_output=True, text=True, timeout=30)
+    return (r.stderr or r.stdout).strip()
+
+
+# git_ssh.sh is written for a Linux runner's openssh-client. On a Windows workstation whose bash
+# PATH routes ssh/ssh-add to Win32-OpenSSH (a shim ahead of Git's /usr/bin -- `ssh -V` says
+# OpenSSH_for_Windows), `ssh-add -` refuses the piped key ("invalid format") and the agent is a
+# Windows service, not the per-step agent the script starts and kills: the suite would be testing
+# a tool the script never meets. Git for Windows' own MSYS OpenSSH passes the suite as-is.
+WIN32_OPENSSH = "OpenSSH_for_Windows" in _bash_ssh_version()
+# CI must never skip this suite into a blind pass: the hosted image has every tool, and a CI image
+# whose bash reached Win32-OpenSSH would be a runner the script cannot serve -- red, not skipped
+needs_tools = pytest.mark.skipif(
+    (bool(MISSING) or WIN32_OPENSSH) and not os.environ.get("CI"),
+    reason=f"not on PATH: {MISSING}" if MISSING else
+    "bash's ssh is Win32-OpenSSH (OpenSSH_for_Windows): git_ssh.sh targets openssh-client on Linux")
 GITHUB_KEYS = {  # `gh api meta --jq .ssh_keys`, 2026-11-11: the script's pins, checked by VALUE
     "ssh-ed25519": "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
     "ecdsa-sha2-nistp256": ("AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5"
