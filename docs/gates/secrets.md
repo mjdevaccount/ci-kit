@@ -79,7 +79,7 @@ selectors, tag characters, Hangul fillers, soft hyphen, CGJ, Braille blank, C0/C
 NUL in a `.ts` / `.cs` string included), and FEFF past byte 0. **Write the escape; there is no
 waiver.** A reviewer cannot tell a harmless invisible character from a bidi override that makes
 code read differently from how it runs, because both are invisible in the diff. So the rule is
-"none, written raw": `​` in a Python or JSON string, the bare emoji in markdown.
+"none, written raw": `\u200b` in a Python or JSON string, the bare emoji in markdown.
 
 - **`--renovate`** (v1.49.0) ALSO refuses NBSP, the Unicode spaces and U+2028/2029: Renovate's
   pinned `hiddenUnicodeCharactersRegex`, so the gate fires before the dependency dashboard does.
