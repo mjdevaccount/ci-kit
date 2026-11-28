@@ -25,7 +25,8 @@ instead of asking GitHub -- offline runs and must-fire fixtures.
                         [--base origin/main] [--head HEAD] [--prs-json FILE] [--root DIR] [--selftest]
 
 Exit 0 clean, 1 findings, 2 could not look (no token, no repo, GitHub unreachable, git failed, an
-unreadable `--prs-json`): a checker that cannot reach the PR list must not claim the number free.
+unreadable `--prs-json`, or no file on the base or the branch matching `--dir`/`--pattern`): a
+checker that cannot reach the PR list must not claim the number free.
 """
 from __future__ import annotations
 
@@ -200,7 +201,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         except subprocess.CalledProcessError as e:
             print(f"{GATE}: could not look: git failed ({(e.stderr or '').strip()})", file=sys.stderr)
             raise SystemExit(2) from e
-        mine = numbers(added, mig)
+        mine, on_base_nums = numbers(added, mig), numbers(on_base, mig)
+        if not mine and not on_base_nums:
+            print(f"{GATE}: could not look -- no file on {a.base} or added by this branch matches "
+                  f"{mig.pattern!r}: a mistyped --dir/--pattern rules on nothing", file=sys.stderr)
+            raise SystemExit(2)
         if not mine:
             return []
         branch = os.environ.get("GITHUB_HEAD_REF") or git("branch", "--show-current").strip()
@@ -214,7 +219,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Blind as e:
             print(f"{GATE}: could not look: {e} -- cannot prove {sorted(mine)} free", file=sys.stderr)
             raise SystemExit(2) from e
-        base_nums = {k: v for k, v in numbers(on_base, mig).items() if v not in added}
+        base_nums = {k: v for k, v in on_base_nums.items() if v not in added}
         return findings(mine, base_nums, prs, _me(), branch, mig)
 
     return site_lint.check([], gate=GATE, scan=scan, selftest=selftest)

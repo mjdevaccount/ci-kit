@@ -49,6 +49,12 @@ def test_no_guard_is_2(new_repo) -> None:
     assert r.returncode == 2, r.stdout + r.stderr
 
 
+def test_an_empty_suffix_or_prefix_is_2(new_repo) -> None:
+    repo, _ = run(new_repo, "guards_have_tests", {**GUARDS, "tests/test_a.py": TESTED}, *ARGS)
+    assert again("guards_have_tests", repo, *ARGS, "--suffix=").returncode == 2
+    assert again("guards_have_tests", repo, *ARGS, "--prefix=").returncode == 2
+
+
 def test_an_unparseable_test_is_2(new_repo) -> None:
     repo, _ = run(new_repo, "guards_have_tests", {**GUARDS, "tests/test_a.py": TESTED}, *ARGS)
     write(repo / "tests/test_a.py", "def broken(:\n")

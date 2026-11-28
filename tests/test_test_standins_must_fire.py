@@ -52,6 +52,11 @@ def test_a_baselined_file_passes_and_growth_fails(new_repo) -> None:
     assert r.returncode == 1 and "2 site(s), baseline 1" in r.stdout, r.stdout + r.stderr
 
 
+def test_a_package_no_test_reaches_is_2(new_repo) -> None:
+    _, r = run(new_repo, "standins", _files(**{"tests/test_feed.py": LAMBDA}), "--dir", "tests:2", "--package", "ap")
+    assert r.returncode == 2 and "imports or names a --package" in r.stderr, r.stdout + r.stderr
+
+
 def test_no_package_and_an_empty_dir_are_2(new_repo) -> None:
     repo, r = run(new_repo, "standins", _files(), "--dir", "tests:2")
     assert r.returncode == 2 and "--package" in r.stderr, r.stdout + r.stderr

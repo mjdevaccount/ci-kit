@@ -25,8 +25,8 @@ a fake that must not carry the signature takes `# standin-ok: <why>` on any line
   ci-test-standins --dir tests[:FLOOR] --package NAME [--package ...] [--exempt PATH ...]
                    [--baseline ci/test_standins_baseline.txt] [--write-baseline] [--root DIR] [--selftest]
 
-Exit 0 clean, 1 findings, 2 could not look (no --package, a dir under its floor, a file that will
-not decode or parse).
+Exit 0 clean, 1 findings, 2 could not look (no --package, or no scanned file imports or names one;
+a dir under its floor; a file that will not decode or parse).
 """
 from __future__ import annotations
 
@@ -63,6 +63,8 @@ class Reader:
     def __init__(self, packages: Sequence[str]) -> None:
         self.packages = tuple(packages)
         self.bare: list[str] = []
+        #: files that import a package or name one in a dotted string: 0 means --package reached nothing
+        self.reached = 0
 
     def _ours(self, dotted: str) -> bool:
         return dotted.split(".", 1)[0] in self.packages
@@ -102,6 +104,9 @@ class Reader:
     def findings_in(self, source: str, origin: str) -> list[int]:
         tree = astread.parse(source, origin, gate=GATE)
         imports = self._imports(tree)
+        if imports or any(isinstance(n, ast.Constant) and isinstance(n.value, str) and "." in n.value
+                          and self._ours(n.value) for n in ast.walk(tree)):
+            self.reached += 1
         local_defs = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)}
         waived, bare = site_lint.waived_lines(source, WAIVER)
         self.bare.extend(f"{origin}:{ln} bare `# {WAIVER}:` with no reason -- say WHY the fake may not "
@@ -119,8 +124,8 @@ from unittest import mock
 from unittest.mock import patch
 
 import pkg.loader as src
-from pkg import calendar
-from pkg.repos.picker import PickerRepo
+from pkg import clock
+from pkg.repos.store import Store
 
 
 def _fake_run(symbols, period):
@@ -134,9 +139,9 @@ async def _fake_rows(self, sym):
 def test_a(monkeypatch):
     monkeypatch.setattr(src, "run", lambda symbols, period: {"rows": 1})  # BAD
     monkeypatch.setattr(src, "run", _fake_run)  # BAD
-    monkeypatch.setattr(PickerRepo, "rows", _fake_rows)  # BAD
-    monkeypatch.setattr("pkg.calendar.prev_session", lambda d: d)  # BAD
-    monkeypatch.setattr(calendar.dt, "date", lambda: None)  # BAD
+    monkeypatch.setattr(Store, "rows", _fake_rows)  # BAD
+    monkeypatch.setattr("pkg.clock.today", lambda d: d)  # BAD
+    monkeypatch.setattr(clock.dt, "date", lambda: None)  # BAD
     with mock.patch("pkg.loader.run", lambda *a, **k: None):  # BAD
         pass
     with patch.object(src, "run", new=_fake_run):  # BAD
@@ -152,7 +157,7 @@ import json
 from unittest import mock
 
 import pkg.loader as src
-from pkg.repos.picker import PickerRepo
+from pkg.repos.store import Store
 
 
 def _fake_run(symbols, period):
@@ -163,7 +168,7 @@ def test_b(monkeypatch):
     # A comment may say monkeypatch.setattr(src, "run", lambda: 1): comments never enter the AST.
     monkeypatch.setattr(src, "run", mock.create_autospec(src.run, return_value={"rows": 1}))
     monkeypatch.setattr(src, "run", mock.create_autospec(src.run, side_effect=_fake_run))
-    with mock.patch.object(PickerRepo, "rows", autospec=True, return_value=[]):
+    with mock.patch.object(Store, "rows", autospec=True, return_value=[]):
         pass
     monkeypatch.setattr(src, "BATCH", 5)
     monkeypatch.setattr(json, "dumps", lambda o: "{}")
@@ -200,10 +205,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     def scan() -> dict[str, int]:
         reader.bare.clear()
+        reader.reached = 0
         by_dir = discover.count_by_dir(discover.tracked(floors, root=root), floors)
         discover.require_scanned_each(by_dir, floors, gate=GATE)
         counts, scanned[0] = site_lint.count_sites(root, list(floors), [site_lint.norm_dir(e) for e in a.exempt],
                                                    reader.findings_in, gate=GATE)
+        if not reader.reached:
+            print(f"{GATE}: could not look -- none of {scanned[0]} test file(s) imports or names a --package "
+                  f"({', '.join(a.package)}): a misspelt package is a gate that cannot fire", file=sys.stderr)
+            raise SystemExit(2)
         return counts
 
     return site_lint.run(

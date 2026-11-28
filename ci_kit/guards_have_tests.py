@@ -115,11 +115,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--suffix", default=".py")
     ap.add_argument("--deselected-mark", action="append", default=[], metavar="MARK")
     a, root, floors = site_lint.parse_gate(ap, argv, gate=GATE, selftest=selftest)
+    if not a.suffix or not a.prefix:
+        print(f"{GATE}: an empty --prefix/--suffix makes every file a guard or every corpus a match", file=sys.stderr)
+        return 2
     baseline = site_lint.under(root, a.baseline)
     seen = types.SimpleNamespace(tests=0, guards=[], desel=set())
 
     def guards() -> list[str]:
-        out = sorted(pathlib.PurePosixPath(rel).name[: -len(a.suffix)]
+        out = sorted(pathlib.PurePosixPath(rel).name.removesuffix(a.suffix)
                      for rel in discover.tracked([a.guards], suffix=a.suffix, root=root)
                      if pathlib.PurePosixPath(rel).name.startswith(a.prefix))
         discover.require_scanned(len(out), gate=f"{GATE}[guards]", dirs=[a.guards])

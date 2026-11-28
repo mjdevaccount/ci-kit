@@ -65,6 +65,21 @@ def test_a_missing_base_an_unreadable_list_and_no_repo_are_2(new_repo, monkeypat
     assert r.returncode == 2 and "no --repo" in r.stderr, r.stdout + r.stderr
 
 
+def test_a_dir_or_pattern_that_matches_nothing_is_2(new_repo) -> None:
+    repo = _committed(new_repo, MINE)
+    args = _replay(repo, {"number": 1, "head": "older", "added": ["migrations/387_b.sql"]})
+    for wrong in (("--dir", "migration"), ("--dir", "."), ("--pattern", r"V(\d+)__[^/]+\.sql")):
+        r = again(MOD, repo, *args, *wrong)
+        assert r.returncode == 2 and "rules on nothing" in r.stderr, (wrong, r.stdout + r.stderr)
+
+
+def test_a_branch_adding_nothing_over_a_matching_base_passes(new_repo) -> None:
+    repo = _committed(new_repo, MINE)
+    write(repo / "prs.json", "[]")
+    r = again(MOD, repo, "--base", "HEAD", "--prs-json", "prs.json")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 def test_a_pattern_without_a_group_is_2(new_repo) -> None:
     repo = _committed(new_repo, MINE)
     assert again(MOD, repo, "--pattern", r"\d+_a\.sql").returncode == 2
