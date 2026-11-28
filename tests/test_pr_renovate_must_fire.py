@@ -343,9 +343,9 @@ def test_replay_ti977_978_an_idle_queue_lands_the_lowest_clean_renovate_pr_must_
 
 @pytest.mark.parametrize(("prs", "bodies", "running", "why"), [
     # UNSTABLE: a non-required check pending (stability-days, the supply-chain age gate) or red
-    ([_pr(976, merge="UNSTABLE", statusCheckRollup=[*GREEN, STABILITY])], {976: (ON, None)}, {}, "(UNSTABLE)"),
+    ([_pr(976, merge="UNSTABLE", statusCheckRollup=[*GREEN, STABILITY])], {976: (ON, None)}, {}, "HELD BY POLICY"),
     # CLEAN by GitHub, but a check here still reads pending (a status GitHub has not folded in yet)
-    ([_pr(977, merge="CLEAN", statusCheckRollup=[*GREEN, STABILITY])], {977: (ON, None)}, {}, "(CLEAN)"),
+    ([_pr(977, merge="CLEAN", statusCheckRollup=[*GREEN, STABILITY])], {977: (ON, None)}, {}, "HELD BY POLICY"),
     # the preset holds it (python base image, a major): Disabled is never landed, CLEAN or not
     ([_pr(968, merge="CLEAN", statusCheckRollup=GREEN)], {968: (OFF, None)}, {}, "Automerge: Disabled"),
     ([_pr(977, merge="CLEAN", statusCheckRollup=GREEN, labels=("autoland-off",))], {977: (ON, None)}, {},
@@ -369,6 +369,23 @@ def test_an_unready_held_or_busy_case_is_never_landed_must_not_fire(monkeypatch:
     rc, summary = _run(monkeypatch, prs, world, hold=False)
     assert rc == 0 and world.landed() == [], summary
     assert any(why in s for s in summary), summary
+
+
+def test_a_pr_held_only_by_stability_days_reads_held_by_policy_and_is_never_armed_must_fire(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # trade-infra#976 (langfuse 4.88.0, 2026-11-28): every check green but `renovate/stability-days` pending.
+    # Read as "mergeable as it stands" it looked STUCK (the operator: "Why are we waiting on this shit???"),
+    # and once main moved it would have been ARMED -- GitHub then merges on the REQUIRED checks only, past
+    # the age gate. dies to: age_held() missing, or the hold sitting after the arm decision
+    for merge in ("UNSTABLE", "BEHIND", "BLOCKED"):
+        world = World({976: (ON, None)})
+        rc, summary = _run(monkeypatch, [_pr(976, merge=merge, statusCheckRollup=[*GREEN, STABILITY])], world,
+                           hold=False)
+        assert rc == 0 and world.armed() == [] and world.landed() == [], (merge, summary)
+        assert any(s.startswith("#976: Renovate PR left out of the queue -- HELD BY POLICY") for s in summary)
+    # once the status passes it joins like any other (must-not-fire direction: no permanent hold)
+    passed = {**STABILITY, "state": "SUCCESS"}
+    assert pr_renovate.verdict(_pr(976, merge="BEHIND", statusCheckRollup=[*GREEN, passed]), ON, None)[0]
 
 
 def test_a_refused_land_is_a_red_run_a_raced_one_is_not_must_fire(monkeypatch: pytest.MonkeyPatch,

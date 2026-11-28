@@ -167,6 +167,20 @@ def ticked(body: str) -> str | None:
     return body[:at] + tail if k else None
 
 
+STABILITY = "renovate/stability-days"  # Renovate's minimumReleaseAge status: PENDING until the age passes
+AGE_HELD = (f"HELD BY POLICY, not stuck: `{STABILITY}` is pending (the preset's minimumReleaseAge, the "
+            "supply-chain age gate); it joins the queue by itself once that status passes")
+
+
+def age_held(p: dict) -> bool:
+    """`renovate/stability-days` is on the head and not yet success. Pure. Such a PR is HELD BY
+    POLICY (operator 2026-11-28: shown as held, never as stuck), never armed and never landed."""
+    for c in p.get("statusCheckRollup") or []:
+        if (c.get("context") or c.get("name")) == STABILITY:
+            return str(c.get("state") or c.get("conclusion") or "").upper() != "SUCCESS"
+    return False
+
+
 def verdict(p: dict, body: str, disabled: dict | None) -> tuple[bool, str]:
     """(arm?, why) for one candidate. Pure: the policy the tests pin. `disabled` = the PR's last
     AutoMergeDisabledEvent ({reasonCode, createdAt, actor}) or None."""
@@ -184,6 +198,10 @@ def verdict(p: dict, body: str, disabled: dict | None) -> tuple[bool, str]:
     merge = str(p.get("mergeStateStatus") or "UNKNOWN").upper()
     if conflicted(p):
         return False, CONFLICT
+    if age_held(p):
+        # BEFORE the arm: armed, GitHub merges on the REQUIRED checks only, and stability-days is
+        # never required -- the arm would land it past the supply-chain age gate the preset sets
+        return False, AGE_HELD
     if merge in _MERGEABLE_NOW:
         return False, (f"mergeable as it stands ({merge}): GitHub would merge it the moment it is armed, past "
                        "the queue; armed once main moves")
