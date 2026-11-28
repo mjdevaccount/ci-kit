@@ -611,7 +611,7 @@ def test_every_reason_the_code_emits_is_listed_and_parseable_must_fire() -> None
     emitted = _emitted_reasons()
     assert {"decide-crashed", "scope-invalid", "mint-failed", "identity-unreadable"} <= emitted  # the scan sees them
     assert emitted <= set(pt.REASONS)
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = (ROOT / "docs/pr-ops/push-token.md").read_text(encoding="utf-8")
     listed = re.search(r"reason=<([^>]+)>", readme.split("THE RECORD:", 1)[1]).group(1).split("|")
     assert set(listed) == set(pt.REASONS)
     assert all("=" not in r and " " not in r for r in pt.REASONS)

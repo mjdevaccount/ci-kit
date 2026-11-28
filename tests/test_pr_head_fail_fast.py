@@ -607,4 +607,4 @@ def test_review2_the_wait_is_clamped_to_300_s_with_a_warning(monkeypatch, capsys
     # what the wait holds is said where a consumer sets it: the verdict job shares the pool
     for name in ("head-verdict-wait-seconds", "scarce-pools", "head-fail-fast"):
         assert "verdict" in inputs[name]["description"] and "pool" in inputs[name]["description"], name
-    assert "blocks its own verdict" in (root / "README.md").read_text(encoding="utf-8")
+    assert "blocks its own verdict" in (root / "docs/pr-ops/autoupdate.md").read_text(encoding="utf-8")

@@ -182,11 +182,11 @@ on:
         type: boolean
         default: false
       secure-runner:
-        description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- README "Generic names"
+        description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md "Generic names"
         type: string
         default: ""
       sealed-runner:
-        description: the sealed pool's runs-on, a JSON label list ('' = the CI_SEALED_RUNNER switch, else hosted) -- README "Generic names"
+        description: the sealed pool's runs-on, a JSON label list ('' = the CI_SEALED_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md "Generic names"
         type: string
         default: ""
     secrets:

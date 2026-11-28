@@ -132,7 +132,7 @@
 #       secrets:
 #         token: ${{ secrets.PR_UPDATE_TOKEN }}
 #         EDGE_BOT_PRIVATE_KEY: ${{ secrets.EDGE_BOT_PRIVATE_KEY }}
-#   then set the repo variable PR_TOKEN_SOURCE=app (README "The push token" has the three stages).
+#   then set the repo variable PR_TOKEN_SOURCE=app (docs/pr-ops/push-token.md has the three stages).
 #
 # HELD PRs (`update-held`, default off; ci_kit/pr_held.py): a PR held for review (open, not armed,
 # e.g. `autoland-off`) is also kept current with the base -- but only on a `schedule` or
@@ -283,11 +283,11 @@ on:
         type: string
         default: 'renovate'
       app-client-id:
-        description: the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- README "Generic names"
+        description: the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- docs/pr-ops/push-token.md "Generic names"
         type: string
         default: ""
       secure-runner:
-        description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- README "Generic names"
+        description: the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md "Generic names"
         type: string
         default: ""
       head-fail-fast:
@@ -318,10 +318,10 @@ on:
         description: fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs --, with train-workflow, which dispatches, and with cancel-doomed-runs), administration read (cancel-doomed-runs reads whether the base is strict), commit statuses RW with queue-hold, on the caller repo. Not required since v1.37.0 (token-source app-required never reads it); empty while the PAT acts is still a red run
         required: false
       app-private-key:
-        description: the App's private key, with the app-client-id input -- README "Generic names"
+        description: the App's private key, with the app-client-id input -- docs/pr-ops/push-token.md "Generic names"
         required: false
       EDGE_BOT_PRIVATE_KEY:
-        description: DEPRECATED alias of app-private-key -- README "Generic names"
+        description: DEPRECATED alias of app-private-key -- docs/pr-ops/push-token.md "Generic names"
         required: false
       ntfy-url:
         description: an ntfy topic URL to page on a NEW conflict ('' = no page)

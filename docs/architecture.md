@@ -6,6 +6,49 @@ scripts against the caller's checkout, a set of reusable GitHub workflows
 ([reusable-workflows.md](reusable-workflows.md)), and a pre-commit hooks manifest
 (`.pre-commit-hooks.yaml`).
 
+## Four ways to run a gate
+
+**A reusable workflow** ([reusable-workflows.md](reusable-workflows.md)), pinned `@v1`. The check
+is named `<caller job> / <called job>`, e.g. `doc-refs / lint`.
+
+**The composite action** as a step of your own job:
+
+```yaml
+- uses: mjdevaccount/ci-kit@v1
+  with:
+    tool: ci-line-cap
+    args: --dir src --cap 400
+```
+
+It installs ci-kit with uvx from the action's OWN download (`$GITHUB_ACTION_PATH`), so it runs
+exactly the source the workflow was pinned to: no second ref to drift, no network fetch to fail
+half-way, no credential to install it. It installs the extra a tool needs. `release_bin` tools get
+the job's own token for the REST fallback (`CI_KIT_GITHUB_TOKEN`), unset for every other tool.
+`ci-pr-autoupdate` sets the action's `relock` and `heal` outputs. The `ci-review-*` scripts are
+the review gate's own steps and are not runnable through the action (an unknown tool is exit 2).
+
+**uvx**, locally or from a Makefile:
+
+```bash
+uvx --from git+https://github.com/mjdevaccount/ci-kit@v1.51.0 ci-doc-lint --root ../x
+uvx --from git+https://github.com/mjdevaccount/ci-kit@v1.51.0 ci-pin-drift --file uv.lock --remote https://github.com/mjdevaccount/ci-kit.git
+uvx --from git+https://github.com/mjdevaccount/ci-kit@v1.51.0 ci-dup-code --write-baseline   # once: freezes today's clones; later runs refuse to grow it
+```
+
+A gate whose checks import your code (`ci-guard-selfproof`, the SQL gates with a repo `Config`)
+runs where your dependencies are installed instead: `uv run`, with ci-kit as a dev dependency
+([library.md](library.md), [gates/sql.md](gates/sql.md)).
+
+**pre-commit**, from `.pre-commit-hooks.yaml`: hooks `doc-refs`, `secret-argv`, `hidden-unicode`,
+`dup-code`. Each scans the WHOLE tracked tree, not the staged files: a doc goes stale when the file
+it names is deleted, and that commit touches no markdown at all.
+
+```yaml
+- repo: https://github.com/mjdevaccount/ci-kit
+  rev: v1.51.0
+  hooks: [{ id: doc-refs }, { id: secret-argv }, { id: dup-code }]
+```
+
 ## The exit contract: 0 / 1 / 2
 
 **Every tool exits 0 clean, 1 findings, 2 did-not-finish-looking.**
