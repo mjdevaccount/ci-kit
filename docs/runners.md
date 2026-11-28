@@ -1,6 +1,6 @@
 # Self-hosted runner capacity (`ci-runners`, `runners` extra)
 
-`ci_kit/runners/` (v1.51.0, `renders` v1.52.0, `supervisor` v1.54.0, scripts v1.56.0, `supervisor.sh` + `--verify-prom` v1.57.0, `runner_impl_info` + `--scripts-sha256` v1.58.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
+`ci_kit/runners/` (v1.51.0, `renders` v1.52.0, `supervisor` v1.54.0, scripts v1.56.0, `supervisor.sh` + `--verify-prom` v1.57.0, `runner_impl_info` + `--scripts-sha256` v1.58.0, Python twins `ci_kit.runners.tick` v1.59.0; **the `runners` extra**, `ci-kit[runners]`: pyyaml). Self-hosted GitHub
 runner CAPACITY as a library: the capacity file's schema, the host / guest / runner-VM budget
 invariants (measured `peak_mb` against real RAM, floors, ceilings, the live room), one JSON render
 per runner block for a supervisor to read with jq, and the runtime admission rule (`alloc.jq`,
@@ -96,6 +96,26 @@ environment they are sourced in:
 of every script sorted by name, 12 hex characters. A host recomputes it from the installed copies
 with `LC_ALL=C sha256sum -t -- <names, sorted> | sha256sum | cut -c1-12`, so a supervisor can publish
 what it runs and a `renders` template holds that to what the kit pins.
+
+The scripts ship mode 644, and that is deliberate: the package copy is DATA (`scripts()` reads its
+bytes), `write_scripts` copies bytes, so the consumer's copy takes its own umask, and the mode a host
+runs with is the installer's to set -- `chmod 755` where a unit's ExecStart runs `supervisor.sh`
+directly, read-only where a consumer's shim SOURCES it. A mode is not in `scripts_sha256` (bytes
+only), so it is never drift either way.
+
+### Python twins (`ci_kit.runners.tick`, v1.59.0)
+
+The tick's PURE decisions have Python twins, for replaying a trace or testing a policy without a
+host: `carry_head` (the drain head carried over a blind run, bounded), `young_table` /
+`young_charge` / `young_of` (the room young runners will still take), `since_start`, `refill_more`
+(does the refill window stretch), `redecide_entry` / `redecide_state` / `redecide_live_free` (what a
+refill-pass re-decide hands the allocator), `secure_violations`, `registry_probe_lines`,
+`stray_age` and `job_demand`. The bash is the implementation and the twins are pinned to it:
+`tests/test_runners_tick_parity.py` cuts each function out of the shipped `supervisor.sh` (or
+sources `runs.sh`) and runs it in real bash and jq under the supervisor's `set -uo pipefail`, on
+hand-built cases for every branch plus a seeded random matrix, and requires the same output. jq's
+semantics are kept where they decide a case: only null and false are false, `//` takes the right
+side for both, and `>` orders across types (a string `Memory` is "> 0").
 
 ## Admission
 

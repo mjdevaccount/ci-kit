@@ -32,7 +32,7 @@ import yaml
 import ci_kit.pr_autoupdate as upd
 from ci_kit import doomed_runs, pr_queue, pr_sched
 
-SEALED, HEAVY = "home-sealed", "home-heavy"
+SEALED, HEAVY = "pool-sealed", "pool-heavy"
 REQUIRED = ("lint + doc checks", "unit tests", "review gate", "image-pr-build")
 NOW = 1_800_000_000.0
 
