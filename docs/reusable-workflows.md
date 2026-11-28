@@ -524,6 +524,7 @@ jobs:
       manifest: ci/github-apps.yml
       keyed-app: example-bot
       app-level: other-app
+      app-level-reader: true   # other-app is PRIVATE: read it with example-bot's scoped token
     secrets:
       app-private-key: ${{ secrets.EXAMPLE_BOT_PRIVATE_KEY }}
 ```
@@ -533,10 +534,11 @@ jobs:
 | `manifest` | string | `ci/github-apps.yml` | the App manifest (YAML or JSON) in the caller's checkout |
 | `keyed-app` | string | `''` | the name (slug) of the App whose private key is the `app-private-key` secret ('' = none) |
 | `app-level` | string | `''` | space-separated App names audited WITHOUT a key (permissions and events only; installations not read) |
+| `app-level-reader` | boolean | `false` | read the app-level Apps with a metadata-read installation token of the keyed App, revoked after (a PRIVATE App answers GITHUB_TOKEN with 403) |
 | `only` | string | `''` | space-separated App names to audit ('' = every App in the manifest) |
 | `secure-runner` | string | `''` | the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md |
 
 | secret | what |
 |---|---|
 | `app-private-key` | the keyed App's private key (PEM) |
-| `app-level-token` | a token that can read the app-level Apps (GET /apps/<slug>); default the job's own token |
+| `app-level-token` | a token that can read the app-level Apps (GET /apps/<slug>); default the job's own token (unused with app-level-reader) |
