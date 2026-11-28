@@ -129,20 +129,36 @@ class _ArgsFileParser(argparse.ArgumentParser):
         return [] if not s or s.startswith("#") else [s]
 
 
+def args_parser(prog: str, doc: str | None) -> argparse.ArgumentParser:
+    """`@FILE` (one argument per line, `#` comments skipped) + `--root` (v1.50.0): the base of
+    `gate_parser`, for a gate that takes no `--dir` (an args file must read the same everywhere)."""
+    ap = _ArgsFileParser(prog=prog, fromfile_prefix_chars="@", description=(doc or "").split("\n", 1)[0])
+    ap.add_argument("--root", type=pathlib.Path, default=None)
+    return ap
+
+
 def gate_parser(prog: str, doc: str | None, *, baseline: str | None = None,
                 dir_meta: str = "DIR[:FLOOR]") -> argparse.ArgumentParser:
     """The flags every python-tree gate shares (v1.49.0): `@FILE` (one argument per line), `--root`,
     `--dir` (repeatable, see `dir_floors`), `--selftest`; with a default `baseline` path also
     `--baseline` and `--write-baseline` (alias `--write`, the spelling the source repo shipped)."""
-    ap = _ArgsFileParser(prog=prog, fromfile_prefix_chars="@",
-                                 description=(doc or "").split("\n", 1)[0])
-    ap.add_argument("--root", type=pathlib.Path, default=None)
+    ap = args_parser(prog, doc)
     ap.add_argument("--dir", action="append", default=[], metavar=dir_meta)
     ap.add_argument("--selftest", action="store_true")
     if baseline is not None:
         ap.add_argument("--baseline", type=pathlib.Path, default=pathlib.Path(baseline))
         ap.add_argument("--write-baseline", "--write", action="store_true", dest="write")
     return ap
+
+
+def parse_gate(ap: argparse.ArgumentParser, argv: Sequence[str] | None, *, gate: str,
+               selftest: Callable[[], list[str]]) -> tuple[argparse.Namespace, pathlib.Path, dict[str, int]]:
+    """Parse a `gate_parser` CLI -> (args, root, {dir: floor}) (v1.50.0). `--selftest` EXITS here
+    (0 passed, 2 failed), so no gate can forget to short-circuit it before touching the tree."""
+    a = ap.parse_args(sys.argv[1:] if argv is None else argv)
+    if a.selftest:
+        raise SystemExit(selftest_exit(gate, selftest))
+    return a, gate_root(a.root), dir_floors(a.dir, gate=gate)
 
 
 def selftest_exit(gate: str, selftest: Callable[[], list[str]]) -> int:
