@@ -163,6 +163,22 @@ jobs:
         with:
           tool: ci-http-clients
           args: --selftest
+      # v1.53.0: the App audit through the action, so the `apps` extra's install is what is proven
+      - name: app-audit selftest (through the action)
+        uses: ./
+        with:
+          tool: ci-app-audit
+          args: --selftest
+      - name: write a sample pr-token record
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'pr-token: source=pat mode=pat reason=mode-pat app=absent repo=o/r workflow=w.yml job=j login=me' > "$RUNNER_TEMP/rec.txt"
+      - name: pr-token-check, a clean record is 0
+        uses: ./
+        with:
+          tool: ci-pr-token-check
+          args: --format lines ${{ runner.temp }}/rec.txt
       - name: sql-placement selftest (through the action)
         uses: ./
         with:

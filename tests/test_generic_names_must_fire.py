@@ -113,7 +113,8 @@ ENV_JOBS = {"ci-green.yml": ["advance"], "merge-train.yml": ["train"], "pr-autou
 RUNNER_INPUTS = {"ci-green.yml": ["secure-runner"], "merge-train.yml": ["secure-runner"],
                  "pr-autoupdate.yml": ["secure-runner"], "relock.yml": ["secure-runner"],
                  "pr-heal.yml": ["secure-runner", "sealed-runner"],
-                 "review-gate.yml": ["secure-runner", "sealed-runner"]}
+                 "review-gate.yml": ["secure-runner", "sealed-runner"],
+                 "app-audit.yml": ["secure-runner"]}
 
 
 def _call_inputs(wf: dict) -> dict:
