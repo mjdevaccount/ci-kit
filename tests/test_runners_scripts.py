@@ -27,8 +27,50 @@ DOC = pathlib.Path(__file__).resolve().parents[1] / "docs" / "runners.md"
 
 # ci-kit is PUBLIC and the scripts are copied into other trees: nothing in what ships may name the
 # deployment it was lifted from -- a consumer's prefixes, paths, accounts, repositories or hosts
-ESTATE = re.compile(r"(?i)edge[-_]|/edge\b|mjdev|trade[-_](data|infra|ui|quant)|home[-_]host|elitemini"
-                    r"|(?<![a-z])home(?![a-z])")
+_ESTATE = (r"(?i)edge[-_]|/edge\b|mjdev|trade[-_](data|infra|ui|quant)|home[-_]host|elitemini",
+           r"|(?<![a-z])home(?![a-z])")
+ESTATE = re.compile("".join(_ESTATE))
+
+# THE RUNNERS' OWN TESTS are public too, and they are what a reader copies a kit or a scenario from:
+# every runners test module and fixture is held to the same pattern. Two kinds of token are exempt,
+# each by exact spelling and in one file only:
+#   - this module's pattern and its must-fire examples are estate-shaped BY DESIGN;
+#   - the reusable workflows' shipped default pool labels. tests/_runners.py spells the runs-on
+#     expression exactly as every workflow does, so it carries them; renaming them moves every
+#     caller's jobs to other runners -- a release, not a test edit. The exemption holds only while a
+#     workflow still ships the label (test_the_shipped_label_exemption_is_still_needed).
+TESTS = pathlib.Path(__file__).resolve().parent
+SHIPPED_LABELS = ("home-secure", "home-sealed")
+CATCH = ['emit "edge_ci_github_auth 1"', "GH_AUTH_RUN=/run/edge-ci", 'OWNER="${EDGE_CI_OWNER:-x}"',
+         "GH_AUTH_OWNER=mjdevaccount", "LIB=/usr/local/lib/edge", "# three trade-data pools", "see home-host docs",
+         "INSTANCE=home", "--label home.repo=x"]
+# keyed by path under tests/ (a same-named file elsewhere gets nothing), and each token removed only
+# where it stands alone: a shipped label with a suffix glued on (-ops, .x) is still a hit
+EXEMPT = {"_runners.py": SHIPPED_LABELS, pathlib.Path(__file__).name: (*_ESTATE, *CATCH, *SHIPPED_LABELS)}
+
+
+def _unexempt(rel: str, line: str) -> str:
+    """`line` with every token exempt for the file at `rel` (posix, under tests/) removed, whole only."""
+    for token in EXEMPT.get(rel, ()):
+        line = re.sub(rf"(?<![\w.-]){re.escape(token)}(?![\w.-])", "", line)
+    return line
+
+
+def runner_tests(root: pathlib.Path = TESTS) -> list[pathlib.Path]:
+    """Every runners test module and fixture file under `root` (*runners* by name, and fixtures/runners/)."""
+    return [p for p in sorted(root.rglob("*")) if p.is_file() and "__pycache__" not in p.parts
+            and ("runners" in p.name or (root / "fixtures" / "runners") in p.parents)]
+
+
+def estate_hits(root: pathlib.Path = TESTS) -> list[str]:
+    """`path:line: text` for every estate-shaped name in the runner tests, the listed exemptions removed."""
+    hits = []
+    for p in runner_tests(root):
+        rel = p.relative_to(root).as_posix()
+        for i, line in enumerate(p.read_bytes().decode("utf-8").splitlines(), 1):
+            if ESTATE.search(_unexempt(rel, line)):
+                hits.append(f"{rel}:{i}: {line.strip()}")
+    return hits
 
 
 def test_what_ships():
@@ -45,11 +87,46 @@ def test_the_package_names_no_consumer():
     assert hits == []
 
 
-@pytest.mark.parametrize("line", [
-    'emit "edge_ci_github_auth 1"', "GH_AUTH_RUN=/run/edge-ci", 'OWNER="${EDGE_CI_OWNER:-x}"',
-    "GH_AUTH_OWNER=mjdevaccount", "LIB=/usr/local/lib/edge", "# three trade-data pools", "see home-host docs",
-    'INSTANCE=home', "--label home.repo=x",
-])
+def test_the_runner_tests_name_no_consumer():
+    # the scope is real: the golden fixture, the kit tests and the selection constants are all in it
+    names = {p.name for p in runner_tests()}
+    assert {"_runners.py", "test_runners_must_fire.py", "test_review_gate_runners_must_fire.py", "kit.yml",
+            "runners.yml", "ci-runners.json"} <= names, sorted(names)
+    assert estate_hits() == []
+
+
+def test_the_shipped_label_exemption_is_still_needed():
+    wf = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    text = "".join(p.read_text(encoding="utf-8") for p in sorted(wf.glob("*.yml")))
+    for label in SHIPPED_LABELS:
+        assert f'"{label}"' in text, f"no workflow ships {label} any more: drop it from SHIPPED_LABELS"
+
+
+def test_the_runner_test_scan_catches_a_planted_name(tmp_path):
+    """MUST-FIRE: an estate name in a runners fixture or test is a hit; a shipped label is exempt only in
+    tests/_runners.py itself, and only standing alone; a test outside the runners' scope is not read."""
+    # the planted text is built from this module's own exempt tokens, so it names nothing here
+    label, name = f"X = '{SHIPPED_LABELS[0]}'\n", CATCH[7] + "\n"
+    (tmp_path / "fixtures" / "runners").mkdir(parents=True)
+    (tmp_path / "fixtures" / "runners" / "kit.yml").write_text(name, encoding="utf-8")
+    (tmp_path / "_runners.py").write_text(label, encoding="utf-8")
+    (tmp_path / "test_runners_x.py").write_text(label, encoding="utf-8")
+    (tmp_path / "test_other.py").write_text(name, encoding="utf-8")
+    assert {p.name for p in runner_tests(tmp_path)} == {"kit.yml", "_runners.py", "test_runners_x.py"}
+    assert [h.split(":")[0] for h in estate_hits(tmp_path)] == ["fixtures/runners/kit.yml", "test_runners_x.py"]
+    # review 889 F1: an exemption is the FILE's, not its basename's, and a token's, not a substring's
+    deep = tmp_path / "fixtures" / "runners" / "deep"
+    deep.mkdir()
+    (deep / pathlib.Path(__file__).name).write_text(CATCH[3] + "\n", encoding="utf-8")
+    (deep / "_runners.py").write_text(label, encoding="utf-8")
+    (tmp_path / "_runners.py").write_text(f"X = '{SHIPPED_LABELS[0]}-ops'\nY = '{SHIPPED_LABELS[1]}.x'\n",
+                                          encoding="utf-8")
+    assert [h.split(": ", 1)[0] for h in estate_hits(tmp_path)] == [
+        "_runners.py:1", "_runners.py:2", "fixtures/runners/deep/_runners.py:1",
+        f"fixtures/runners/deep/{pathlib.Path(__file__).name}:1", "fixtures/runners/kit.yml:1", "test_runners_x.py:1"]
+
+
+@pytest.mark.parametrize("line", CATCH)
 def test_the_purity_pattern_catches_an_estate_name(line):
     assert ESTATE.search(line), line
 

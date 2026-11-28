@@ -1,8 +1,8 @@
 """Where the review gate's jobs may run -- must fire, both directions.
 
 `review` holds the Claude credential and runs the PR's own tests: hosted, or the SEALED pool (one
-job per boot on a VM rolled back to a clean snapshot, home-host docs/CI-RUNNER-CONFIG-PLAN.md
-§ Sealed pool) -- never the secure pool, which runs jobs side by side, nor the socket pool.
+job per boot on a VM rolled back to a clean snapshot, the consumer's own sealed-pool design) --
+never the secure pool, which runs jobs side by side, nor the socket pool.
 `record verdict` (a STEP of `verdict` since v1.35.0) holds no secret but writes the artifact a later run trusts to carry a verdict: the
 SECURE pool (no docker socket) or hosted, never the shared socket pool (CI_RUNNER), where a
 concurrent PR job is root over docker. Both jobs' labels are fixed in the workflow, so a repo

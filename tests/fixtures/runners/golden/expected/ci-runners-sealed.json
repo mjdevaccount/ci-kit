@@ -1,6 +1,6 @@
 {
   "_generated": "by scripts/ci_runners.py from ci/runners.yml -- DO NOT EDIT; run --write",
-  "source_sha256": "fcc2d506a622",
+  "source_sha256": "32c85949fa2d",
   "guests": {
     "mon": {
       "vmid": 201,
@@ -40,7 +40,7 @@
     }
   },
   "instance": "sealed",
-  "prefix": "seal-",
+  "prefix": "sealed-",
   "isolation": "sealed",
   "runner_vm": {
     "name": "pool-c",
@@ -60,7 +60,7 @@
       "pids": 2048,
       "labels": [
         "self-hosted",
-        "home-sealed"
+        "ci-sealed"
       ],
       "peak_mb": 1800,
       "young_mb": 1800
@@ -76,7 +76,7 @@
       "pids": 2048,
       "labels": [
         "self-hosted",
-        "home-sealed"
+        "ci-sealed"
       ],
       "peak_mb": 1500,
       "young_mb": 1500

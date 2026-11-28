@@ -1,6 +1,6 @@
 {
   "_generated": "by scripts/ci_runners.py from ci/runners.yml -- DO NOT EDIT; run --write",
-  "source_sha256": "fcc2d506a622",
+  "source_sha256": "32c85949fa2d",
   "guests": {
     "mon": {
       "vmid": 201,
@@ -40,7 +40,7 @@
     }
   },
   "instance": "secure",
-  "prefix": "sec-",
+  "prefix": "secure-",
   "isolation": "secure",
   "runner_vm": {
     "name": "pool-b",
@@ -60,7 +60,7 @@
       "pids": 512,
       "labels": [
         "self-hosted",
-        "home-secure-ops"
+        "ci-secure-ops"
       ],
       "peak_mb": 600,
       "young_mb": 600
@@ -76,7 +76,7 @@
       "pids": 512,
       "labels": [
         "self-hosted",
-        "home-secure"
+        "ci-secure"
       ],
       "peak_mb": 512,
       "young_mb": 512
@@ -92,7 +92,7 @@
       "pids": 512,
       "labels": [
         "self-hosted",
-        "home-secure"
+        "ci-secure"
       ],
       "peak_mb": 512,
       "young_mb": 512
