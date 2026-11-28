@@ -4,7 +4,7 @@
     ci-runners --write --config ci/runners.yml --kit ci/runners-kit.yml   # regenerate every render
     ci-runners --write ... --out-dir /tmp/r      # render elsewhere (shadow a hand-rolled renderer, then diff)
     ci-runners --alloc < tick.json               # one admission verdict (alloc.jq's twin) on stdin's input
-    ci-runners --verify-prom x.prom --render r.json   # did a tick publish every series its alerts read?
+    ci-runners --verify-prom x.prom --render r.json [--scripts-sha256 X]   # every series its alerts read?
     ci-runners --selftest                        # both directions on built inputs
 
 `--root` (default: `$CI_KIT_ROOT`, else the git toplevel) anchors the kit's `out_dir`, `alloc_jq`,
@@ -45,6 +45,7 @@ def _parser() -> argparse.ArgumentParser:
         mode.add_argument(m, action="store_true")
     mode.add_argument("--verify-prom", type=pathlib.Path, metavar="PROM", help="a supervisor's .prom file")
     ap.add_argument("--render", type=pathlib.Path, help="with --verify-prom: the render that supervisor reads")
+    ap.add_argument("--scripts-sha256", help="with --verify-prom: require the implementation the kit pins")
     ap.add_argument("--config", type=pathlib.Path, help="the capacity file (runners.yml)")
     ap.add_argument("--kit", type=pathlib.Path, help="the kit: blocks, renders, share duties")
     ap.add_argument("--root", type=pathlib.Path, default=None)
@@ -61,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.alloc:
         return _alloc()
     if a.verify_prom is not None:
-        return _verify_prom(a.verify_prom, a.render)
+        return _verify_prom(a.verify_prom, a.render, a.scripts_sha256)
     if a.config is None or a.kit is None:
         return _blind("--check and --write need --config and --kit")
     try:
@@ -127,11 +128,11 @@ def _alloc() -> int:
     return 0
 
 
-def _verify_prom(prom: pathlib.Path, render: pathlib.Path | None) -> int:
+def _verify_prom(prom: pathlib.Path, render: pathlib.Path | None, pin: str | None) -> int:
     if render is None:
         return _blind("--verify-prom needs --render")
     try:
-        findings, notes = verify_files(prom, render)
+        findings, notes = verify_files(prom, render, pin)
     except VerifyError as e:
         return _blind(str(e))
     for n in notes:

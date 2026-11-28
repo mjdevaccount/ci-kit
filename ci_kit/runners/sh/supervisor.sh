@@ -448,6 +448,16 @@ if ! jq -e --argjson v "${VMID}" '(.supervisor.foreign_vmids | type) == "array" 
   echo "ci-runner-supervisor: ${CONFIG} names VM ${VMID}, another runner block's VM (or has no foreign_vmids)" >&2; ok=0; publish; exit 2
 fi
 emit "${MP}runner_config_info{source_sha256=\"${CONFIG_SHA}\"} 1"
+# THE IMPLEMENTATION IT RUNS, beside the config it loaded: scripts_sha256 (ci_kit.runners.scripts)
+# over every file in this script's own directory -- the kit's scripts_dir copy, which holds the
+# package's files and nothing else -- so an alert can hold it to the sha the kit pins (a `renders`
+# template naming ${scripts_sha256}) and an install can require it (`ci-runners --verify-prom
+# --scripts-sha256`). A directory it cannot hash reads "unknown", which matches no pin: the alert
+# fires rather than the series going missing.
+IMPL_SHA="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" 2>/dev/null && export LC_ALL=C \
+  && shopt -s nullglob && f=(*) && [ "${#f[@]}" -gt 0 ] && sha256sum -t -- "${f[@]}" | sha256sum | cut -c1-12)"
+[[ "${IMPL_SHA}" =~ ^[0-9a-f]{12}$ ]] || IMPL_SHA=unknown
+emit "${MP}runner_impl_info{scripts_sha256=\"${IMPL_SHA}\"} 1"
 emit "${MP}runner_max_total ${MAX_TOTAL}"
 emit "${MP}runner_mem_budget_bytes $(( MEM_BUDGET_MB * 1024 * 1024 ))"
 # the plain RAM less reserve when the booking runs past it (mem_book_ratio): the low-memory alert's
