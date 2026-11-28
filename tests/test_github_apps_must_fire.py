@@ -3,9 +3,12 @@ could not look = 2, over a synthetic App on the fake GitHub the selftest uses
 (ci_kit/github_apps_selftest.py: a real RS256 JWT, installation tokens, pagination)."""
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import json
 import pathlib
+import tempfile
 
 import pytest
 
@@ -174,7 +177,7 @@ def test_installations_past_one_page_are_all_read(key: tuple[str, object]) -> No
     assert rc == 1 and "on acct-149: installation NOT DECLARED" in out
 
 
-@pytest.mark.parametrize("bad", [
+BAD_MANIFESTS = [
     "{not json", json.dumps({"apps": []}), json.dumps({"app": [{}]}),
     json.dumps({"apps": [{"client_id": "x", "installations": []}]}),                  # no name
     json.dumps({"apps": [{"name": "a", "installations": []}]}),                       # no issuer
@@ -190,7 +193,21 @@ def test_installations_past_one_page_are_all_read(key: tuple[str, object]) -> No
     json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [
         {"account": "o", "repository_selection": "all"}, {"account": "O", "repository_selection": "all"}]}]}),
     json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": []}, {"name": "a", "app_id": 2, "installations": []}]}),
-])
+    # each Invalid path, proven red under --validate (reviewer: five were not)
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [], "default_permissions": {"x": ["read"]}}]}),
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [], "default_permissions": {"x": {"y": 1}}}]}),
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [], "default_permissions": ["contents"]}]}),
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": ["o"]}]}),
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [
+        {"account": "o", "repository_selection": "all", "repos": []}]}]}),
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [
+        {"account": "o", "repository_selection": "all", "permissions": {"x": ["write"]}}]}]}),
+    json.dumps({"apps": [{"name": "a", "client_id": 5, "installations": []}]}),
+    json.dumps({"apps": [{"name": "a", "app_id": 1, "installations": [], "default_events": "push"}]}),
+]
+
+
+@pytest.mark.parametrize("bad", BAD_MANIFESTS)
 def test_an_unreadable_manifest_is_2_must_fire(key: tuple[str, object], bad: str) -> None:
     rc, out = st.run(bad, _world(key), key[0])
     assert rc == 2 and "COULD NOT LOOK" in out, out
@@ -342,3 +359,156 @@ def test_perm_drift_orders_levels() -> None:
     assert ga.perm_drift({"a": "read"}, {"a": "write"}, "x") == ["x: permission WIDENED a: declared read, live write"]
     assert ga.perm_drift({"a": "admin"}, {"a": "write"}, "x") == ["x: permission narrowed a: declared admin, live write"]
     assert ga.perm_drift({"metadata": "read"}, {}, "x") == []  # implicit on both sides
+
+
+# ── --validate: the manifest's shape, keyless, no network (the pre-merge check) ──────────────────
+def test_validate_a_good_manifest_is_0_and_calls_nothing(key: tuple[str, object], tmp_path: pathlib.Path) -> None:
+    w = _world(key)
+    m = tmp_path / "m.json"
+    m.write_text(json.dumps(st.WITH_OTHER), encoding="utf-8")
+    rc = ga.main(["--manifest", str(m), "--validate", "--key-file", f"{st.SLUG}={tmp_path / 'absent.pem'}",
+                  "--app-level", st.OTHER, "--app-level-token-from", st.SLUG], call=w)
+    assert rc == 0 and w.calls == []  # the key file does not exist: it was never read
+
+
+@pytest.mark.parametrize("bad", BAD_MANIFESTS)
+def test_validate_an_invalid_manifest_is_1_must_fire(key: tuple[str, object], bad: str) -> None:
+    w = _world(key)
+    rc, out = st.run(bad, w, None, "--validate")
+    assert rc == 1 and "INVALID" in out and w.calls == [], out
+
+
+def test_validate_an_unreadable_manifest_is_2_must_fire(tmp_path: pathlib.Path) -> None:
+    assert ga.main(["--manifest", str(tmp_path / "absent.yml"), "--validate"], call=None) == 2
+    m = tmp_path / "m.yml"
+    m.write_bytes(b"\xff\xfe not utf-8")
+    assert ga.main(["--manifest", str(m), "--validate"], call=None) == 2
+
+
+@pytest.mark.parametrize("args", [["--only", "nope"], ["--app-level", "nope"], ["--app-level-token-from", "nope"],
+                                  ["--app-level-token-from", ""]])
+def test_validate_flags_naming_no_declared_app_are_1(key: tuple[str, object], args: list[str]) -> None:
+    """The schedule names an App the manifest no longer declares: the manifest edit is the finding."""
+    rc, out = st.run(st.MANIFEST, _world(key), None, "--validate", *args)
+    assert rc == 1 and "INVALID" in out, out
+
+
+@pytest.mark.parametrize("args, want", [
+    (["--key-env", f"{st.SLUG}=X"], "App other-bot: no key flag and no --app-level"),            # an App added, not scheduled
+    (["--key-env", f"{st.SLUG}=X", "--app-level", st.OTHER, "--app-level-token-from", st.OTHER],
+     "--app-level-token-from 'other-bot': no key flag names that App"),
+])
+def test_validate_holds_the_schedules_flags_to_the_manifest_must_fire(key: tuple[str, object], args: list[str],
+                                                                      want: str) -> None:
+    w = _world(key)
+    rc, out = st.run(st.WITH_OTHER, w, None, "--validate", *args)
+    assert rc == 1 and want in out and w.calls == [], out
+    ok = ["--key-env", f"{st.SLUG}=X", "--app-level", st.OTHER, "--app-level-token-from", st.SLUG]
+    assert st.run(st.WITH_OTHER, w, None, "--validate", *ok)[0] == 0 and w.calls == []
+
+
+def test_validate_in_actions_is_an_error_annotation(key: tuple[str, object], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    rc, out = st.run(_m(permisions={}), _world(key), None, "--validate")
+    assert rc == 1 and "::error title=ci-app-audit::INVALID apps[0] example-bot: unknown key(s) permisions" in out
+
+
+# ── --app-level-token-from: a PRIVATE App read with the keyed App's scoped, revoked token ────────
+def _private(key: tuple[str, object]) -> st.FakeGitHub:
+    w = _world(key)
+    w.private[st.OTHER] = copy.deepcopy(st.OTHER_APP)
+    return w
+
+
+def test_a_private_app_is_hidden_from_a_plain_token_must_fire(key: tuple[str, object],
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """The live failure this flag fixes: GITHUB_TOKEN gets 403 on a private App -> exit 2."""
+    monkeypatch.setenv("GH_TOKEN", "a-workflow-token")
+    rc, out = st.run(st.WITH_OTHER, _private(key), key[0], "--app-level", st.OTHER)
+    assert rc == 2 and f"GET /apps/{st.OTHER}: HTTP 403" in out
+
+
+def test_the_reader_token_reads_a_private_app_scoped_and_revoked(key: tuple[str, object]) -> None:
+    w = _private(key)
+    rc, out = st.run(st.WITH_OTHER, w, key[0], "--app-level", st.OTHER, "--app-level-token-from", st.SLUG)
+    assert rc == 0, out
+    assert all(x == {"permissions": {"metadata": "read"}} for x in w.scopes) and len(w.scopes) == 2
+    assert sorted(w.revoked) == sorted(w.tokens)
+    assert "installation token of example-bot (installation 11), revoked" in out and "APP LEVEL ONLY" in out
+    assert not any(t in out for t in w.tokens)
+
+
+def test_a_private_apps_drift_read_by_the_reader_is_1_must_fire(key: tuple[str, object]) -> None:
+    w = _private(key)
+    w.private[st.OTHER]["permissions"]["administration"] = "write"
+    rc, out = st.run(st.WITH_OTHER, w, key[0], "--app-level", st.OTHER, "--app-level-token-from", st.SLUG)
+    assert rc == 1 and "App other-bot: permission WIDENED administration" in out
+
+
+def test_a_failed_reader_mint_blinds_the_app_level_app_only_must_fire(key: tuple[str, object]) -> None:
+    w = _private(key)
+    _mut_add(w)  # the keyed App drifted: still said
+    w.installations[0]["suspended_at"] = w.installations[1]["suspended_at"] = "2026-01-01T00:00:00Z"
+    rc, out = st.run(st.WITH_OTHER, w, key[0], "--app-level", st.OTHER, "--app-level-token-from", st.SLUG)
+    assert rc == 2, out
+    assert "WIDENED administration" in out and "no app-level reader token from example-bot" in out
+    assert "no unsuspended installation" in out and "unread=1" in out
+
+
+def test_a_failed_reader_revoke_is_said_not_blind(key: tuple[str, object]) -> None:
+    w = _private(key)
+    w.fail = "/installation/token"
+    rc, out = st.run(st.WITH_OTHER, w, key[0], "--app-level", st.OTHER, "--app-level-token-from", st.SLUG)
+    assert rc == 0 and "app-level reader token (example-bot, installation 11, metadata: read) was NOT revoked" in out
+
+
+def test_no_app_level_app_mints_no_reader(key: tuple[str, object]) -> None:
+    w = _world(key)
+    rc, out = st.run(st.MANIFEST, w, key[0], "--app-level-token-from", st.SLUG)
+    assert rc == 0 and len(w.scopes) == 1 and "reader" not in out  # the selected installation's read only
+
+
+@pytest.mark.parametrize("args", [
+    ["--app-level-token-from", st.OTHER],                                   # declared, but no key here
+    ["--app-level-token-from", st.SLUG, "--token-env", "GH_TOKEN"],         # two app-level tokens
+])
+def test_a_reader_that_cannot_be_is_2(key: tuple[str, object], args: list[str]) -> None:
+    rc, out = st.run(st.WITH_OTHER, _private(key), key[0], "--app-level", st.OTHER, *args)
+    assert rc == 2, out
+
+
+def test_the_reusable_passes_the_reader_flag_only_for_its_keyed_app() -> None:
+    text = (pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "app-audit.yml").read_text(encoding="utf-8")
+    assert "app-level-reader:" in text and '--app-level-token-from $KEYED' in text
+    assert '[ "$READER" = true ]' in text
+
+
+def test_the_reader_is_minted_on_the_private_apps_own_account(key: tuple[str, object]) -> None:
+    """The keyed App on two accounts: the token comes from the account the private App is declared on."""
+    w = _private(key)
+    m = copy.deepcopy(st.WITH_OTHER)
+    m["apps"][1]["installations"] = [{"account": "example-user", "repository_selection": "all"}]
+    rc, out = st.run(m, w, key[0], "--app-level", st.OTHER, "--app-level-token-from", st.SLUG)
+    assert rc == 0 and "(installation 12), revoked" in out, out
+
+
+def test_any_revoke_failure_is_a_note_never_the_report_lost(key: tuple[str, object]) -> None:
+    w = _private(key)
+    _mut_add(w)
+
+    def call(method: str, path: str, bearer: str, body: dict | None) -> object:
+        if method == "DELETE" and bearer in ("ghs_fake0", "ghs_fake1"):
+            raise ConnectionResetError("reset")  # BOTH revokes: the reader's and the selected installation's
+        return w(method, path, bearer, body)
+    with tempfile.TemporaryDirectory() as d:
+        mp, kp = pathlib.Path(d) / "m.json", pathlib.Path(d) / "k.pem"
+        mp.write_text(json.dumps(st.WITH_OTHER), encoding="utf-8")
+        kp.write_text(key[0], encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = ga.main(["--manifest", str(mp), "--key-file", f"{st.SLUG}={kp}", "--app-level", st.OTHER,
+                          "--app-level-token-from", st.SLUG], call=call)
+    o = out.getvalue()
+    assert rc == 1 and "WIDENED administration" in o, o
+    assert "app-level reader token (example-bot, installation 11, metadata: read) was NOT revoked" in o
+    assert "installation 11's scoped read token was NOT revoked" in o

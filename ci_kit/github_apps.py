@@ -33,6 +33,14 @@ THE LIVE READ, per App:
   * without one: `GET /apps/<slug>` with `--token-env` (default GH_TOKEN, then GITHUB_TOKEN) reads
     the App level (permissions, events) only. Its installations are then NOT looked at, which is
     exit 2 -- unless `--app-level NAME` says so on purpose, and the output names it every run.
+    A PRIVATE App answers GET /apps/<slug> only to an installation or user token (GITHUB_TOKEN:
+    403): `--app-level-token-from KEYED` mints one from an App audited here with its key (scoped to
+    metadata:read, revoked after), so no long-lived token is stored for it (v1.55.0).
+
+`--validate` (v1.55.0) is the pre-merge half: the manifest parsed exactly as the audit parses it,
+and the schedule's App flags held to it (each names a declared App; every App has a key flag or
+--app-level; the reader App has a key flag), with no key read and no network call. Invalid = 1,
+unreadable = 2.
 
 DRIFT (exit 1), one line each: a permission widened or narrowed (read < write < admin; added or
 dropped counts), an event added or dropped, an installation on an undeclared account or a declared
@@ -44,7 +52,8 @@ COULD NOT LOOK (exit 2): the manifest unreadable or invalid, a key unreadable or
 or the slug naming another App, any API read failing, a declared installation set no read reached.
 
     ci-app-audit --manifest ci/github-apps.yml [--key-file NAME=PATH] [--key-env NAME=VAR]
-                 [--token-env VAR] [--app-level NAME] [--only NAME] [--selftest]
+                 [--token-env VAR] [--app-level NAME] [--app-level-token-from NAME] [--only NAME]
+                 [--validate] [--selftest]
 
 Libraries checked (v1.53.0): probot/settings and github/safe-settings manage repository and
 organization settings, not an App's own grants; the Terraform GitHub provider manages installation
@@ -82,6 +91,11 @@ class Blind(Exception):
     """Could not look: the run ends with exit 2."""
 
 
+class Invalid(Blind):
+    """The manifest itself is wrong. An audit cannot judge live against it (exit 2); `--validate`,
+    whose subject IS the manifest, reports it as the finding (exit 1)."""
+
+
 # ── the declaration ──────────────────────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Install:
@@ -107,31 +121,31 @@ class AppSpec:
 
 def _perms(raw: object, where: str) -> dict[str, str]:
     if not isinstance(raw, dict):
-        raise Blind(f"{where}: permissions must be a mapping, got {type(raw).__name__}")
+        raise Invalid(f"{where}: permissions must be a mapping, got {type(raw).__name__}")
     out = {}
     for k, v in raw.items():
-        if not isinstance(k, str) or v not in LEVEL:
-            raise Blind(f"{where}: permission {k!r}: {v!r} is not one of {', '.join(LEVEL)}")
+        if not isinstance(k, str) or not isinstance(v, str) or v not in LEVEL:
+            raise Invalid(f"{where}: permission {k!r}: {v!r} is not one of {', '.join(LEVEL)}")
         out[k] = v
     return {**IMPLICIT, **out}
 
 
 def _install(raw: object, where: str) -> Install:
     if not isinstance(raw, dict):
-        raise Blind(f"{where}: an installation must be a mapping")
+        raise Invalid(f"{where}: an installation must be a mapping")
     extra = set(raw) - INSTALL_KEYS
     if extra:
-        raise Blind(f"{where}: unknown key(s) {', '.join(sorted(extra))}")
+        raise Invalid(f"{where}: unknown key(s) {', '.join(sorted(extra))}")
     acct, sel = raw.get("account"), raw.get("repository_selection")
     if not isinstance(acct, str) or not acct:
-        raise Blind(f"{where}: `account` is required")
+        raise Invalid(f"{where}: `account` is required")
     if sel not in SELECTIONS:
-        raise Blind(f"{where}: repository_selection {sel!r} is not one of {', '.join(SELECTIONS)}")
+        raise Invalid(f"{where}: repository_selection {sel!r} is not one of {', '.join(SELECTIONS)}")
     repos = raw.get("repositories")
     if sel == "all" and repos is not None:
-        raise Blind(f"{where}: repository_selection all takes no `repositories` list")
+        raise Invalid(f"{where}: repository_selection all takes no `repositories` list")
     if sel == "selected" and (not isinstance(repos, list) or not all(isinstance(r, str) and r for r in repos)):
-        raise Blind(f"{where}: repository_selection selected needs a `repositories` list of names")
+        raise Invalid(f"{where}: repository_selection selected needs a `repositories` list of names")
     perms = _perms(raw["permissions"], where) if "permissions" in raw else None
     return Install(acct, sel, frozenset(r.lower() for r in repos or ()), perms)
 
@@ -139,37 +153,37 @@ def _install(raw: object, where: str) -> Install:
 def parse_manifest(data: object) -> list[AppSpec]:
     """A loaded manifest -> its Apps. Strict: anything it cannot read exactly is Blind."""
     if not isinstance(data, dict) or not isinstance(data.get("apps"), list) or not data["apps"]:
-        raise Blind("the manifest needs a non-empty `apps` list")
+        raise Invalid("the manifest needs a non-empty `apps` list")
     out: list[AppSpec] = []
     for i, raw in enumerate(data["apps"]):
         where = f"apps[{i}]"
         if not isinstance(raw, dict) or not isinstance(raw.get("name"), str) or not raw["name"]:
-            raise Blind(f"{where}: `name` (the App's slug) is required")
+            raise Invalid(f"{where}: `name` (the App's slug) is required")
         where = f"apps[{i}] {raw['name']}"
         extra = set(raw) - APP_KEYS - GITHUB_MANIFEST_KEYS
         if extra:
-            raise Blind(f"{where}: unknown key(s) {', '.join(sorted(extra))}")
+            raise Invalid(f"{where}: unknown key(s) {', '.join(sorted(extra))}")
         app_id, client_id = raw.get("app_id"), raw.get("client_id")
         if app_id is None and client_id is None:
-            raise Blind(f"{where}: `client_id` or `app_id` is required (the JWT issuer)")
+            raise Invalid(f"{where}: `client_id` or `app_id` is required (the JWT issuer)")
         if app_id is not None and (not isinstance(app_id, int) or isinstance(app_id, bool)):
-            raise Blind(f"{where}: app_id must be an integer")
+            raise Invalid(f"{where}: app_id must be an integer")
         if client_id is not None and (not isinstance(client_id, str) or not client_id):
-            raise Blind(f"{where}: client_id must be a string")
+            raise Invalid(f"{where}: client_id must be a string")
         events = raw.get("default_events", [])
         if not isinstance(events, list) or not all(isinstance(e, str) for e in events):
-            raise Blind(f"{where}: default_events must be a list of names")
+            raise Invalid(f"{where}: default_events must be a list of names")
         if "installations" not in raw or not isinstance(raw["installations"], list):
-            raise Blind(f"{where}: `installations` is required (a list; [] = installed nowhere)")
+            raise Invalid(f"{where}: `installations` is required (a list; [] = installed nowhere)")
         installs = tuple(_install(x, f"{where} installations[{j}]") for j, x in enumerate(raw["installations"]))
         accounts = [x.account.lower() for x in installs]
         if len(set(accounts)) != len(accounts):
-            raise Blind(f"{where}: an account is declared twice")
+            raise Invalid(f"{where}: an account is declared twice")
         out.append(AppSpec(raw["name"], app_id, client_id, _perms(raw.get("default_permissions", {}), where),
                            frozenset(events), installs))
     names = [a.name for a in out]
     if len(set(names)) != len(names):
-        raise Blind("an App is declared twice")
+        raise Invalid("an App is declared twice")
     return out
 
 
@@ -186,8 +200,8 @@ def load_manifest(path: pathlib.Path) -> list[AppSpec]:
             data = yaml.safe_load(text)
     except ImportError as e:
         raise Blind("reading a YAML manifest needs PyYAML (install ci-kit[apps])") from e
-    except Exception as e:  # noqa: BLE001 -- JSONDecodeError, yaml.YAMLError: an unparseable file is could-not-look
-        raise Blind(f"manifest {path}: {type(e).__name__}: {e}") from e
+    except Exception as e:  # noqa: BLE001 -- JSONDecodeError, yaml.YAMLError: the file is not a manifest
+        raise Invalid(f"manifest {path}: {type(e).__name__}: {e}") from e
     return parse_manifest(data)
 
 
@@ -281,10 +295,35 @@ def read_with_key(call: Transport, spec: AppSpec, key_pem: str, now: float | Non
         finally:
             try:
                 call("DELETE", "/installation/token", token, None)
-            except Blind:
+            except Exception:  # noqa: BLE001 - ANY failed revoke is a note; the read stands
                 live.unrevoked.append(iid)  # said in the notes: it expires in an hour (metadata: read only)
         live.repos[iid] = frozenset(str(r.get("name") or "").lower() for r in names)
     return live
+
+
+def mint_reader(call: Transport, spec: AppSpec, key_pem: str, now: float | None = None,
+                prefer: frozenset[str] = frozenset()) -> tuple[str, int]:
+    """(token, installation id): an installation token of the keyed App `spec`, scoped to
+    metadata: read, for the app-level reads. GET /apps/<slug> answers a PRIVATE App only to an
+    installation or user token, never to a workflow's GITHUB_TOKEN (HTTP 403), and this needs no
+    long-lived token stored anywhere. The caller revokes it. `prefer`: the accounts the app-level
+    Apps are declared on; an installation on one of them is taken first (a private App is visible
+    on its own account). Never printed."""
+    bearer = app_jwt(spec.issuer, key_pem, now)
+    me = call("GET", "/app", bearer, None)
+    slug = me.get("slug") if isinstance(me, dict) else None
+    if slug != spec.name:
+        raise Blind(f"the key for {spec.name} is the key of App {slug or '?'}")
+    insts = [i for i in _pages(call, "/app/installations", bearer, None) if not i.get("suspended_at")]
+    if not insts:
+        raise Blind(f"{spec.name} has no unsuspended installation to mint a reader token on")
+    same = [i for i in insts if str((i.get("account") or {}).get("login") or "").lower() in prefer]
+    iid = (same or insts)[0].get("id")
+    tok = call("POST", f"/app/installations/{iid}/access_tokens", bearer, {"permissions": {"metadata": "read"}})
+    token = tok.get("token") if isinstance(tok, dict) else None
+    if not token:
+        raise Blind(f"installation {iid}: no token in the answer")
+    return token, iid
 
 
 # ── the comparison ───────────────────────────────────────────────────────────────────────────────
@@ -388,8 +427,9 @@ def _crash(e: BaseException) -> str:
 
 
 def audit_one(spec: AppSpec, key: str | None, token: str, app_level: set[str], call: Transport,
-              now: float | None = None) -> tuple[list[str], list[str]]:
-    """One App -> (drift findings, notes). Raises Blind when it could not be read."""
+              now: float | None = None, token_error: str | None = None) -> tuple[list[str], list[str]]:
+    """One App -> (drift findings, notes). Raises Blind when it could not be read. `token_error`:
+    why there is no app-level token (the reader mint failed); it blinds the app-level Apps only."""
     notes: list[str] = []
     if key:
         live = read_with_key(call, spec, key, now)
@@ -402,6 +442,8 @@ def audit_one(spec: AppSpec, key: str | None, token: str, app_level: set[str], c
         if spec.name not in app_level:
             raise Blind(f"App {spec.name}: no key, so its installations cannot be read (pass --key-file/--key-env, "
                         f"or --app-level {spec.name} to audit its permissions and events only)")
+        if token_error:
+            raise Blind(f"App {spec.name}: {token_error}")
         if not token:
             raise Blind(f"App {spec.name}: no key and no token for GET /apps/{spec.name}")
         live = read_app_level(call, spec.name, token)
@@ -411,7 +453,8 @@ def audit_one(spec: AppSpec, key: str | None, token: str, app_level: set[str], c
 
 
 def audit(specs: list[AppSpec], keys: dict[str, str | None], token: str, app_level: set[str],
-          call: Transport, now: float | None = None) -> tuple[list[str], list[str], list[str]]:
+          call: Transport, now: float | None = None,
+          token_error: str | None = None) -> tuple[list[str], list[str], list[str]]:
     """(drift findings, notes, blind). Each App is read on its own: one App unread is a `blind`
     line (the run exits 2) and never hides another App's findings."""
     findings: list[str] = []
@@ -419,7 +462,7 @@ def audit(specs: list[AppSpec], keys: dict[str, str | None], token: str, app_lev
     blind: list[str] = []
     for spec in specs:
         try:
-            f, n = audit_one(spec, keys.get(spec.name), token, app_level, call, now)
+            f, n = audit_one(spec, keys.get(spec.name), token, app_level, call, now, token_error)
         except Blind as e:
             blind.append(f"App {spec.name}: {e}" if not str(e).startswith(f"App {spec.name}") else str(e))
             continue
@@ -431,7 +474,48 @@ def audit(specs: list[AppSpec], keys: dict[str, str | None], token: str, app_lev
     return findings, notes, blind
 
 
-def main(argv: list[str] | None = None, call: Transport = urllib_transport) -> int:
+def _reader(call: Transport, specs: list[AppSpec], keys: dict[str, str | None], app_level: set[str],
+            name: str) -> tuple[str, int | None, str | None]:
+    """--app-level-token-from NAME -> (token, installation id, why not). Minted only when an App is
+    actually read app-level; a mint that fails blinds those Apps alone, never the keyed one."""
+    spec = next((s for s in specs if s.name == name), None)
+    if spec is None or not keys.get(name):
+        raise Blind(f"--app-level-token-from {name}: that App is not audited here with its key")
+    if not any(s.name in app_level and not keys.get(s.name) for s in specs):
+        return "", None, None
+    try:
+        prefer = frozenset(x.account.lower() for s in specs if s.name in app_level and not keys.get(s.name)
+                           for x in s.installations)
+        token, iid = mint_reader(call, spec, keys[name] or "", prefer=prefer)
+    except Blind as e:
+        return "", None, f"no app-level reader token from {name}: {e}"
+    except Exception as e:  # noqa: BLE001 - a crash minting is those Apps unread, exit 2
+        return "", None, f"no app-level reader token from {name}: {_crash(e)}"
+    return token, iid, None
+
+
+def _flags_cover(specs: list[AppSpec], keyed: set[str], app_level: set[str], token_from: str | None) -> list[str]:
+    """What the audit would refuse in these flags, decided without a key or a call. Pure. Every App
+    needs a key flag or --app-level (else it is unread), and the reader App needs a key flag."""
+    out = [f"App {s.name}: no key flag and no --app-level names it, so the audit cannot read it"
+           for s in specs if s.name not in keyed | app_level]
+    if token_from is not None and token_from not in keyed:
+        out.append(f"--app-level-token-from {token_from!r}: no key flag names that App, so no reader can be minted")
+    return out
+
+
+def _validate(path: pathlib.Path, specs: list[AppSpec], keyed: set[str], app_level: set[str],
+              token_from: str | None) -> int:
+    if keyed or app_level or token_from is not None:  # the flags the schedule passes: hold them too
+        problems = _flags_cover(specs, keyed, app_level, token_from)
+        if problems:
+            raise Invalid("; ".join(problems))
+    print(f"{PROG}: manifest {path} is valid: {len(specs)} App(s), "
+          f"{sum(len(s.installations) for s in specs)} installation(s) declared (nothing read from GitHub)")
+    return 0
+
+
+def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog=PROG, description=__doc__.split("\n", 1)[0])
     ap.add_argument("--manifest", type=pathlib.Path)
     ap.add_argument("--key-file", action="append", default=[], metavar="NAME=PATH")
@@ -440,9 +524,18 @@ def main(argv: list[str] | None = None, call: Transport = urllib_transport) -> i
                     help="token for app-level reads (default GH_TOKEN, then GITHUB_TOKEN)")
     ap.add_argument("--app-level", action="append", default=[], metavar="NAME",
                     help="audit this App's permissions and events only (its installations are not read)")
+    ap.add_argument("--app-level-token-from", metavar="NAME",
+                    help="read the app-level Apps with a metadata:read installation token of this keyed App, "
+                         "revoked after (a private App is hidden from GITHUB_TOKEN)")
     ap.add_argument("--only", action="append", default=[], metavar="NAME")
+    ap.add_argument("--validate", action="store_true",
+                    help="check the manifest's shape only: no key read, no network (invalid = 1, unreadable = 2)")
     ap.add_argument("--selftest", action="store_true")
-    a = ap.parse_args(argv)
+    return ap
+
+
+def main(argv: list[str] | None = None, call: Transport = urllib_transport) -> int:
+    a = _parser().parse_args(argv)
     if a.selftest:
         from ci_kit import github_apps_selftest
         fails = github_apps_selftest.selftest()
@@ -450,6 +543,9 @@ def main(argv: list[str] | None = None, call: Transport = urllib_transport) -> i
             print(f"{PROG} selftest: {x}", file=sys.stderr)
         print(f"{PROG} selftest: {'FAILED' if fails else 'ok'}")
         return 1 if fails else 0
+    in_actions = os.environ.get("GITHUB_ACTIONS") == "true"
+    reader: tuple[str, int | None] = ("", None)
+    notes: list[str] = []
     try:
         if a.manifest is None:
             raise Blind("--manifest is required")
@@ -457,26 +553,48 @@ def main(argv: list[str] | None = None, call: Transport = urllib_transport) -> i
         if a.only:
             unknown = set(a.only) - {s.name for s in specs}
             if unknown:
-                raise Blind(f"--only names App(s) the manifest does not declare: {', '.join(sorted(unknown))}")
+                raise Invalid(f"--only names App(s) the manifest does not declare: {', '.join(sorted(unknown))}")
             specs = [s for s in specs if s.name in a.only]
         files, envs = _pairs(a.key_file, "--key-file"), _pairs(a.key_env, "--key-env")
-        stray = (set(files) | set(envs) | set(a.app_level)) - {s.name for s in specs}
+        stray = (set(files) | set(envs) | set(a.app_level) | {a.app_level_token_from} - {None}) \
+            - {s.name for s in specs}
         if stray:
-            raise Blind(f"a key or --app-level names App(s) not audited: {', '.join(sorted(stray))}")
+            raise Invalid("a key, --app-level or --app-level-token-from flag names App(s) not audited: "
+                          f"{', '.join(repr(x) for x in sorted(stray))}")
+        if a.app_level_token_from and a.token_env:
+            raise Blind("--app-level-token-from and --token-env both name the app-level token: pass one")
+        if a.validate:
+            # names checked above; no key is read, nothing is called
+            return _validate(a.manifest, specs, set(files) | set(envs), set(a.app_level), a.app_level_token_from)
         keys = {s.name: _key(s.name, files, envs) for s in specs}
-        token = next((os.environ[v] for v in (a.token_env or ["GH_TOKEN", "GITHUB_TOKEN"]) if os.environ.get(v)), "")
-        findings, notes, blind = audit(specs, keys, token, set(a.app_level), call)
+        token_error = None
+        if a.app_level_token_from:
+            token, iid, token_error = _reader(call, specs, keys, set(a.app_level), a.app_level_token_from)
+            reader = (token, iid)
+        else:
+            token = next((os.environ[v] for v in (a.token_env or ["GH_TOKEN", "GITHUB_TOKEN"])
+                          if os.environ.get(v)), "")
+        try:
+            findings, notes, blind = audit(specs, keys, token, set(a.app_level), call, token_error=token_error)
+        finally:
+            notes = notes + _revoke(call, *reader, a.app_level_token_from)
+    except Invalid as e:
+        if not a.validate:
+            return _blind(str(e))
+        print(f"::error title={PROG}::INVALID {e}" if in_actions else f"INVALID {e}")
+        _summary([f"**{PROG}: the manifest is invalid** -- {e}"])
+        return 1
     except Blind as e:
-        print(f"{PROG}: COULD NOT LOOK: {e}", file=sys.stderr)
-        _summary([f"**{PROG}: could not look** -- {e}"])
-        return 2
+        return _blind(str(e))
     except Exception as e:  # noqa: BLE001 - a crash is "could not look", never drift
-        print(f"{PROG}: COULD NOT LOOK: {_crash(e)}", file=sys.stderr)
-        _summary([f"**{PROG}: could not look** -- {_crash(e)}"])
-        return 2
+        return _blind(_crash(e))
+    return _report(specs, findings, notes, blind, in_actions)
+
+
+def _report(specs: list[AppSpec], findings: list[str], notes: list[str], blind: list[str],
+            in_actions: bool) -> int:
     for n in notes:
         print(n)
-    in_actions = os.environ.get("GITHUB_ACTIONS") == "true"
     for x in findings:
         print(f"::error title={PROG}::{x}" if in_actions else f"DRIFT {x}")
     for x in blind:
@@ -485,6 +603,24 @@ def main(argv: list[str] | None = None, call: Transport = urllib_transport) -> i
     _summary([f"**{PROG}**: {len(specs)} App(s), {len(findings)} drift finding(s), {len(blind)} App(s) unread",
               *notes, *findings, *(f"could not look: {x}" for x in blind)])
     return 2 if blind else 1 if findings else 0
+
+
+def _revoke(call: Transport, token: str, iid: int | None, name: str | None) -> list[str]:
+    """Revoke the app-level reader token, if one was minted -> the note that says what happened."""
+    if not token:
+        return []
+    try:
+        call("DELETE", "/installation/token", token, None)
+    except Exception:  # noqa: BLE001 - a revoke that failed in ANY way is said; the report stands
+        return [f"the app-level reader token ({name}, installation {iid}, metadata: read) was NOT revoked "
+                "(DELETE failed; it expires within the hour)"]
+    return [f"app-level reads used a metadata:read installation token of {name} (installation {iid}), revoked"]
+
+
+def _blind(why: str) -> int:
+    print(f"{PROG}: COULD NOT LOOK: {why}", file=sys.stderr)
+    _summary([f"**{PROG}: could not look** -- {why}"])
+    return 2
 
 
 def _summary(lines: list[str]) -> None:
