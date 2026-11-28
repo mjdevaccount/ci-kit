@@ -22,7 +22,7 @@ from ci_kit import site_lint
 from ci_kit.runners.alloc import JQ_PATH, AllocError, allocate
 from ci_kit.runners.budget import pools
 from ci_kit.runners.kit import KitError, load_kit
-from ci_kit.runners.render import freshness, outputs, render
+from ci_kit.runners.render import extras, freshness, outputs, render
 from ci_kit.runners.schema import validate
 
 PROG = "ci-runners"
@@ -83,12 +83,16 @@ def _run(a: argparse.Namespace, kit, cfg: dict, text: str, root: pathlib.Path) -
         for block, path in outputs(cfg, kit, out_dir).items():
             path.write_text(render(cfg, text, block, kit), encoding="utf-8", newline="\n")
             print(f"{PROG}: wrote {path} ({len(pools(cfg, kit, block))} pools)")
+        for path, body in extras(cfg, text, kit, root=root, config_name=name, flat_dir=a.out_dir).items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body.encode("utf-8"))
+            print(f"{PROG}: wrote {path}")
         if kit.alloc_jq:
             (root / kit.alloc_jq).parent.mkdir(parents=True, exist_ok=True)
             (root / kit.alloc_jq).write_bytes(JQ_PATH.read_bytes())
             print(f"{PROG}: wrote {kit.alloc_jq} (ci-kit's allocator)")
         return 0
-    findings = freshness(cfg, text, kit, root=root, out_dir=out_dir, config_name=name)
+    findings = freshness(cfg, text, kit, root=root, out_dir=out_dir, config_name=name, flat_dir=a.out_dir)
     counts = ", ".join(f"{b}: {len(pools(cfg, kit, b))} pools" for b in kit.keys if b in cfg)
     return _report(findings, counts)
 

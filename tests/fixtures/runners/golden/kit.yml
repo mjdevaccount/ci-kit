@@ -29,3 +29,15 @@ blocks:
     one_job_per_boot: true
 share_duties:
   drill: {doc: docs/DRILL.md, text: "take the sealed hold"}
+renders:
+  expected-config:
+    output: expected/runner-config.yml
+    template: |
+      # GENERATED from ${config} -- DO NOT EDIT. Every supervisor installed from this commit
+      # publishes this hash as its loaded config; an alert holds the published one to it.
+      groups:
+        - name: runner-config
+          rules:
+            - record: runner_config_expected_info
+              expr: vector(1)
+              labels: { source_sha256: "${source_sha256}" }

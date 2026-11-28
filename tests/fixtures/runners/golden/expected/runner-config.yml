@@ -1,0 +1,8 @@
+# GENERATED from runners.yml -- DO NOT EDIT. Every supervisor installed from this commit
+# publishes this hash as its loaded config; an alert holds the published one to it.
+groups:
+  - name: runner-config
+    rules:
+      - record: runner_config_expected_info
+        expr: vector(1)
+        labels: { source_sha256: "fcc2d506a622" }

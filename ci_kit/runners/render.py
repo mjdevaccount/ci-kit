@@ -66,8 +66,17 @@ def outputs(cfg: dict, kit: Kit, out_dir: pathlib.Path) -> dict[str, pathlib.Pat
     return {b.key: out_dir / b.output for b in kit.blocks if b.key in cfg}
 
 
+def extras(cfg: dict, text: str, kit: Kit, *, root: pathlib.Path, config_name: str,
+           flat_dir: pathlib.Path | None = None) -> dict[pathlib.Path, str]:
+    """path -> text for each of the kit's `renders`, from the same hash the JSONs carry. Paths are
+    relative to `root`, or, with `flat_dir` (--out-dir), that directory plus each output's name."""
+    sha = source_hash(cfg, text, kit.source_hash)
+    return {(flat_dir / pathlib.PurePosixPath(r.output).name if flat_dir is not None else root / r.output):
+            r.text(source_sha256=sha, config=config_name) for r in kit.renders}
+
+
 def freshness(cfg: dict, text: str, kit: Kit, *, root: pathlib.Path, out_dir: pathlib.Path,
-              config_name: str) -> list[str]:
+              config_name: str, flat_dir: pathlib.Path | None = None) -> list[str]:
     """Stale or orphaned renders, a stale allocator copy, and unmet share duties (file valid)."""
     from ci_kit.runners.alloc import JQ_PATH
 
@@ -75,6 +84,10 @@ def freshness(cfg: dict, text: str, kit: Kit, *, root: pathlib.Path, out_dir: pa
     for block, path in outputs(cfg, kit, out_dir).items():
         have = path.read_text(encoding="utf-8") if path.exists() else ""
         if have != render(cfg, text, block, kit):
+            findings.append(f"{path.name} is stale: run {kit.write_command}")
+    for path, want in extras(cfg, text, kit, root=root, config_name=config_name, flat_dir=flat_dir).items():
+        have = path.read_bytes().decode("utf-8") if path.exists() else None
+        if have != want:
             findings.append(f"{path.name} is stale: run {kit.write_command}")
     # a shared reserve has a second owner that must yield: the duty is written where it is built
     for name, g in cfg["guests"].items():

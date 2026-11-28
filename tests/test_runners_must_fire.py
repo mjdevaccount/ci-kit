@@ -15,7 +15,7 @@ import shutil
 
 import pytest
 
-from ci_kit.runners import JQ_PATH, Block, Duty, Kit, KitError, kit_from_dict, load_kit, render, validate
+from ci_kit.runners import JQ_PATH, Block, Duty, Kit, KitError, Render, extras, kit_from_dict, load_kit, render, validate
 from ci_kit.runners.cli import main
 from ci_kit.runners.selftest import ACCEPTS, DEMO_KIT, REFUSALS, good, refused, selftest
 
@@ -24,6 +24,7 @@ yaml = pytest.importorskip("yaml")
 GOLDEN = pathlib.Path(__file__).parent / "fixtures" / "runners" / "golden"
 OUTPUTS = {"runners": "ci-runners.json", "secure_runners": "ci-runners-secure.json",
            "sealed_runners": "ci-runners-sealed.json"}
+EXTRA = "runner-config.yml"
 
 
 def _golden():
@@ -106,6 +107,12 @@ def test_a_python_rule_runs_only_after_the_built_ins_pass():
                                        "output": "h.json"}),
     lambda d: d["share_duties"]["drill"].pop("text"),
     lambda d: d.update(out_dir=5),
+    lambda d: d["renders"]["expected-config"].update(template="${nope}\n"),          # unknown placeholder
+    lambda d: d["renders"]["expected-config"].update(template="cost: $5\n"),         # bare $
+    lambda d: d["renders"]["expected-config"].pop("template"),
+    lambda d: d["renders"]["expected-config"].update(extra=1),
+    lambda d: d["renders"]["expected-config"].update(output="elsewhere/ci-runners.json"),  # basename clash
+    lambda d: d.update(renders=["x"]),
     lambda d: d.update(alloc_jq=["x"]),
 ])
 def test_a_malformed_kit_is_refused(edit):
@@ -231,3 +238,51 @@ def test_kit_round_trip_from_dataclasses():
     kit = Kit(blocks=(Block("runners", "i", "p-", "socket", "lbl", "VAR", "o.json"),),
               share_duties={"r": Duty("d.md", "t")})
     assert kit.keys == ("runners",) and kit.share_duties["r"].text == "t"
+
+
+# --- `renders`: extra generated files keyed on the JSONs' own hash --------------------------------
+
+def test_an_extra_render_carries_the_jsons_hash_and_is_committed_fresh():
+    cfg, text, kit = _golden()
+    [(path, body)] = extras(cfg, text, kit, root=GOLDEN, config_name="runners.yml").items()
+    assert path == GOLDEN / "expected" / EXTRA
+    assert body.encode("utf-8") == path.read_bytes()
+    sha = json.loads(render(cfg, text, "runners", kit))["source_sha256"]
+    assert f'source_sha256: "{sha}"' in body and "GENERATED from runners.yml" in body
+
+
+def test_a_stale_extra_render_is_exit_1_and_write_fixes_it(tmp_path, capsys):
+    root = _copy(tmp_path)
+    (root / "expected" / EXTRA).write_text("stale\n", encoding="utf-8")
+    assert _run(root, "--check") == 1
+    assert f"{EXTRA} is stale" in capsys.readouterr().err
+    assert _run(root, "--write") == 0 and _run(root, "--check") == 0
+    assert (root / "expected" / EXTRA).read_bytes() == (GOLDEN / "expected" / EXTRA).read_bytes()
+
+
+def test_a_missing_extra_render_is_a_finding(tmp_path, capsys):
+    root = _copy(tmp_path)
+    (root / "expected" / EXTRA).unlink()
+    assert _run(root, "--check") == 1
+    assert f"{EXTRA} is stale" in capsys.readouterr().err
+
+
+def test_out_dir_flattens_an_extra_render_to_its_name(tmp_path):
+    root = _copy(tmp_path)
+    out = tmp_path / "shadow"
+    assert _run(root, "--write", "--out-dir", str(out)) == 0
+    assert (out / EXTRA).read_bytes() == (GOLDEN / "expected" / EXTRA).read_bytes()
+    assert _run(root, "--check", "--out-dir", str(out)) == 0
+
+
+def test_an_extra_render_follows_the_hash_mode():
+    cfg, text, kit = _golden()
+    canon = Kit(blocks=kit.blocks, source_hash="canonical", renders=kit.renders)
+    [body] = extras(cfg, text, canon, root=GOLDEN, config_name="runners.yml").values()
+    sha = json.loads(render(cfg, text, "runners", canon))["source_sha256"]
+    assert f'"{sha}"' in body and body != (GOLDEN / "expected" / EXTRA).read_text(encoding="utf-8")
+
+
+def test_a_template_dollar_dollar_is_a_literal_dollar():
+    r = Render("r", "r.txt", "price $$5 at ${source_sha256}\n")
+    assert r.text(source_sha256="abc", config="c") == "price $5 at abc\n"

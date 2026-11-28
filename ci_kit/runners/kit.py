@@ -36,6 +36,16 @@ one thing whose edits move runners.
         one_job_per_boot: true  # max_total must be 1 and the vm must be state on_demand
     share_duties:               # reserve -> the doc that builds its other owner and the text it must carry
       drill: {doc: docs/DRILL.md, text: "take the sealed hold first"}
+    renders:                    # extra GENERATED files keyed on the same source_sha256 (optional)
+      expected-config:
+        output: monitoring/runner-config.yml   # relative to --root (--out-dir: its basename there)
+        template: |             # string.Template: ${source_sha256}, ${config}; $$ is a literal $
+          # GENERATED from ${config} -- DO NOT EDIT
+          expected_source_sha256: "${source_sha256}"
+
+`renders` is how a consumer of the hash that is NOT a supervisor -- an alert rule holding every
+installed supervisor's published hash to main's, a dashboard variable -- is generated from the
+SAME text as the JSONs, so it cannot name a different hash. --check holds each to a fresh render.
 
 Python callers build a `Kit` directly and may add `rules`: callables `(cfg, kit) -> [finding]`
 run after every built-in check passes -- the extension point for an invariant a declaration cannot
@@ -46,6 +56,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import string
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -53,7 +64,10 @@ from typing import Any
 from ci_kit.runners._checks import _unknown
 
 HASH_MODES = ("raw", "canonical")
-_KIT_KEYS = {"generated", "write_command", "source_hash", "out_dir", "alloc_jq", "blocks", "share_duties"}
+_KIT_KEYS = {"generated", "write_command", "source_hash", "out_dir", "alloc_jq", "blocks", "share_duties",
+             "renders"}
+# what a `renders` template may name: the hash every JSON carries, and the capacity file's name
+RENDER_VARS = ("source_sha256", "config")
 _BLOCK_KEYS = {"required", "instance", "prefix", "isolation", "label", "variable", "output", "one_job_per_boot"}
 _BLOCK_KEY = re.compile(r"^[a-z][a-z0-9_]*$")
 _LABEL = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -91,6 +105,18 @@ class Duty:
 
 
 @dataclass(frozen=True)
+class Render:
+    """An extra generated file: `template` (string.Template over RENDER_VARS) written to `output`."""
+
+    name: str
+    output: str
+    template: str
+
+    def text(self, **values: str) -> str:
+        return string.Template(self.template).substitute(values)
+
+
+@dataclass(frozen=True)
 class Kit:
     blocks: tuple[Block, ...]
     generated: str = "by ci-runners -- DO NOT EDIT; run ci-runners --write"
@@ -99,6 +125,7 @@ class Kit:
     out_dir: str = "."
     alloc_jq: str | None = None
     share_duties: Mapping[str, Duty] = field(default_factory=dict)
+    renders: tuple[Render, ...] = ()
     rules: tuple[Rule, ...] = ()
 
     def __post_init__(self) -> None:
@@ -156,6 +183,31 @@ def _kit_problems(kit: Kit) -> list[str]:
     for name, d in kit.share_duties.items():
         if not (isinstance(d, Duty) and d.doc and d.text):
             p.append(f"share_duties.{name} needs a doc and the text it must carry")
+    return p + _render_problems(kit)
+
+
+def _render_problems(kit: Kit) -> list[str]:
+    p: list[str] = []
+    for r in kit.renders:
+        if not isinstance(r.output, str) or not r.output:
+            p.append(f"renders.{r.name}.output must be a non-empty string")
+        if not isinstance(r.template, str) or not r.template:
+            p.append(f"renders.{r.name}.template must be a non-empty string")
+            continue
+        t = string.Template(r.template)
+        if not t.is_valid():
+            p.append(f"renders.{r.name}.template: a bare $ (write $$ for a literal $)")
+            continue
+        bad = sorted(set(t.get_identifiers()) - set(RENDER_VARS))
+        if bad:
+            p.append(f"renders.{r.name}.template names {', '.join(bad)}; it may name {', '.join(RENDER_VARS)}")
+    # --out-dir writes every render under its basename, so two must never share one
+    names = [pathlib.PurePosixPath(r.output).name for r in kit.renders if isinstance(r.output, str)]
+    names += [pathlib.PurePosixPath(b.output).name for b in kit.blocks if isinstance(b.output, str)]
+    if len(set(names)) != len(names):
+        p.append("renders: every render and block output needs its own file name")
+    if len({r.name for r in kit.renders}) != len(kit.renders):
+        p.append("renders: every render needs its own name")
     return p
 
 
@@ -180,11 +232,20 @@ def kit_from_dict(d: Any) -> Kit:
         p += _unknown(f"share_duties.{name}", x, {"doc", "text"})
         if isinstance(x, dict):
             p += [f"share_duties.{name}: missing {k!r}" for k in sorted({"doc", "text"} - set(x))]
+    renders_in = d.get("renders") or {}
+    if not isinstance(renders_in, dict):
+        p.append("renders: must be a mapping")
+        renders_in = {}
+    for name, x in renders_in.items():
+        p += _unknown(f"renders.{name}", x, {"output", "template"})
+        if isinstance(x, dict):
+            p += [f"renders.{name}: missing {k!r}" for k in sorted({"output", "template"} - set(x))]
     if p:
         raise KitError("; ".join(p))
     blocks = tuple(Block(key=str(k), **b) for k, b in blocks_in.items())
     opt = {k: d[k] for k in ("generated", "write_command", "source_hash", "out_dir", "alloc_jq") if k in d}
-    return Kit(blocks=blocks, share_duties={str(n): Duty(**x) for n, x in duties_in.items()}, **opt)
+    return Kit(blocks=blocks, share_duties={str(n): Duty(**x) for n, x in duties_in.items()},
+               renders=tuple(Render(name=str(n), **x) for n, x in renders_in.items()), **opt)
 
 
 def load_kit(path: pathlib.Path) -> Kit:
