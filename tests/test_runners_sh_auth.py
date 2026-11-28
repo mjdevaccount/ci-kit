@@ -77,6 +77,8 @@ class Box:
         (tmp / "bin" / "jq").write_text(_JQ, encoding="utf-8", newline="\n")
         if shutil.which("flock") is None:
             (tmp / "bin" / "flock").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n")
+        for stub in (tmp / "bin").iterdir():  # Windows ignores the bit; Linux would fall through to the real tool
+            stub.chmod(0o755)
         (tmp / "curl.log").write_text("", encoding="utf-8")
         (tmp / "conf" / "github.token").write_text("ghp_the_pat\n", encoding="utf-8")
         subprocess.run(["openssl", "genrsa", "-out", str(tmp / "key.pem"), "2048"], capture_output=True, check=True)
