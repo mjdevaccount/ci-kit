@@ -26,7 +26,8 @@ lockfile-only conflicts, so the page says so), `--label` (the conflict label; `c
 current main at once, lowest PR number first; 0 = every armed PR. The policy and the measurement
 behind it: ci_kit/pr_queue.py). With a queue, every pass first ARMS each Renovate PR whose preset
 verdict is automerge (ci_kit/pr_renovate.py, v1.32.0): Renovate never arms or merges in a queue
-repo. A PR the queue picked but skipped for a running review hands its slot to the next eligible PR
+repo -- and, with the queue IDLE, MERGES the lowest CLEAN one (every check green), which GitHub refuses
+to arm (v1.61.0, pr_renovate.land_idle). A PR the queue picked but skipped for a running review hands its slot to the next eligible PR
 (`Plan.spare`), so one long review does not idle the queue. `update_held` (env CI_KIT_UPDATE_HELD,
 default off) also updates HELD PRs -- open, not armed -- on a scheduled or dispatched pass only,
 LAST (after this pass's outputs and summary are written), once no armed PR is on its way to
@@ -371,7 +372,12 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
         summary += [f"#{p['number']}: in flight against current main" for p in q.in_flight]
         summary += [f"#{p['number']}: held, {why}" for p, why in q.held]
     attempted, updated, conflicts, err = _drive(repo, q, head, opts, relock, summary, cancel, retry, keep)
-    errors += err + (cancel.errors if cancel else 0)
+    # an IDLE queue (nothing in flight, nothing attempted) lands a CLEAN Renovate PR itself, which GitHub
+    # refuses to arm (pr_renovate.land_idle)
+    errors += err + (cancel.errors if cancel else 0) + (
+        pr_renovate.land_idle(repo, prs, q, opts.required, _gh_read, pr_heal.write,
+                              lambda p: _put_kind(repo, p), summary)
+        if opts.max_in_flight > 0 else 0)
     # ONE ACTOR PER HEAD: a PR this pass base-retried has a new head on its way; its old head goes to
     # neither the ladder (whose dispatch marker would spend a tier-3 slot on a head already gone) nor pr_heal
     retried = set(retry) & updated
@@ -748,6 +754,12 @@ def _put(repo: str, p: dict) -> tuple[Outcome, str]:
         if state.returncode == 0 and state.stdout.strip() not in ("", "OPEN"):
             return o, state.stdout.strip().lower()
     return o, ""
+
+
+def _put_kind(repo: str, p: dict) -> tuple[str, str]:
+    """`_put` as (kind, detail): the update pr_renovate.land_idle runs on a CLEAN head behind its base."""
+    o, gone = _put(repo, p)
+    return ("current", f"no longer open: {gone}") if gone else (o.kind, o.detail)
 
 
 def _line(n: int, o: Outcome) -> str:

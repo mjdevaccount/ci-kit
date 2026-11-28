@@ -723,15 +723,34 @@
     // minimumReleaseAge RE-ARMS on every rebuild and the update sits in "Pending Status Checks"
     // with no branch and no PR (a consumer's dashboard, Friday 2026-10-30: python 3.15 pending,
     // 02:00Z 10-31 it cleared, and the next rebuild would have re-pended it). The age guard is
-    // yank protection for an UNATTENDED merge; this rule never auto-merges, and every repo on it
-    // builds the image on the PR (the table above), so the wait only hides the PR a session must
-    // read. The weekend window still applies.
+    // yank protection for an UNATTENDED merge. A python MINOR or major never auto-merges here, so
+    // for it the wait only hides the PR a session must read. A DIGEST or PATCH DOES auto-merge (the
+    // next rule, 2026-11-28) and so DELIBERATELY gives up the yank window: with the age gate on, a
+    // rebuild every ~week re-arms it and a digest would never merge at all. Its guard instead is the
+    // image built ON THE PR (the table above): a base that breaks the build is a red check. The
+    // weekend window still applies.
     {
       matchManagers: ["dockerfile"],
       matchPackageNames: ["python"],
       groupName: "python base image",
       automerge: false,
       minimumReleaseAge: null,
+    },
+    // A python DIGEST or PATCH merges on green (2026-11-28, operator: green tests = merge). A digest
+    // is the same X.Y interpreter rebuilt on a newer Debian slim; a patch is the interpreter's own
+    // bugfix release. Neither is the #608 class (a new X.Y under every image), and every repo on this
+    // rule builds its images ON THE PR (the Dockerfile note above), so a base that breaks the build
+    // is a red check the every-check gate refuses. Measured: a consumer's #968 (python:3.15-slim
+    // digest, its `images` check green) sat CLEAN from 05:20Z to 13:08Z, read by nobody, until a
+    // session merged it by hand. A MINOR (3.15 -> 3.16) or major stays held: still Disabled above.
+    // A group holding a minor AND a digest is expected to stay held (UNVERIFIED against Renovate's
+    // docs: merged-config automerge is per upgrade; the PR body's `Automerge:` line is what the queue
+    // reads, ci_kit/pr_renovate.py, so whatever Renovate decides there is what lands or waits).
+    {
+      matchManagers: ["dockerfile"],
+      matchPackageNames: ["python"],
+      matchUpdateTypes: ["digest", "patch", "pinDigest"],
+      automerge: true,
     },
     // ---- cgr.dev/chainguard/minio:latest: a digest the age gate can NEVER release (2026-11-12) --
     // Chainguard's free minio has ONLY `latest`/`latest-dev` (cgr.dev tags/list, 11-12), so the pin
@@ -818,7 +837,12 @@
     // at 03:53:47Z and #3073/#3075/#3076 all went BEHIND. So in these repos a Renovate branch is
     // rebased only on a CONFLICT, merged by nothing of its own, and becomes current with main
     // only when the queue picks it (ci-kit pr-autoupdate ARMS it on its next pass,
-    // ci_kit/pr_renovate.py since v1.32.0 -- no hand step; an outside PR reconciler is the witness). A repo that adds pr-autoupdate.yml with
+    // ci_kit/pr_renovate.py since v1.32.0 -- no hand step; an outside PR reconciler is the witness).
+    // A PR ALREADY CLEAN (every check green, current with main) cannot be armed -- GitHub refuses
+    // "clean status" -- so with the queue IDLE (nothing in flight or next, no train) pr-autoupdate
+    // MERGES the lowest one itself, pinned to its head (v1.61.0, pr_renovate.land_idle): trade-infra
+    // #977/#978 sat CLEAN under "armed once main moves" on a quiet Saturday until a hand merge,
+    // 2026-11-28. UNSTABLE (stability-days still pending, or any red check) is never landed. A repo that adds pr-autoupdate.yml with
     // max-in-flight joins this list (tests/test_renovate_merge_queue.py pins it).
     // A consumer runs ci-kit's merge train + serial pr-autoupdate, which land armed PRs lowest
     // number first, one heavy CI run at a time. Renovate's own merge sees none of it: its
