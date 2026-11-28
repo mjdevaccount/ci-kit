@@ -51,6 +51,7 @@ SECURE = {"state_dir": "/etc/ci/b", "dockerfile": "/usr/local/lib/ci/runner-b.Do
 def _kit_dict() -> dict:
     d = yaml.safe_load((GOLDEN / "kit.yml").read_text(encoding="utf-8"))
     d["supervisor"] = copy.deepcopy(SUP)
+    d["blocks"]["runners"]["instance"] = "alpha"
     d["blocks"]["runners"]["supervisor"] = copy.deepcopy(SOCKET)
     d["blocks"]["secure_runners"]["supervisor"] = copy.deepcopy(SECURE)
     return d
@@ -71,7 +72,7 @@ def _doc(block: str, d: dict | None = None) -> dict:
 def test_a_wired_block_renders_its_resolved_supervisor():
     cfg, _ = _cfg()
     s = _doc("runners")["supervisor"]
-    assert s["run_dir"] == "/run/ci/home" and s["prom_file"] == "/var/lib/node-exporter/ci_runner.prom"
+    assert s["run_dir"] == "/run/ci/alpha" and s["prom_file"] == "/var/lib/node-exporter/ci_runner.prom"
     assert s["labels"] == {"repo": "ci.repo", "keep": "ci.keep", "canary": "ci.canary"}
     assert (s["busy_limit_s"], s["idle_limit_s"], s["stray_limit_s"]) == (46800, 21600, 10800)
     # mappings keep their DECLARED order (a docker run's -e order is part of what a golden pins)
