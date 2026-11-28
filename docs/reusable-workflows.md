@@ -243,14 +243,14 @@ jobs:
 | `branch` | string | `ci-green` | the branch to fast-forward (never the default branch, main or master) |
 | `dry-run` | boolean | `false` | print the plan, push nothing |
 | `token-source` | string | `''` | pat \| app \| app-required ('' = the caller repo's PR_TOKEN_SOURCE variable, else pat) -- ci_kit/pr_token.py (v1.37.0) |
-| `app-client-id` | string | `''` | the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- docs/pr-ops/push-token.md "Generic names" |
-| `secure-runner` | string | `''` | runs-on of the `advance` job (it holds the write token), a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md "Generic names" |
+| `app-client-id` | string | `''` | the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- docs/pr-ops/push-token.md |
+| `secure-runner` | string | `''` | runs-on of the `advance` job (it holds the write token), a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md |
 
 | secret | what |
 |---|---|
 | `token` | fine-grained PAT with contents + workflows read/write on the caller repo (not required since v1.37.0; empty while the PAT acts is still red) |
-| `app-private-key` | the App's private key, with the app-client-id input -- docs/pr-ops/push-token.md "Generic names" |
-| `EDGE_BOT_PRIVATE_KEY` | DEPRECATED alias of app-private-key -- docs/pr-ops/push-token.md "Generic names" |
+| `app-private-key` | the App's private key, with the app-client-id input -- docs/pr-ops/push-token.md |
+| `EDGE_BOT_PRIVATE_KEY` | DEPRECATED alias of app-private-key (removed in v2) |
 
 ## pr-autoupdate.yml
 
@@ -300,8 +300,8 @@ jobs:
 | `base-retry-max-per-pass` | number | `3` | base-retry candidates whose main runs are read per pass, lowest PR number first (the rest are named in the summary and wait for the next pass); 1..100 |
 | `token-source` | string | `''` | WHICH TOKEN ACTS (v1.37.0, ci_kit/pr_token.py): pat \| app \| app-required ('' = the caller repo's PR_TOKEN_SOURCE variable, else pat). app mints a GitHub App token (variable EDGE_BOT_APP_ID, secret EDGE_BOT_PRIVATE_KEY) and falls back to `token` only when ... |
 | `base-retry-bot-authors` | string | `renovate` | comma-separated EXACT author logins (as GraphQL reports them, e.g. Renovate's app is `renovate`; the author must also be a Bot account) retried without red-at-base evidence ([autoupdate.md](pr-ops/autoupdate.md#base-driven-retry)) |
-| `app-client-id` | string | `''` | the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- docs/pr-ops/push-token.md "Generic names" |
-| `secure-runner` | string | `''` | the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md "Generic names" |
+| `app-client-id` | string | `''` | the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- docs/pr-ops/push-token.md |
+| `secure-runner` | string | `''` | the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md |
 | `head-fail-fast` | boolean | `true` | HEAD FAIL-FAST (v1.45.0, ci_kit/pr_sched.py review_young): with scarce-pools, a queue head BEHIND the base is updated at once while its review has spent under preempt-after-minutes of model time, so its one full CI run is at a head that can merge; false = ... |
 | `head-verdict-wait-seconds` | number | `240` | with head-fail-fast: seconds the pass's tail waits for a BEHIND queue head past the young bound to record its verdict, then updates it in the same job (ci_kit/pr_autoupdate.py _await_head); 0 = off. |
 | `update-held` | boolean | `false` | also merge the base into HELD PRs (open, not armed, BEHIND, mergeable, no check running or failing, not a bot's) on schedule / workflow_dispatch passes only, last, once no armed PR is on its way to current, in the queue's free slots (ci_kit/pr_held.py) |
@@ -309,8 +309,8 @@ jobs:
 | secret | what |
 |---|---|
 | `token` | fine-grained PAT with contents, pull requests and workflows RW, actions read (RW with scarce-pools -- the scheduler cancels and re-runs --, with train-workflow, which dispatches, and with cancel-doomed-runs), administration read (cancel-doomed-runs reads ... |
-| `app-private-key` | the App's private key, with the app-client-id input -- docs/pr-ops/push-token.md "Generic names" |
-| `EDGE_BOT_PRIVATE_KEY` | DEPRECATED alias of app-private-key -- docs/pr-ops/push-token.md "Generic names" |
+| `app-private-key` | the App's private key, with the app-client-id input -- docs/pr-ops/push-token.md |
+| `EDGE_BOT_PRIVATE_KEY` | DEPRECATED alias of app-private-key (removed in v2) |
 | `ntfy-url` | an ntfy topic URL to page on a NEW conflict ('' = no page) |
 
 Outputs: `relock`, `heal`.
@@ -365,15 +365,15 @@ The heal ladder's tiers 1-4 for ONE PR, called per row of pr-autoupdate's `heal`
 | `kit-ref` | string | `v1` | the ci-kit ref whose ci_kit.pr_* modules run every job (a tag, branch or sha) |
 | `git-ssh-repos` | string | `''` | PRIVATE repos the install fetches by https (ci_kit/git_ssh.sh), with the git-ssh-key secret |
 | `token-source` | string | `''` | pat \| app \| app-required ('' = the caller repo's PR_TOKEN_SOURCE variable, else pat) -- ci_kit/pr_token.py (v1.37.0) |
-| `app-client-id` | string | `''` | the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- docs/pr-ops/push-token.md "Generic names" |
-| `secure-runner` | string | `''` | the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md "Generic names" |
-| `sealed-runner` | string | `''` | the sealed pool's runs-on, a JSON label list ('' = the CI_SEALED_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md "Generic names" |
+| `app-client-id` | string | `''` | the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- docs/pr-ops/push-token.md |
+| `secure-runner` | string | `''` | the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md |
+| `sealed-runner` | string | `''` | the sealed pool's runs-on, a JSON label list ('' = the CI_SEALED_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md |
 
 | secret | what |
 |---|---|
 | `token` | the push token (fine-grained PAT, contents + pull requests RW on the repo); comments too. |
-| `app-private-key` | the App's private key, with the app-client-id input -- docs/pr-ops/push-token.md "Generic names" |
-| `EDGE_BOT_PRIVATE_KEY` | DEPRECATED alias of app-private-key -- docs/pr-ops/push-token.md "Generic names" |
+| `app-private-key` | the App's private key, with the app-client-id input -- docs/pr-ops/push-token.md |
+| `EDGE_BOT_PRIVATE_KEY` | DEPRECATED alias of app-private-key (removed in v2) |
 | `ntfy-url` | tier 4's page topic ('' = not pushed, named in the record) |
 | `claude-code-oauth-token` | tier 3, the subscription credential |
 | `anthropic-api-key` | tier 3, the api credential |
@@ -408,14 +408,14 @@ jobs:
 | `git-ssh-repos` | string | `''` | PRIVATE GitHub repos (`owner/name`, space- or newline-separated) the lockfile names by https URL; with the `git-ssh-key` secret the lock tool reaches them over ssh (ci_kit/git_ssh.sh: the keys live only in their own step, the tool gets the agents, which ... |
 | `kit-ref` | string | `v1` | the ci-kit ref whose ci_kit modules run in both jobs (a tag, branch or sha) |
 | `token-source` | string | `''` | pat \| app \| app-required ('' = the caller repo's PR_TOKEN_SOURCE variable, else pat) -- ci_kit/pr_token.py |
-| `app-client-id` | string | `''` | the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- docs/pr-ops/push-token.md "Generic names" |
-| `secure-runner` | string | `''` | the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md "Generic names" |
+| `app-client-id` | string | `''` | the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- docs/pr-ops/push-token.md |
+| `secure-runner` | string | `''` | the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md |
 
 | secret | what |
 |---|---|
 | `token` | the push token (fine-grained PAT, contents RW on the caller repo); empty while the PAT acts is red, only when a relock is needed |
-| `app-private-key` | the App's private key, with the app-client-id input -- docs/pr-ops/push-token.md "Generic names" |
-| `EDGE_BOT_PRIVATE_KEY` | DEPRECATED alias of app-private-key -- docs/pr-ops/push-token.md "Generic names" |
+| `app-private-key` | the App's private key, with the app-client-id input -- docs/pr-ops/push-token.md |
+| `EDGE_BOT_PRIVATE_KEY` | DEPRECATED alias of app-private-key (removed in v2) |
 | `git-ssh-key` | READ-ONLY deploy key(s) for `git-ssh-repos`, never a key that can write; one key per repo, in `git-ssh-repos` order (a `\|` block of `secrets.*` lines) |
 
 Outputs: `result`.
@@ -451,14 +451,14 @@ jobs:
 | `review-workflow` | string | `review-gate.yml` | the caller's review-gate workflow file; a PR rides only if it passed at its head ('' = no pre-check) |
 | `dry-run` | boolean | `false` | decide and report, push and change nothing |
 | `token-source` | string | `''` | pat \| app \| app-required ('' = the caller repo's PR_TOKEN_SOURCE variable, else pat) -- ci_kit/pr_token.py (v1.37.0) |
-| `app-client-id` | string | `''` | the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- docs/pr-ops/push-token.md "Generic names" |
-| `secure-runner` | string | `''` | runs-on of the `train` job (it holds the write token), a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md "Generic names" |
+| `app-client-id` | string | `''` | the App's client id, with the app-private-key secret ('' = deprecated EDGE_BOT_APP_ID) -- docs/pr-ops/push-token.md |
+| `secure-runner` | string | `''` | runs-on of the `train` job (it holds the write token), a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md |
 
 | secret | what |
 |---|---|
 | `token` | fine-grained PAT with contents, pull requests, workflows and actions RW, on the caller repo (not required since v1.37.0; empty while the PAT acts is still red) |
-| `app-private-key` | the App's private key, with the app-client-id input -- docs/pr-ops/push-token.md "Generic names" |
-| `EDGE_BOT_PRIVATE_KEY` | DEPRECATED alias of app-private-key -- docs/pr-ops/push-token.md "Generic names" |
+| `app-private-key` | the App's private key, with the app-client-id input -- docs/pr-ops/push-token.md |
+| `EDGE_BOT_PRIVATE_KEY` | DEPRECATED alias of app-private-key (removed in v2) |
 
 ## review-gate.yml
 
@@ -493,8 +493,8 @@ jobs:
 | `git-ssh-repos` | string | `''` | PRIVATE GitHub repos (`owner/name`, space- or newline-separated) the caller's `install` fetches by https URL; with the `git-ssh-key` secret they are routed to ssh for the Install step only (ci_kit/git_ssh.sh). |
 | `train-workflow` | string | `merge-train.yml` | the caller's merge-train workflow file: a `train/` PR passes only if its composition record names a run of THIS workflow that opened it (ci_kit/merge_train/github.composed) |
 | `queue-priority` | boolean | `false` | the PR scheduler's admission (v1.29.0, ci_kit/pr_sched.py): a full review of a PR numbered after the queue head is PARKED while the head needs the sealed pool, and re-run by pr-autoupdate (pass its `scarce-pools`). |
-| `secure-runner` | string | `''` | the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md "Generic names" |
-| `sealed-runner` | string | `''` | the sealed pool's runs-on, a JSON label list ('' = the CI_SEALED_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md "Generic names" |
+| `secure-runner` | string | `''` | the secure pool's runs-on, a JSON label list ('' = the CI_SECURE_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md |
+| `sealed-runner` | string | `''` | the sealed pool's runs-on, a JSON label list ('' = the CI_SEALED_RUNNER switch, else hosted) -- docs/pr-ops/push-token.md |
 
 | secret | what |
 |---|---|
