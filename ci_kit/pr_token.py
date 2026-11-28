@@ -67,7 +67,7 @@ PERMISSIONS: dict[str, dict[str, str]] = {
     "push": {"contents": "write", "workflows": "write"},
     "comment": {"pull-requests": "write", "issues": "write"},
 }
-# Every `reason=` value the record can carry (README "THE RECORD" lists the same; a test holds both
+# Every `reason=` value the record can carry (docs/pr-ops/push-token.md "THE RECORD" lists the same; a test holds both
 # to this, and to every reason this module and the composite's shell actually emit).
 REASONS = ("configured", "mode-pat", "var-absent", "key-absent", "mode-invalid", "scope-invalid",
            "mint-failed", "identity-unreadable", "decide-crashed")
