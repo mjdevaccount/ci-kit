@@ -62,6 +62,17 @@ With a queue, every pass first ARMS each Renovate PR whose own body says `**Auto
 a hand disarm, and Automerge Disabled (the database group, majors, `fails-green`) stay out; a
 conflicting one gets its Renovate rebase box ticked; a refused arm or tick is a red run.
 
+**An idle queue LANDS a CLEAN one** (v1.60.0, `pr_renovate.land_idle`). GitHub refuses to arm a PR
+that is already CLEAN, and Renovate never merges in a queue repo (`pr-comment`), so a CLEAN
+Enabled PR used to wait for a push to main that a quiet repo never gets (trade-infra#977/#978,
+2026-11-28, `queue: 0/1 in flight, 0 to attempt` on every pass until a hand merge). Now, with
+nothing in flight, nothing next and no train open, the pass MERGES the lowest-numbered one: squash,
+`expectedHeadOid` = the head it read, only when GitHub says CLEAN (every check green, required or
+not), the PR's own rollup reads green, and no workflow run on that head is still going. One per
+pass: the merge moves main and the push-to-main pass arms the rest. UNSTABLE (a red check, or
+`renovate/stability-days` still pending) is never landed. A refused merge is a red run; a moved
+head or base is a race, decided next pass.
+
 ## Smart auto-merge
 
 `--rerun-limit` (v1.27.0, default 2, 0 = off). An armed PR red at its head is classified by its

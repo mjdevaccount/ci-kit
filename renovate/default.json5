@@ -733,6 +733,21 @@
       automerge: false,
       minimumReleaseAge: null,
     },
+    // A python DIGEST or PATCH merges on green (2026-11-28, operator: green tests = merge). A digest
+    // is the same X.Y interpreter rebuilt on a newer Debian slim; a patch is the interpreter's own
+    // bugfix release. Neither is the #608 class (a new X.Y under every image), and every repo on this
+    // rule builds its images ON THE PR (the Dockerfile note above), so a base that breaks the build
+    // is a red check the every-check gate refuses. Measured: a consumer's #968 (python:3.15-slim
+    // digest, its `images` check green) sat CLEAN from 05:20Z to 13:08Z, read by nobody, until a
+    // session merged it by hand. A MINOR (3.15 -> 3.16) or major stays held: still Disabled above.
+    // In a group with a held minor the PR stays held (Renovate automerges a branch only when every
+    // upgrade in it does).
+    {
+      matchManagers: ["dockerfile"],
+      matchPackageNames: ["python"],
+      matchUpdateTypes: ["digest", "patch", "pinDigest"],
+      automerge: true,
+    },
     // ---- cgr.dev/chainguard/minio:latest: a digest the age gate can NEVER release (2026-11-12) --
     // Chainguard's free minio has ONLY `latest`/`latest-dev` (cgr.dev tags/list, 11-12), so the pin
     // is `latest@sha256:...` and every move is a digest update. Renovate ages a digest update
@@ -818,7 +833,12 @@
     // at 03:53:47Z and #3073/#3075/#3076 all went BEHIND. So in these repos a Renovate branch is
     // rebased only on a CONFLICT, merged by nothing of its own, and becomes current with main
     // only when the queue picks it (ci-kit pr-autoupdate ARMS it on its next pass,
-    // ci_kit/pr_renovate.py since v1.32.0 -- no hand step; an outside PR reconciler is the witness). A repo that adds pr-autoupdate.yml with
+    // ci_kit/pr_renovate.py since v1.32.0 -- no hand step; an outside PR reconciler is the witness).
+    // A PR ALREADY CLEAN (every check green, current with main) cannot be armed -- GitHub refuses
+    // "clean status" -- so with the queue IDLE (nothing in flight or next, no train) pr-autoupdate
+    // MERGES the lowest one itself, pinned to its head (v1.60.0, pr_renovate.land_idle): trade-infra
+    // #977/#978 sat CLEAN under "armed once main moves" on a quiet Saturday until a hand merge,
+    // 2026-11-28. UNSTABLE (stability-days still pending, or any red check) is never landed. A repo that adds pr-autoupdate.yml with
     // max-in-flight joins this list (tests/test_renovate_merge_queue.py pins it).
     // A consumer runs ci-kit's merge train + serial pr-autoupdate, which land armed PRs lowest
     // number first, one heavy CI run at a time. Renovate's own merge sees none of it: its

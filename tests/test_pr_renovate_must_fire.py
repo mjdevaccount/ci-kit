@@ -111,9 +111,12 @@ class World:
     """The GitHub a pass sees. `bodies` = PR -> (body, last AutoMergeDisabledEvent); records writes."""
 
     def __init__(self, bodies: dict[int, tuple[str, dict | None]], *, refuse_arm: bool = False,
-                 detail_fails: bool = False, refuse_patch: bool = False) -> None:
+                 detail_fails: bool = False, refuse_patch: bool = False, land: str = "ok",
+                 running: dict[str, list[str]] | None = None) -> None:
         self.bodies, self.refuse_arm, self.detail_fails, self.writes = bodies, refuse_arm, detail_fails, []
         self.refuse_patch, self.inputs = refuse_patch, {}
+        # land: "ok" | "refused" | "raced" (GitHub's answer to mergePullRequest); running: head -> its unfinished runs
+        self.land, self.running = land, running or {}
 
     def read(self, *a: str) -> subprocess.CompletedProcess:
         if a[:2] == ("api", "graphql") and not any(x.startswith("number=") for x in a):
@@ -126,6 +129,9 @@ class World:
             pr = {"body": body, "timelineItems": {"nodes": [ev] if ev else []}}
             return subprocess.CompletedProcess(a, 0, json.dumps({"data": {"repository": {"pullRequest": pr}}}), "")
         path = next(x for x in a if x.startswith("repos/"))
+        if "/actions/runs?head_sha=" in path:  # pr_renovate._runs_done: the --jq names of unfinished runs
+            oid = path.split("head_sha=")[1].split("&")[0]
+            return subprocess.CompletedProcess(a, 0, json.dumps(self.running.get(oid, [])), "")
         if path.endswith("/status"):
             return subprocess.CompletedProcess(a, 0, json.dumps({"statuses": []}), "")
         return subprocess.CompletedProcess(a, 0, json.dumps({"default_branch": "main"}), "")
@@ -139,6 +145,13 @@ class World:
                 return subprocess.CompletedProcess(a, 1, "", "HTTP 403: Resource not accessible by personal access token")
             ok = {"data": {"enablePullRequestAutoMerge": {"pullRequest": {"autoMergeRequest": {"enabledAt": "now"}}}}}
             return subprocess.CompletedProcess(a, 0, json.dumps(ok), "")
+        if a[:2] == ("api", "graphql") and "mergePullRequest" in " ".join(a):
+            if self.land == "refused":
+                return subprocess.CompletedProcess(a, 1, "", "GraphQL: Repository rule violations found (mergePullRequest)")
+            if self.land == "raced":
+                return subprocess.CompletedProcess(a, 1, "", "GraphQL: Head branch was modified. expected head sha differs")
+            ok = {"data": {"mergePullRequest": {"pullRequest": {"state": "MERGED", "merged": True}}}}
+            return subprocess.CompletedProcess(a, 0, json.dumps(ok), "")
         if "PATCH" in a and self.refuse_patch:
             return subprocess.CompletedProcess(a, 1, "", "HTTP 403: Resource not accessible by personal access token")
         return subprocess.CompletedProcess(a, 0, "", "")
@@ -147,6 +160,10 @@ class World:
         # the body travels on stdin (--input -), never as one argv string (Linux's 128 KiB arg cap)
         return {int(w[3].rsplit("/", 1)[1]): json.loads(self.inputs[i])["body"]
                 for i, w in enumerate(self.writes) if w[:3] == ("api", "-X", "PATCH") and "--input" in w}
+
+    def landed(self) -> list[str]:
+        return [next(x for x in w if x.startswith("id=")) for w in self.writes
+                if w[:2] == ("api", "graphql") and "mergePullRequest" in " ".join(w)]
 
     def armed(self) -> list[str]:
         return [next(x for x in w if x.startswith("id=")) for w in self.writes
@@ -297,3 +314,72 @@ def test_a_crlf_body_still_reads_must_fire() -> None:
     crlf = ON.replace("\n", "\r\n")
     assert pr_renovate.automerge_verdict(crlf) == "Enabled."
     assert pr_renovate.ticked(crlf) is not None
+
+
+# ---- an IDLE queue lands a CLEAN Renovate PR itself (v1.60.0, pr_renovate.land_idle) ---------------
+# THE CASE (trade-infra, 2026-11-28): #977 (chainguard minio digest) and #978 (ci-kit v1.59.0), both
+# "Automerge: Enabled", CLEAN with every check green, sat under "mergeable as it stands (CLEAN) ... armed
+# once main moves" with `queue: 0/1 in flight, 0 to attempt` on every pass (run 46145295455, 12:36Z) until
+# a session merged them by hand at 13:08Z. No queue hold in that repo (hold=False); main did not move.
+GREEN = [{"__typename": "CheckRun", "name": "gate", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+STABILITY = {"__typename": "StatusContext", "context": "renovate/stability-days", "state": "PENDING"}
+HUMAN = {"__typename": "User", "login": "octocat"}
+
+
+def test_replay_ti977_978_an_idle_queue_lands_the_lowest_clean_renovate_pr_must_fire(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # dies to: land_idle not called by run(), join() not marking the CLEAN row, or landing BOTH in one pass
+    # (the first merge moves main; the second would merge on a base its checks never saw)
+    world = World({977: (ON, None), 978: (ON, None)})
+    prs = [_pr(978, merge="CLEAN", statusCheckRollup=GREEN), _pr(977, merge="CLEAN", statusCheckRollup=GREEN)]
+    rc, summary = _run(monkeypatch, prs, world, hold=False)
+    assert rc == 0, summary
+    assert world.landed() == ["id=PR_node977"] and world.armed() == []
+    land = next(w for w in world.writes if "mergePullRequest" in " ".join(w))
+    assert "mergeMethod: SQUASH" in " ".join(land) and f"oid={977:040d}" in land   # pinned to the head read
+    assert any(s.startswith("#977: Renovate PR LANDED") for s in summary)
+    assert not [w for w in world.writes if w[:2] == ("pr", "merge")]
+
+
+@pytest.mark.parametrize(("prs", "bodies", "running", "why"), [
+    # UNSTABLE: a non-required check pending (stability-days, the supply-chain age gate) or red
+    ([_pr(976, merge="UNSTABLE", statusCheckRollup=[*GREEN, STABILITY])], {976: (ON, None)}, {}, "(UNSTABLE)"),
+    # CLEAN by GitHub, but a check here still reads pending (a status GitHub has not folded in yet)
+    ([_pr(977, merge="CLEAN", statusCheckRollup=[*GREEN, STABILITY])], {977: (ON, None)}, {}, "(CLEAN)"),
+    # the preset holds it (python base image, a major): Disabled is never landed, CLEAN or not
+    ([_pr(968, merge="CLEAN", statusCheckRollup=GREEN)], {968: (OFF, None)}, {}, "Automerge: Disabled"),
+    ([_pr(977, merge="CLEAN", statusCheckRollup=GREEN, labels=("autoland-off",))], {977: (ON, None)}, {},
+     "opted out"),
+    # a relock (or any workflow) still running on the head would push after the merge
+    ([_pr(977, merge="CLEAN", statusCheckRollup=GREEN)], {977: (ON, None)}, {f"{977:040d}": ["relock"]},
+     "still running on its head: relock"),
+    # the queue is NOT idle: an armed human PR is next in line -- its order wins
+    ([_pr(977, merge="CLEAN", statusCheckRollup=GREEN),
+      _pr(980, author=HUMAN, armed=True, merge="BEHIND", headRefName="fix/x", statusCheckRollup=GREEN)],
+     {977: (ON, None)}, {}, "not landed: #980"),
+    # a merge train is open
+    ([_pr(977, merge="CLEAN", statusCheckRollup=GREEN), _pr(990, author=HUMAN, headRefName="train/1")],
+     {977: (ON, None)}, {}, "merge train #990 is open"),
+])
+def test_an_unready_held_or_busy_case_is_never_landed_must_not_fire(monkeypatch: pytest.MonkeyPatch, prs: list[dict],
+                                                                    bodies: dict, running: dict, why: str) -> None:
+    # dies to: landing on UNSTABLE / a pending check / Disabled / autoland-off / a run still on the head, or
+    # past a PR the queue is driving or an open train
+    world = World(bodies, running=running)
+    rc, summary = _run(monkeypatch, prs, world, hold=False)
+    assert rc == 0 and world.landed() == [], summary
+    assert any(why in s for s in summary), summary
+
+
+def test_a_refused_land_is_a_red_run_a_raced_one_is_not_must_fire(monkeypatch: pytest.MonkeyPatch,
+                                                                   capsys: pytest.CaptureFixture) -> None:
+    # TELEMETRY: a CLEAN automerge PR that stays unmerged turns the run red (the red streak an outside
+    # schedule audit reads); a head/base that moved since the read is the next pass's to decide.
+    # dies to: land_idle swallowing the refusal, or reddening a race
+    rc, summary = _run(monkeypatch, [_pr(977, merge="CLEAN", statusCheckRollup=GREEN)],
+                       World({977: (ON, None)}, land="refused"), hold=False)
+    assert rc == 1 and "could not be landed" in capsys.readouterr().out
+    assert any("NOT landed" in s for s in summary)
+    rc, summary = _run(monkeypatch, [_pr(977, merge="CLEAN", statusCheckRollup=GREEN)],
+                       World({977: (ON, None)}, land="raced"), hold=False)
+    assert rc == 0 and any("decided afresh next pass" in s for s in summary)

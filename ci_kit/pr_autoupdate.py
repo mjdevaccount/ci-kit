@@ -26,7 +26,8 @@ lockfile-only conflicts, so the page says so), `--label` (the conflict label; `c
 current main at once, lowest PR number first; 0 = every armed PR. The policy and the measurement
 behind it: ci_kit/pr_queue.py). With a queue, every pass first ARMS each Renovate PR whose preset
 verdict is automerge (ci_kit/pr_renovate.py, v1.32.0): Renovate never arms or merges in a queue
-repo. A PR the queue picked but skipped for a running review hands its slot to the next eligible PR
+repo -- and, with the queue IDLE, MERGES the lowest CLEAN one (every check green), which GitHub refuses
+to arm (v1.60.0, pr_renovate.land_idle). A PR the queue picked but skipped for a running review hands its slot to the next eligible PR
 (`Plan.spare`), so one long review does not idle the queue. `update_held` (env CI_KIT_UPDATE_HELD,
 default off) also updates HELD PRs -- open, not armed -- on a scheduled or dispatched pass only,
 LAST (after this pass's outputs and summary are written), once no armed PR is on its way to
@@ -371,7 +372,11 @@ def run(repo: str, summary: list[str], relock: list[int], opts: Options, healing
         summary += [f"#{p['number']}: in flight against current main" for p in q.in_flight]
         summary += [f"#{p['number']}: held, {why}" for p, why in q.held]
     attempted, updated, conflicts, err = _drive(repo, q, head, opts, relock, summary, cancel, retry, keep)
-    errors += err + (cancel.errors if cancel else 0)
+    # an IDLE queue (nothing in flight, nothing attempted) lands a CLEAN Renovate PR itself, which GitHub
+    # refuses to arm (pr_renovate.land_idle)
+    errors += err + (cancel.errors if cancel else 0) + (
+        pr_renovate.land_idle(repo, prs, q.in_flight, q.update, _gh_read, pr_heal.write, summary)
+        if opts.max_in_flight > 0 else 0)
     # ONE ACTOR PER HEAD: a PR this pass base-retried has a new head on its way; its old head goes to
     # neither the ladder (whose dispatch marker would spend a tier-3 slot on a head already gone) nor pr_heal
     retried = set(retry) & updated

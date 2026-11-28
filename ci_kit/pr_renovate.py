@@ -30,9 +30,20 @@ who registered that name is not it), unarmed, same-repo, not a draft, not a trai
       - CLEAN / UNSTABLE / HAS_HOOKS: GitHub would merge it the moment it is armed (gh's `--auto`
         merges an UNSTABLE PR at once -- past a red non-required check). Never in a hold repo (an
         unarmed PR's `queue/position` is pending, so it is BLOCKED); elsewhere it is armed once main
-        moves, and an outside reconciler lands a CLEAN one when nothing is in flight. This is the one
-        hold that is NOT an error: a summary line only, so in a repo without the hold whose PR stays
-        CLEAN the witness is pr_reconcile (`land`), not this run.
+        moves. UNSTABLE stays held (a check is red or still pending: `renovate/stability-days`).
+        CLEAN is LANDED by this pass when the queue is IDLE (`land_idle`, below).
+  * LANDED, when the queue is idle (v1.60.0): nothing in flight, nothing to attempt, no train open.
+    "Armed once main moves" waited on a push that a quiet repo never gets: trade-infra#977/#978
+    (2026-11-28) sat CLEAN, every check green, Renovate's verdict Enabled, under `queue: 0/1 in
+    flight, 0 to attempt` for every pass until a session merged them by hand -- Renovate never
+    merges here (`pr-comment`) and GitHub refuses to ARM a CLEAN PR ("clean status", `_RACE`).
+    So the lowest-numbered such PR is MERGED, squash, pinned to the head this pass read
+    (`mergePullRequest` expectedHeadOid), only when GitHub calls it CLEAN (every check green,
+    required or not: a pending or red non-required one reads UNSTABLE), its own rollup reads green
+    here too, and every workflow run on that head has COMPLETED (a relock still queued would push
+    after the merge). ONE per pass: the merge moves main, every other CLEAN one turns BEHIND, and
+    the push-to-main pass arms it for the queue like any other. Jumps nothing: the queue was empty.
+    A refused merge is a red run; a head or base that moved since the read is a race (next pass).
   * otherwise ARMED: GraphQL `enablePullRequestAutoMerge` (SQUASH, `expectedHeadOid` = the head this
     pass read), never `gh pr merge --auto`, which merges a CLEAN or UNSTABLE PR immediately. The
     mutation's answer is the proof: no `autoMergeRequest` back is an error. The PR is marked armed in
@@ -81,6 +92,11 @@ DETAIL = """query($owner: String!, $name: String!, $number: Int!) {
     timelineItems(itemTypes: [AUTO_MERGE_DISABLED_EVENT], last: 1) { nodes {
       ... on AutoMergeDisabledEvent { createdAt reasonCode actor { login } } } }
   } }
+}"""
+LAND = """mutation($id: ID!, $oid: GitObjectID!) {
+  mergePullRequest(input: {pullRequestId: $id, mergeMethod: SQUASH, expectedHeadOid: $oid}) {
+    pullRequest { state merged }
+  }
 }"""
 ARM = """mutation($id: ID!, $oid: GitObjectID!) {
   enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH, expectedHeadOid: $oid}) {
@@ -256,6 +272,8 @@ def join(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str]) ->
             continue
         arm, why = verdict(p, body, disabled)
         if not arm:
+            if why.startswith("mergeable as it stands") and idle_landable(p):
+                p[LANDABLE] = True  # land_idle's candidate: Enabled, not held, CLEAN (decided above)
             if why == CONFLICT:
                 why, failed = _ask_rebase(repo, n, body, write)
                 errors += failed
@@ -273,3 +291,77 @@ def join(repo: str, prs: list[dict], read: Gh, write: Gh, summary: list[str]) ->
         p["autoMergeRequest"] = {"enabledAt": "this pass"}
         summary.append(f"#{n}: Renovate PR armed ({why}) -- joins the PR queue")
     return errors
+
+
+# ---- the idle queue lands a CLEAN Renovate PR itself (v1.60.0, module doc "LANDED") -------------
+LANDABLE = "renovateLandable"  # row key join() sets on a CLEAN Enabled candidate it left unarmed
+_LAND_STATES = {"CLEAN", "HAS_HOOKS"}  # every check green; UNSTABLE (a red/pending one) never
+
+
+def idle_landable(p: dict) -> bool:
+    """GitHub calls it CLEAN (or HAS_HOOKS) and its own rollup reads green here too. Pure."""
+    from ci_kit.pr_queue import check_state
+    merge = str(p.get("mergeStateStatus") or "").upper()
+    return merge in _LAND_STATES and check_state(p.get("statusCheckRollup")) == "green"
+
+
+def idle(prs: list[dict], in_flight: list, to_attempt: list) -> str:
+    """'' when the queue is idle (a land jumps nothing), else why not. Pure."""
+    if in_flight:
+        return f"#{in_flight[0]['number']} is in flight"
+    if to_attempt:
+        return f"#{to_attempt[0]['number']} is next in the queue"
+    train = next((p for p in prs if str(p.get("headRefName") or "").startswith(TRAIN_PREFIX)), None)
+    return f"merge train #{train['number']} is open" if train else ""
+
+
+def _runs_done(repo: str, oid: str, read: Gh) -> str:
+    """'' when every workflow run on the head has completed, else why not (a relock or a slow
+    workflow that has not posted its check yet would act after the merge)."""
+    r = read("api", f"repos/{repo}/actions/runs?head_sha={oid}&per_page=100", "--jq",
+             "[.workflow_runs[] | select(.status != \"completed\") | .name]")
+    names = json.loads(r.stdout or "[]")
+    return f"workflow run(s) still running on its head: {', '.join(sorted(set(names)))}" if names else ""
+
+
+def land_idle(repo: str, prs: list[dict], in_flight: list, to_attempt: list, read: Gh, write: Gh,
+              summary: list[str]) -> int:
+    """MERGE the lowest-numbered landable Renovate PR when the queue is idle (module doc). Returns
+    the errors. Never raises."""
+    todo = sorted((p for p in prs if p.get(LANDABLE)), key=lambda p: int(p["number"]))
+    if not todo:
+        return 0
+    why = idle(prs, in_flight, to_attempt)
+    if why:
+        summary.append(f"Renovate PR(s) {', '.join('#' + str(p['number']) for p in todo)} CLEAN, not landed: {why} "
+                       "(the queue's order wins; armed once main moves)")
+        return 0
+    p, n = todo[0], int(todo[0]["number"])
+    try:
+        busy = _runs_done(repo, str(p["headRefOid"]), read)
+    except (subprocess.CalledProcessError, ValueError, TypeError) as e:
+        print(f"::error::#{n}: could not read the workflow runs on its head, so it was not landed: "
+              f"{' '.join(str(getattr(e, 'stderr', '') or e).split())[-200:]}")
+        summary.append(f"#{n}: CLEAN Renovate PR NOT landed -- its head's workflow runs could not be read")
+        return 1
+    if busy:
+        summary.append(f"#{n}: CLEAN Renovate PR not landed yet -- {busy} (the run's completion starts the next pass)")
+        return 0
+    r = write("api", "graphql", "-f", f"query={LAND}", "-f", f"id={p['id']}", "-f", f"oid={p['headRefOid']}")
+    msg = " ".join((r.stderr or r.stdout or "").split())[-300:]
+    try:
+        got = json.loads(r.stdout or "{}")["data"]["mergePullRequest"]["pullRequest"]
+    except (ValueError, KeyError, TypeError):
+        got = {}
+    if not r.returncode and got.get("merged"):
+        p[LANDABLE] = False
+        summary.append(f"#{n}: Renovate PR LANDED (CLEAN, every check green, queue idle) -- squash, head "
+                       f"{str(p['headRefOid'])[:12]}")
+        return 0
+    if raced(msg) or "base branch was modified" in msg.lower():
+        summary.append(f"#{n}: CLEAN Renovate PR not landed this pass -- GitHub: {msg[:160]} (decided afresh next pass)")
+        return 0
+    print(f"::error::#{n}: CLEAN Renovate automerge PR could not be landed, so it sits green and unmerged: "
+          f"{msg or 'GitHub answered without merged=true'}")
+    summary.append(f"#{n}: CLEAN Renovate PR NOT landed ({msg[:200] or 'no merged=true in the answer'})")
+    return 1
