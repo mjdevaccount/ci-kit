@@ -598,6 +598,16 @@
     // `held-deploy`, NOT `deploys-on-merge` (2026-11-14): the consumer's deploy policy recreates
     // none of these on its own (manual), so a merge recreates nothing; the bump needs a deliberate
     // recreate under a held deploy. The label must say what the merge DOES, not what a deploy might.
+    // GREEN MERGES (2026-11-28, operator: "isnt that the point of coded tests to check this shit?
+    // they are green"). The HOLD lives in the DEPLOY, not the merge: the consumer's deploy
+    // reconciler ships a merged held-deploy pin unattended through its drain-safe held deploy
+    // (edge-host runbooks/lib-held-infra.sh: hold -> drain -> deploy -> verify -> release, one
+    // stateful unit per slot, a failed drain defers, never forced) and pages a pin merged but not
+    // running for 12h (home-host HeldDeployOwedStuck). So `automerge` is true and `held-deploy`
+    // stays as an INFORMATIONAL label: nothing reads it. The lane picks what to deploy from its own
+    // unit list (edge-host scripts/infra_config.py HELD_UNITS) vs the running containers, so a NEW
+    // stateful image added here must ALSO be added there, or it merges on green and nothing ships it. MAJORS stay held: the default major rule
+    // (automerge false) is not overridden here -- this rule matches minor/patch/digest only.
     {
       matchPackageNames: [
         "langfuse/langfuse",
@@ -607,7 +617,7 @@
       ],
       matchUpdateTypes: ["minor", "patch", "digest"],
       groupName: "langfuse stack",
-      automerge: false,
+      automerge: true,
       labels: ["deps", "held-deploy", "stateful"],
     },
     // ---- images NOT on Docker Hub (ghcr.io first): no release timestamp, so no END to the age wait --
@@ -661,12 +671,20 @@
       versioning: "regex:^v?(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-ls(?<build>\\d+)$",
     },
     // Windmill server (compose) and workers (worker.Dockerfile FROM) MUST share one version, so
-    // one group spans both managers. Held for a held-deploy; its ghcr age wait is the rule above.
+    // one group spans both managers. Its ghcr age wait is the rule above. A minor/patch MERGES on
+    // green and deploys under the consumer's held deploy (langfuse stack rule above: the hold is
+    // in the deploy); a MAJOR does not -- Windmill documents some major migrations as manual, and
+    // the consumer's unattended lane refuses a windmill major too (a human upgrade).
     {
       matchPackageNames: ["ghcr.io/windmill-labs/windmill"],
       groupName: "windmill",
-      automerge: false,
+      automerge: true,
       labels: ["deps", "held-deploy"],
+    },
+    {
+      matchPackageNames: ["ghcr.io/windmill-labs/windmill"],
+      matchUpdateTypes: ["major"],
+      automerge: false,
     },
     // The rest of one consumer's compose images that its deploy policy does NOT let
     // a merge recreate (2026-11-14, checked service by service against that policy): caddy is
@@ -678,16 +696,21 @@
     // compose rules above decide automerge); the deploy policy's `manual` finding is the WARN that
     // names the recreate still owed. Majors keep their own PRs (groupName null above), relabelled.
     // database images (pg-batch, langfuse-pg/-db, pgai), windmill, langfuse and minio have rules.
+    // crawl4ai and valkey LEFT this rule (2026-11-28): the consumer's policy recreates both now,
+    // drained (crawl4ai 2026-11-15, valkey 2026-11-23, edge-host scripts/infra_config.py POLICY),
+    // so a merge DOES recreate them and "compose images" (deploys-on-merge) is their true label.
+    // caddy stays: its non-major bumps merge on green (the compose defaults) and the consumer's
+    // held deploy recreates it (langfuse stack rule above).
     {
       matchRepositories: ["mjdevaccount/trade-infra"],
       matchManagers: ["docker-compose"],
-      matchPackageNames: ["caddy", "unclecode/crawl4ai", "valkey/valkey"],
+      matchPackageNames: ["caddy"],
       labels: ["deps", "held-deploy"],
     },
     {
       matchRepositories: ["mjdevaccount/trade-infra"],
       matchManagers: ["docker-compose"],
-      matchPackageNames: ["caddy", "unclecode/crawl4ai", "valkey/valkey"],
+      matchPackageNames: ["caddy"],
       matchUpdateTypes: ["minor", "patch", "digest", "pin", "pinDigest"],
       groupName: "compose images (held-deploy)",
       groupSlug: "compose-images-held-deploy",
@@ -720,19 +743,20 @@
     // dashboard lists both langfuse-minio entries `[Updates: latest]` in no branch.
     // Cadence would block it anyway: 34 index builds 10-01..11-12, median gap 0.74 days.
     // The age gate is yank protection for an UNATTENDED merge, so it is REPLACED, not just lifted:
-    // no auto-merge (minio holds langfuse's event store, a data volume; a `latest` move can be a
-    // minio release, same reasoning as the litellm floating-tag rule), its own PR (in "compose
-    // images" it would stop that whole group auto-merging), opened in the weekend window and NOT
-    // re-pushed between windows, so the reviewed digest is the one that lands. A session merges it,
-    // then recreates under a held deploy: the consumer's deploy policy names neither
-    // langfuse-minio nor langfuse-minio-ilm (= manual), so the merge alone recreates nothing.
+    // its own PR (in "compose images" it would carry the held-deploy label into that group),
+    // opened in the weekend window and NOT re-pushed between windows, so the digest CI judged is
+    // the one that lands. Merges on green since 2026-11-28 (langfuse stack rule above: the hold is
+    // in the deploy): the consumer's held deploy recreates langfuse-minio and -minio-ilm under a
+    // drain, and only for the digest of an image it names (edge-host scripts/held_infra.py).
+    // Until then: no auto-merge (minio holds langfuse's event store, a data volume; a `latest`
+    // move can be a minio release, same reasoning as the litellm floating-tag rule).
     {
       matchDatasources: ["docker"],
       matchPackageNames: ["cgr.dev/chainguard/minio"],
       matchUpdateTypes: ["digest"],
       groupName: "chainguard minio",
       minimumReleaseAge: null,
-      automerge: false,
+      automerge: true,
       updateNotScheduled: false,
       labels: ["deps", "held-deploy", "floating-tag", "stateful"],
     },

@@ -27,11 +27,11 @@ HELD = {
     "redis": "langfuse-redis (unpolicied)",
     "cgr.dev/chainguard/minio": "langfuse-minio, langfuse-minio-ilm (unpolicied)",
     "caddy": "caddy (manual, recreate_ok=False)",
-    "unclecode/crawl4ai": "crawl4ai (unpolicied)",
-    "valkey/valkey": "valkey (unpolicied)",
 }
 # a merge DOES recreate these (deploy POLICY recreate): the label must stay deploys-on-merge
-RECREATED = ("grafana/loki", "prom/node-exporter", "searxng/searxng")
+# crawl4ai (2026-11-15) and valkey (2026-11-23) moved to drained `recreate` in that policy
+# (edge-host scripts/infra_config.py), so a merge recreates them: they are no longer held.
+RECREATED = ("grafana/loki", "prom/node-exporter", "searxng/searxng", "unclecode/crawl4ai", "valkey/valkey")
 
 
 def _matches(rule: dict, dep: dict) -> bool:
