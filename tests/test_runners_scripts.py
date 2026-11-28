@@ -139,7 +139,9 @@ def test_the_runner_tests_name_no_consumer():
 
 def test_the_shipped_label_exemption_is_still_needed():
     wf = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows"
-    text = "".join(p.read_text(encoding="utf-8") for p in sorted(wf.glob("*.yml")))
+    # code only: a usage example in a comment is not a workflow still shipping or reading the name
+    text = "".join(line for p in sorted(wf.glob("*.yml")) for line in p.read_text(encoding="utf-8").splitlines(True)
+                   if not line.lstrip().startswith("#"))
     for label in SHIPPED_LABELS:
         assert f'"{label}"' in text, f"no workflow ships {label} any more: drop it from SHIPPED_LABELS"
     for alias in SHIPPED_ALIASES[:2]:

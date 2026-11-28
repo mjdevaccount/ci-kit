@@ -81,6 +81,13 @@ def _assoc(name: str, values: dict) -> str:
 
 
 YOUNG_VARS = _block(r"^YOUNG_S=\d+\nYOUNG_JSON=.*?\nYOUNG_MAX=[^\n]*")
+CARRY_MAX = _block(r"^BLIND_CARRY_MAX=\d+$")
+
+
+def test_the_twins_constants_are_the_supervisors():
+    """A constant the twin holds is the one the shipped bash sets (a bash-side change fails here)."""
+    assert CARRY_MAX == f"BLIND_CARRY_MAX={tick.BLIND_CARRY_MAX}"
+    assert YOUNG_VARS.startswith(f"YOUNG_S={tick.YOUNG_S}\n")
 
 
 # ---- carry_head --------------------------------------------------------------------------------
@@ -95,7 +102,7 @@ def _carry_state(blind) -> list[dict]:
 
 def test_carry_head():
     cases = [(p, h, b, n) for p in ("", "a", "b") for h in ("", "a", "b") for b in BLINDS for n in (0, 9, 10, 11)]
-    body = "BLIND_CARRY_MAX=10\nE=$(mktemp)\n" + "".join(
+    body = f"{CARRY_MAX}\nE=$(mktemp)\n" + "".join(
         f'o=$(carry_head {_q(p)} {_q(h)} {_q(_carry_state(b))} {n} 2>"$E"); d=0; [ -s "$E" ] && d=1; echo "$o $d"\n'
         for p, h, b, n in cases)
     got = _run(body, "carry_head").splitlines()
@@ -163,6 +170,26 @@ def test_young_of(tmp_path):
                  str(tick.young_of(listing, table, ymax, NOW, waived, waived=True))]
     assert got == want
     assert want[:2] == ["400", "900"]  # a young charged 400; b's 1200 less its 300 working set, waived
+
+
+def test_young_of_splits_as_bash_read_does(tmp_path):
+    """Only spaces and tabs separate the fields; any other byte (a form feed, a no-break space, a CR --
+    a repo label is whatever started the container) is part of one. Fed through a FILE: a CR in the
+    script text itself would not survive to bash on every platform."""
+    cfg = tmp_path / "r.json"
+    cfg.write_text(json.dumps(RENDERS[0]), encoding="utf-8")
+    table, ymax = tick.young_table(RENDERS[0])
+    young = f"r-a-{NOW - 10}-x"
+    listings = [f"a\x0cq {young}", f"a {young}\xa0{300 * 1048576}", f"a\r {young}", f"\ta\t{young}\t{300 * 1048576}\t",
+                f"  a   {young}   {100 * 1048576}  x", f"a {young} {300 * 1048576}\r", f"a\v{young}"]
+    body = f"CONFIG={_q(cfg.as_posix())}\n{YOUNG_VARS}\ndate() {{ echo {NOW}; }}\ndeclare -A YWAIVE=()\n"
+    for k, listing in enumerate(listings):
+        f = tmp_path / f"l{k}"
+        f.write_bytes(listing.encode("utf-8"))
+        body += f"IFS= read -r -d '' l < {_q(f.as_posix())} || true; young_of \"$l\"\n"
+    got = _run(body, "isnum", "young_charge", "young_of").splitlines()
+    assert got == [str(tick.young_of(s, table, ymax, NOW)) for s in listings]
+    assert got[0] == str(ymax) and got[3] == "100"  # "a\fq" is no pool's name; tabs do separate
 
 
 # ---- refill_more / since_start / redecide -------------------------------------------------------
@@ -346,6 +373,7 @@ PROBES = [
                              _C.format("hits", "blob", "1e-3"), " " + _C.format("hits", "blob", 1), "junk", ""]) + "\n",
     "200 401\n" + _C.format("hits", "blob", 4) + "\n" + _C.format("hits", "blob", 5),
     "200 401\n" + _C.format("hits", "blob", "123456789012345678901") + "\n",
+    "200 401\0\n" + _C.format("hits", "b\0lob", 7) + "\n",
 ]
 
 

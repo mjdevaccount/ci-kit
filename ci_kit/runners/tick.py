@@ -44,6 +44,7 @@ _CODES = re.compile(r"([0-9]{3}) ([0-9]{3})")
 _COUNTER = re.compile(r'registry_proxy_(requests|hits|misses|pulled_bytes|pushed_bytes)_total'
                       r'\{type="(blob|manifest)"\} ([0-9]+(\.[0-9]+)?([eE][+]?[0-9]+)?)')
 _FRACTION = re.compile(r"\.[0-9]+Z$")
+_IFS = re.compile(r"[ \t]+")  # bash `read`'s default field split: spaces and tabs, nothing else
 
 
 def _alt(value, default):
@@ -120,11 +121,11 @@ def young_of(listing: str, table: Mapping, young_max: int, now: int, waived_name
     skip = set(waived_names)
     total = wtotal = 0
     for line in listing.split("\n"):
-        fields = line.split(None, 2)
-        if len(fields) < 2:
+        fields = _IFS.split(line.strip(" \t"), maxsplit=2)
+        if len(fields) < 2 or not fields[1]:
             continue
         repo, name = fields[0], fields[1]
-        ws = fields[2].strip() if len(fields) > 2 else ""
+        ws = fields[2].rstrip(" \t") if len(fields) > 2 else ""
         epoch = name.rsplit("-", 1)[0].rsplit("-", 1)[-1]
         if _EPOCH.fullmatch(epoch) is None or now - int(epoch) >= young_s:
             continue
@@ -228,10 +229,11 @@ def secure_violations(containers: Iterable[Mapping], net: str) -> list[str]:
 
 def registry_probe_lines(text: str, prefix: str) -> list[str]:
     """The probe's output (line 1 "<cache code> <upstream code>", then registry_proxy_* counters) ->
-    samples. Only newline-TERMINATED lines are read (bash `read`); a line 1 that is not two 3-digit
-    codes publishes nothing; a counter line that is not exactly a known counter is dropped. Upstream
-    reachable = 200 or 401 (anonymous /v2/ asks for a token)."""
-    lines = text.split("\n")[:-1]
+    samples. Only newline-TERMINATED lines are read, and a NUL byte is dropped (both bash `read`); a
+    line 1 that is not two 3-digit codes publishes nothing; a counter line that is not exactly a known
+    counter is dropped. Upstream reachable = 200 or 401 (anonymous /v2/ asks for a token). A counter
+    past a double's range prints as the host's awk prints infinity ("inf", "+inf"): out of contract."""
+    lines = text.replace("\0", "").split("\n")[:-1]
     m = _CODES.fullmatch(lines[0]) if lines else None
     if m is None:
         return []
