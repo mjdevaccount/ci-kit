@@ -312,3 +312,16 @@ def test_the_supervisor_publishes_what_scripts_sha256_computes(tmp_path):
     (tmp_path / "runs.sh").write_bytes(scripts()["runs.sh"])
     (tmp_path / "zz.sh").write_text("#\n", encoding="utf-8")
     assert impl() != scripts_sha256()
+    (tmp_path / "zz.sh").unlink()
+    assert impl() == scripts_sha256()
+    # a HIDDEN stray is a file in the directory too: it moves the hash (dotglob)
+    (tmp_path / ".stray").write_text("#\n", encoding="utf-8")
+    assert impl() not in (scripts_sha256(), "unknown")
+    (tmp_path / ".stray").unlink()
+    # PARTLY unhashable (sha256sum prints the readable files' sums, fails on the entry it cannot read,
+    # exits non-zero): "unknown", never a hash of the readable part. A subdirectory, not a mode-000
+    # file, because root reads a mode-000 file.
+    (tmp_path / "sub").mkdir()
+    assert impl() == "unknown"
+    (tmp_path / "sub").rmdir()
+    assert impl() == scripts_sha256()

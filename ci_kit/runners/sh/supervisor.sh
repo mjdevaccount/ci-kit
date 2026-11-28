@@ -453,9 +453,13 @@ emit "${MP}runner_config_info{source_sha256=\"${CONFIG_SHA}\"} 1"
 # package's files and nothing else -- so an alert can hold it to the sha the kit pins (a `renders`
 # template naming ${scripts_sha256}) and an install can require it (`ci-runners --verify-prom
 # --scripts-sha256`). A directory it cannot hash reads "unknown", which matches no pin: the alert
-# fires rather than the series going missing.
+# fires rather than the series going missing. ALL of it or "unknown", never a partial hash: the
+# per-file sums are held until sha256sum has read every entry (a subdirectory or an unreadable file
+# makes it exit non-zero AFTER printing the others' sums -- piped straight on, that published a
+# hash of the readable part). dotglob: a hidden stray file is a file in the directory too.
 IMPL_SHA="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" 2>/dev/null && export LC_ALL=C \
-  && shopt -s nullglob && f=(*) && [ "${#f[@]}" -gt 0 ] && sha256sum -t -- "${f[@]}" | sha256sum | cut -c1-12)"
+  && shopt -s nullglob dotglob && f=(*) && [ "${#f[@]}" -gt 0 ] && sums="$(sha256sum -t -- "${f[@]}")" \
+  && printf '%s\n' "${sums}" | sha256sum | cut -c1-12)"
 [[ "${IMPL_SHA}" =~ ^[0-9a-f]{12}$ ]] || IMPL_SHA=unknown
 emit "${MP}runner_impl_info{scripts_sha256=\"${IMPL_SHA}\"} 1"
 emit "${MP}runner_max_total ${MAX_TOTAL}"
